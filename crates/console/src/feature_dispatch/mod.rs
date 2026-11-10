@@ -11,23 +11,34 @@ use sim::{ClientAction, ClientId};
 use crate::{ConsoleCommand, ConsoleDispatch, ConsoleLine, ConsoleSettings, ConsoleState};
 
 mod capture;
+mod clip_inputs;
 mod echo;
+mod film;
 mod hitvol;
+mod input_program;
 mod process;
 mod replay;
 mod session;
+mod sound;
 mod state_dump;
 mod ui;
 
 pub(crate) use capture::route_capture_commands;
 pub(crate) use echo::ConsoleEcho;
+pub(crate) use film::drive_film_render;
 pub(crate) use hitvol::route_hitvol_commands;
+pub(crate) use input_program::route_input_program;
 pub(crate) use process::{exit_process, request_exit};
 pub(crate) use replay::route_replay_commands;
 pub(crate) use session::route_session_commands;
+pub(crate) use sound::route_sound_commands;
 pub(crate) use state_dump::route_state_dump_commands;
 pub(crate) use ui::route_ui_commands;
 
+#[expect(
+    clippy::type_complexity,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 pub(crate) fn route_debug_feature_commands(
     mut events: MessageReader<ConsoleCommand>,
     mut output: (
@@ -41,16 +52,15 @@ pub(crate) fn route_debug_feature_commands(
         ResMut<BotTpQueue>,
         ResMut<BotFireQueue>,
     ),
-    (weapons, mut inbox, mut give_seq, roster): (
+    (weapons, mut inbox, mut roster): (
         Option<Res<assets::PreparedWeapons>>,
         Option<ResMut<ClientActionInbox>>,
-        ResMut<net::ActionRequestIds>,
-        Option<Res<BotRoster>>,
+        Option<ResMut<BotRoster>>,
     ),
-    (mut hurt, mut pending_splash, authority): (
+    (mut hurt, mut pending_splash, mut authority): (
         ResMut<PendingViewHurt>,
         ResMut<PendingSplash>,
-        Option<Res<net::AuthorityWorld>>,
+        Option<ResMut<net::AuthorityWorld>>,
     ),
 ) {
     let (console, settings, line) = &mut output;
@@ -74,9 +84,28 @@ pub(crate) fn route_debug_feature_commands(
                     bot_add.push(n);
                     echo(format!("bot: queued add {n}"), console, line);
                 }
+                Ok(BotVerb::Kick(id)) => {
+                    if let (Some(roster), Some(authority)) = (roster.as_mut(), authority.as_mut())
+                        && roster.is_bot(id)
+                    {
+                        roster.bots.retain(|bot| bot.id != id);
+                        authority.0.retire_client(id);
+                        echo(format!("bot: disconnected {}", id.0), console, line);
+                    } else {
+                        echo("bot kick: no such local bot".into(), console, line);
+                    }
+                }
                 Ok(BotVerb::Dummy(n)) => {
                     bot_add.push_dummy(n);
                     echo(format!("bot: queued dummy {n}"), console, line);
+                }
+                Ok(BotVerb::DummySide(n, side)) => {
+                    bot_add.push_dummy_side(n, side);
+                    echo(
+                        format!("bot: queued {n} dummies on {side:?} side"),
+                        console,
+                        line,
+                    );
                 }
                 Ok(BotVerb::Hold(on)) => {
                     bot_hold.0 = on;
@@ -124,11 +153,9 @@ pub(crate) fn route_debug_feature_commands(
                         Ok((weapon_id, model))
                     }) {
                         Ok((weapon_id, model)) => {
-                            let request_id = give_seq.allocate();
                             if let Err(error) = inbox.push(
                                 id,
                                 ClientAction::GiveWeapon {
-                                    request_id,
                                     weapon: weapon_id,
                                     model,
                                 },
@@ -138,7 +165,7 @@ pub(crate) fn route_debug_feature_commands(
                             }
                             echo(
                                 format!(
-                                    "bot give: queued {} id={weapon_id} on {} request_id={request_id}",
+                                    "bot give: queued {} id={weapon_id} on {}",
                                     weapons.registry().configuration_label(weapon_id),
                                     id.0
                                 ),
@@ -191,12 +218,12 @@ pub(crate) fn resume_lifecycle_commands(
     mut echo: ConsoleEcho,
 ) {
     if let Some(completed) = transition.take_completed() {
-        match completed.result {
+        match completed {
             ::session::SessionSwapResult::Failed { zone, error } => {
                 dispatch.release();
                 echo.write(format!("map: `{zone}` failed: {error}"));
             }
-            _ => dispatch.paused = false,
+            _ => dispatch.session_completed(),
         }
     }
 }
@@ -213,13 +240,24 @@ pub fn register_feature_commands(registry: &mut crate::ConsoleRegistry, maps: &[
         );
     }
     for (name, usage) in [
+        (
+            "input_program",
+            "input_program load <path> | dump <path> | status — exclusive authority command tape (cheats; ownership until map reload)",
+        ),
         ("help", "help — list registered commands"),
+        (
+            "sound",
+            "sound [family:]alias [count] — play a match alias through normal admission (up to 8192 requests)",
+        ),
         ("say", "say <message> — public chat"),
         ("say_team", "say_team <message> — team chat"),
         ("chatmodepublic", "chatmodepublic — open public chat"),
         ("chatmodeteam", "chatmodeteam — open team chat"),
         ("clear", "clear — clear console scrollback"),
-        ("screenshot", "screenshot [name] — capture the backbuffer"),
+        (
+            "screenshot",
+            "screenshot [name [now]] — capture the backbuffer; `now` does not wait for the match to load",
+        ),
         (
             "record",
             "record [name] — start a demo under iw4l-artifacts",
@@ -235,7 +273,11 @@ pub fn register_feature_commands(registry: &mut crate::ConsoleRegistry, maps: &[
         ),
         (
             "map_restart",
-            "map_restart — a new match on the current map, on what the last one prepared",
+            "map_restart — a new match on the current map; the map is loaded again, the common set is kept",
+        ),
+        (
+            "checkpoint_load",
+            "checkpoint_load — reload the local campaign's last committed memory checkpoint",
         ),
         (
             "disconnect",
@@ -246,6 +288,10 @@ pub fn register_feature_commands(registry: &mut crate::ConsoleRegistry, maps: &[
             "demo <name> — tear down the current occupancy, then play iw4l-artifacts/demos/<name>.iw4ldemo or clips/<name>/clip.iw4ldemo",
         ),
         ("play", "play <name> — launcher alias of demo"),
+        (
+            "render",
+            "render <demo|clip> [fps] — play a demo or clip on a fixed clock and encode it to iw4l-artifacts/renders/<name>.mp4 with ffmpeg (default 60 fps), then quit",
+        ),
         (
             "exit",
             "exit — quit the process, abandoning unfinished screenshots",
@@ -294,7 +340,7 @@ pub fn register_feature_commands(registry: &mut crate::ConsoleRegistry, maps: &[
         ),
         (
             "bot",
-            "bot add [N] | dummy [N] | hold [on|off] | give <id> <weapon> [att...] [camo=<name>] | fire [all|<id>] | tp all|<id> above <h> | tp all|<id> <x> <y> <z>",
+            "bot add [N] | kick <id> | dummy [N] [enemy|friendly] | hold [on|off] | give <id> <weapon> [att...] [camo=<name>] | fire [all|<id>] | tp all|<id> above <h> | tp all|<id> <x> <y> <z>",
         ),
         (
             "menu",
@@ -316,12 +362,14 @@ pub fn register_feature_commands(registry: &mut crate::ConsoleRegistry, maps: &[
     }
 }
 
-pub(crate) const BOT_USAGE: &str = "usage: bot add [N] | dummy [N] | hold [on|off] | give <id> <weapon> [att...] [camo=<name>] | fire [all|<id>] | tp all|<id> above <h> | tp all|<id> <x> <y> <z> [yaw] [pitch]";
+pub(crate) const BOT_USAGE: &str = "usage: bot add [N] | kick <id> | dummy [N] [enemy|friendly] | hold [on|off] | give <id> <weapon> [att...] [camo=<name>] | fire [all|<id>] | tp all|<id> above <h> | tp all|<id> <x> <y> <z> [yaw] [pitch]";
 
 #[derive(Debug, PartialEq)]
 pub(crate) enum BotVerb {
     Add(u32),
+    Kick(ClientId),
     Dummy(u32),
+    DummySide(u32, bots::BotSide),
     Hold(bool),
     Give {
         id: ClientId,
@@ -335,6 +383,10 @@ pub(crate) enum BotVerb {
 pub(crate) fn parse_bot_args(args: &[String]) -> Result<BotVerb, String> {
     let sub = args.first().map(String::as_str).unwrap_or("");
     match sub {
+        "kick" if args.len() == 2 => args[1]
+            .parse::<u32>()
+            .map(|id| BotVerb::Kick(ClientId(id)))
+            .map_err(|_| "usage: bot kick <id>".into()),
         "add" => {
             let n = args
                 .get(1)
@@ -344,8 +396,8 @@ pub(crate) fn parse_bot_args(args: &[String]) -> Result<BotVerb, String> {
             Ok(BotVerb::Add(n))
         }
         "dummy" => {
-            if args.len() > 2 {
-                return Err("usage: bot dummy [N]".into());
+            if args.len() > 3 {
+                return Err("usage: bot dummy [N] [enemy|friendly]".into());
             }
             let n = args
                 .get(1)
@@ -356,7 +408,12 @@ pub(crate) fn parse_bot_args(args: &[String]) -> Result<BotVerb, String> {
             if !(1..=16).contains(&n) {
                 return Err("bot dummy: count must be 1..16".into());
             }
-            Ok(BotVerb::Dummy(n))
+            match args.get(2).map(String::as_str) {
+                None => Ok(BotVerb::Dummy(n)),
+                Some("enemy") => Ok(BotVerb::DummySide(n, bots::BotSide::Enemy)),
+                Some("friendly") => Ok(BotVerb::DummySide(n, bots::BotSide::Friendly)),
+                _ => Err("usage: bot dummy [N] [enemy|friendly]".into()),
+            }
         }
         "hold" => match args.get(1).map(String::as_str) {
             None | Some("on") | Some("1") => Ok(BotVerb::Hold(true)),
@@ -405,7 +462,7 @@ fn parse_bot_tp(args: &[String]) -> Result<BotVerb, String> {
         let height = rest
             .get(1)
             .ok_or_else(|| "usage: bot tp all|<id> above <h>".to_owned())
-            .and_then(parse_finite)?;
+            .and_then(|text| parse_finite(text))?;
         return Ok(BotVerb::Tp(BotTpRequest {
             target,
             where_: BotTpWhere::Above { height },
@@ -419,15 +476,15 @@ fn parse_bot_tp(args: &[String]) -> Result<BotVerb, String> {
         parse_finite(&rest[1])?,
         parse_finite(&rest[2])?,
     ];
-    let yaw = rest.get(3).map(parse_finite).transpose()?;
-    let pitch = rest.get(4).map(parse_finite).transpose()?;
+    let yaw = rest.get(3).map(|text| parse_finite(text)).transpose()?;
+    let pitch = rest.get(4).map(|text| parse_finite(text)).transpose()?;
     Ok(BotVerb::Tp(BotTpRequest {
         target,
         where_: BotTpWhere::Absolute { origin, yaw, pitch },
     }))
 }
 
-fn parse_finite(s: &String) -> Result<f32, String> {
+fn parse_finite(s: &str) -> Result<f32, String> {
     s.parse::<f32>()
         .ok()
         .filter(|v| v.is_finite())

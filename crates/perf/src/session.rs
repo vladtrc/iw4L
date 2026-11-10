@@ -1,10 +1,11 @@
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use super::session_native::RecordingSession;
 use perfetto_sdk::heap_buffer::HeapBuffer;
 use perfetto_sdk::pb_msg::{PbMsg, PbMsgWriter};
 use perfetto_sdk::producer::{Backends, Producer, ProducerInitArgsBuilder};
@@ -13,7 +14,6 @@ use perfetto_sdk::protos::config::trace_config::{
     TraceConfig, TraceConfigBufferConfig, TraceConfigDataSource,
 };
 use perfetto_sdk::protos::config::track_event::track_event_config::TrackEventConfig;
-use perfetto_sdk::tracing_session::TracingSession;
 use perfetto_sdk::track_event::TrackEvent;
 
 const ENV: &str = "IW4L_PERF";
@@ -29,7 +29,7 @@ pub struct RunMetadata {
 }
 
 struct SessionState {
-    session: TracingSession,
+    session: RecordingSession,
     dir: PathBuf,
     metadata: RunMetadata,
     command_line: Vec<String>,
@@ -37,9 +37,8 @@ struct SessionState {
     started_at: Instant,
     started_unix_ms: u128,
     flushed: bool,
+    captured: Option<Result<Vec<u8>, String>>,
 }
-
-unsafe impl Send for SessionState {}
 
 static STATE: Mutex<Option<SessionState>> = Mutex::new(None);
 static ATEXIT_ARMED: AtomicBool = AtomicBool::new(false);
@@ -65,12 +64,9 @@ pub fn start(metadata: RunMetadata) -> Result<Option<PathBuf>, String> {
             .build(),
     );
     TrackEvent::init();
-    crate::vocabulary::register_categories();
+    crate::native::register_categories();
 
-    let mut session = TracingSession::in_process()
-        .map_err(|error| format!("TracingSession::in_process: {error:?}"))?;
-    session.setup(&trace_config());
-    session.start_blocking();
+    let session = RecordingSession::start(&trace_config())?;
 
     *guard = Some(SessionState {
         session,
@@ -81,6 +77,7 @@ pub fn start(metadata: RunMetadata) -> Result<Option<PathBuf>, String> {
         started_at: Instant::now(),
         started_unix_ms: unix_ms(),
         flushed: false,
+        captured: None,
     });
     drop(guard);
     arm_atexit();
@@ -99,29 +96,27 @@ pub fn flush() -> Result<Option<PathBuf>, String> {
     if state.flushed {
         return Ok(Some(state.dir.clone()));
     }
-    state.flushed = true;
-    state.session.flush_blocking(Duration::from_secs(5));
-    state.session.stop_blocking();
-    let bytes = Arc::new(Mutex::new(Vec::new()));
-    let sink = Arc::clone(&bytes);
-    state.session.read_trace_blocking(move |chunk, _has_more| {
-        sink.lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .extend_from_slice(chunk);
-    });
-    let bytes = Arc::try_unwrap(bytes)
-        .map_err(|_| "trace sink still shared".to_owned())?
-        .into_inner()
-        .unwrap_or_else(|poison| poison.into_inner());
+    crate::frames::close();
+    if state.captured.is_none() {
+        state.captured = Some(state.session.capture(Duration::from_secs(5)));
+    }
+    let bytes = state
+        .captured
+        .as_ref()
+        .expect("trace capture attempted before write")
+        .as_ref()
+        .map_err(Clone::clone)?;
     let trace_path = state.dir.join("trace.pftrace");
-    std::fs::write(&trace_path, &bytes)
+    std::fs::write(&trace_path, bytes)
         .map_err(|error| format!("write {}: {error}", trace_path.display()))?;
     write_manifest(state)?;
+    state.flushed = true;
     announce(&format!(
         "perf: wrote {} ({} bytes)",
         trace_path.display(),
         bytes.len()
     ));
+    state.captured = None;
     Ok(Some(state.dir.clone()))
 }
 

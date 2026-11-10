@@ -177,6 +177,7 @@ impl DObj {
 
             let attach_to = match attach {
                 None => None,
+                Some(a) if a.tag.is_empty() => None,
                 Some(a) => {
                     let slot: &ModelSlot =
                         slots.get(a.parent_model).ok_or_else(|| DObjError::Model {
@@ -250,7 +251,7 @@ impl DObj {
                 };
 
                 bones.push(Bone {
-                    name: model.bone_names.get(bone).cloned().unwrap_or_default(),
+                    name: model.bone_names.get(bone).cloned().unwrap_or(String::new()),
                     model: index,
                     parent,
                     bind_rotation,
@@ -269,16 +270,25 @@ impl DObj {
         }
 
         let mut duplicates = Vec::new();
-        let mut first_by_name = std::collections::HashMap::<&str, usize>::new();
-        for (dest, bone) in bones.iter().enumerate() {
-            if bone.name.is_empty() {
+        for (index, (_, attach)) in models.iter().enumerate().skip(1) {
+            if attach.as_ref().is_some_and(|a| !a.tag.is_empty()) {
                 continue;
             }
-            let source = *first_by_name.entry(&bone.name).or_insert(dest);
-            // Models are appended in contiguous blocks. The first occurrence
-            // is therefore also the first occurrence in any earlier model.
-            if bones[source].model != bone.model && bone.parent != Some(source) {
-                duplicates.push((dest, source));
+            let slot = &slots[index];
+            for dest in slot.base..slot.base + slot.bone_count {
+                let name = &bones[dest].name;
+                if name.is_empty() {
+                    continue;
+                }
+                let source = slots[..index].iter().rev().find_map(|earlier| {
+                    bones[earlier.base..earlier.base + earlier.bone_count]
+                        .iter()
+                        .position(|bone| bone.name == *name)
+                        .map(|bone| earlier.base + bone)
+                });
+                if let Some(source) = source {
+                    duplicates.push((dest, source));
+                }
             }
         }
 
@@ -392,15 +402,17 @@ impl DObj {
         (locals, controlled)
     }
 
-    pub fn apply_duplicates(&self, locals: &mut [Local]) {
-        for &(dest, source) in &self.duplicates {
-            locals[dest] = locals[source];
-        }
-    }
-
     pub fn compose(&self, locals: &[Local], placement: Mat4) -> Vec<Mat4> {
         let mut world: Vec<Mat4> = Vec::with_capacity(self.bones.len());
+        let mut duplicates = self.duplicates.iter().peekable();
         for (index, bone) in self.bones.iter().enumerate() {
+            if let Some(&&(dest, source)) = duplicates.peek()
+                && dest == index
+            {
+                world.push(world[source]);
+                duplicates.next();
+                continue;
+            }
             let scale = if bone.no_scale {
                 1.0
             } else {
@@ -452,7 +464,6 @@ impl DObj {
     ) -> Vec<Mat4> {
         let mut locals = self.calc_anim(anims, requested);
         controller(self, requested, &mut locals);
-        self.apply_duplicates(&mut locals);
         self.compose(&locals, placement)
     }
 

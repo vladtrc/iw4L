@@ -13,7 +13,7 @@ use weapon_iw4::{WEAPTYPE_GRENADE, WeaponState};
 
 const GRENADE_LINGER_MS: i64 = 30_000; // threads on the grenade keep running after it explodes
 
-pub(crate) fn is_changing_weapon(state: i32) -> bool {
+pub fn is_changing_weapon(state: i32) -> bool {
     matches!(
         WeaponState::from_i32(state),
         Ok(WeaponState::Raising
@@ -124,6 +124,20 @@ pub(crate) fn launch(
 }
 
 pub(crate) fn register(registry: &mut NativeRegistry) {
+    registry.register(Function, "getweaponclipmodel", |world, _, args| {
+        let name = string(args, 0)?;
+        let frame = FrameWorld::from_world(world);
+        let model = match frame.weapon_index_by_script_name(&name) {
+            Some(weapon) => frame.weapon_clip_model(weapon),
+            None => {
+                if !name.is_empty() && !name.eq_ignore_ascii_case("none") {
+                    diag::warn!(Sim, "GetWeaponClipModel: unknown weapon {name}");
+                }
+                ""
+            }
+        };
+        Ok(Value::string(model))
+    });
     registry.register(Function, "getmissileowner", |world, _, args| {
         if args.len() != 1 {
             return Err("GetMissileOwner requires one missile argument".into());
@@ -228,10 +242,6 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
 }
 
 pub(crate) fn sync_engine_events(world: &mut World) {
-    let request = world.resource::<crate::step::StepRequest>();
-    if !request.reason.advances_authority_world() {
-        return;
-    }
     let notes = std::mem::take(&mut FrameWorld::from_world(world).weapon_notes);
     let runtime = world.resource::<RoundScript>();
     if runtime.program.is_none() || runtime.fault.is_some() || !runtime.started {
@@ -306,12 +316,7 @@ fn notify_weapon_changes(world: &mut World) {
 }
 
 pub(crate) fn publish_projectile_launches(world: &mut World) {
-    if world
-        .resource::<crate::step::StepRequest>()
-        .reason
-        .advances_authority_world()
-        && world.resource::<RoundScript>().started
-    {
+    if world.resource::<RoundScript>().started {
         adopt_fired(world);
     }
 }
@@ -385,7 +390,7 @@ fn settle_items(world: &mut World) {
             })
             .collect()
     };
-    let pickups = FrameWorld::from_world(world).item_pickups_mut().clone();
+    let pickups = FrameWorld::from_world(world).unpublished_pickups();
     for pickup in pickups {
         let Some((object, _, classname)) = items
             .iter()
@@ -411,6 +416,7 @@ fn settle_items(world: &mut World) {
             raise(world, receiver.clone(), "trigger", vec![player, swapped]);
         }
     }
+    FrameWorld::from_world(world).mark_pickups_raised();
     // Retire only after every pickup is raised: a death between two triggers on one
     // item ends the script thread still waiting on it.
     let retired = world.resource_mut::<RoundScript>().take_retired_items();
@@ -475,7 +481,7 @@ fn settle_projectiles(world: &mut World, notes: &[WeaponNote]) {
                     "angles",
                     Value::Vector(entity_iw4::evaluate_trajectory(&projectile.apos, now)),
                 );
-                drop(runtime);
+
                 if stuck {
                     raise(world, receiver, "missile_stuck", vec![Value::Undefined]);
                 }
@@ -492,7 +498,7 @@ fn settle_projectiles(world: &mut World, notes: &[WeaponNote]) {
                 if let Some(presence) = entity.presence.take() {
                     runtime.retired_presence.push((presence, true));
                 }
-                drop(runtime);
+
                 if let Some(origin) = detonated {
                     raise(
                         world,
@@ -532,3 +538,4 @@ fn settle_projectiles(world: &mut World, notes: &[WeaponNote]) {
         }
     }
 }
+pub(crate) mod items;

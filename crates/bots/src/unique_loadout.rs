@@ -38,7 +38,7 @@ pub struct UniqueWeapon {
     pub group: UniqueGroup,
 }
 
-pub const UNIQUE_WEAPONS: &[UniqueWeapon] = &[
+pub const REFERENCE_BOT_WEAPONS: &[UniqueWeapon] = &[
     UniqueWeapon {
         key: "iw4:weapon/masada_mp",
         group: UniqueGroup::Assault,
@@ -139,190 +139,6 @@ pub const UNIQUE_WEAPONS: &[UniqueWeapon] = &[
         key: "iw4:weapon/javelin_mp",
         group: UniqueGroup::Projectile,
     },
-    UniqueWeapon {
-        key: "t5:weapon/galil_mp",
-        group: UniqueGroup::Assault,
-    },
-    UniqueWeapon {
-        key: "t5:weapon/commando_mp",
-        group: UniqueGroup::Assault,
-    },
-    UniqueWeapon {
-        key: "t5:weapon/g11_mp",
-        group: UniqueGroup::Assault,
-    },
-    UniqueWeapon {
-        key: "t5:weapon/spectre_mp",
-        group: UniqueGroup::Smg,
-    },
-    UniqueWeapon {
-        key: "t5:weapon/mpl_mp",
-        group: UniqueGroup::Smg,
-    },
-    UniqueWeapon {
-        key: "t5:weapon/pm63_mp",
-        group: UniqueGroup::Smg,
-    },
-    UniqueWeapon {
-        key: "t5:weapon/hk21_mp",
-        group: UniqueGroup::Lmg,
-    },
-    UniqueWeapon {
-        key: "t5:weapon/stoner63_mp",
-        group: UniqueGroup::Lmg,
-    },
-    UniqueWeapon {
-        key: "t5:weapon/rpk_mp",
-        group: UniqueGroup::Lmg,
-    },
-    UniqueWeapon {
-        key: "t5:weapon/l96a1_mp",
-        group: UniqueGroup::Sniper,
-    },
-    UniqueWeapon {
-        key: "t5:weapon/psg1_mp",
-        group: UniqueGroup::Sniper,
-    },
-    UniqueWeapon {
-        key: "t5:weapon/dragunov_mp",
-        group: UniqueGroup::Sniper,
-    },
-    UniqueWeapon {
-        key: "t5:weapon/spas_mp",
-        group: UniqueGroup::Cqb,
-    },
-    UniqueWeapon {
-        key: "t5:weapon/hs10_mp",
-        group: UniqueGroup::Cqb,
-    },
-    UniqueWeapon {
-        key: "t5:weapon/ithaca_mp",
-        group: UniqueGroup::Cqb,
-    },
-    UniqueWeapon {
-        key: "t5:weapon/python_mp",
-        group: UniqueGroup::Pistol,
-    },
-    UniqueWeapon {
-        key: "t5:weapon/cz75_mp",
-        group: UniqueGroup::Pistol,
-    },
-    UniqueWeapon {
-        key: "t5:weapon/makarov_mp",
-        group: UniqueGroup::Pistol,
-    },
-    UniqueWeapon {
-        key: "t5:weapon/knife_ballistic_mp",
-        group: UniqueGroup::Special,
-    },
-    UniqueWeapon {
-        key: "t5:weapon/crossbow_mp",
-        group: UniqueGroup::Special,
-    },
-    UniqueWeapon {
-        key: "t5:weapon/china_lake_mp",
-        group: UniqueGroup::Projectile,
-    },
-    UniqueWeapon {
-        key: "t5:weapon/m72_law_mp",
-        group: UniqueGroup::Projectile,
-    },
-    UniqueWeapon {
-        key: "t5:weapon/strela3_mp",
-        group: UniqueGroup::Projectile,
-    },
-    UniqueWeapon {
-        key: "iw5:weapon/iw5_type95_mp",
-        group: UniqueGroup::Assault,
-    },
-    UniqueWeapon {
-        key: "iw5:weapon/iw5_fad_mp",
-        group: UniqueGroup::Assault,
-    },
-    UniqueWeapon {
-        key: "iw5:weapon/iw5_mk14_mp",
-        group: UniqueGroup::Assault,
-    },
-    UniqueWeapon {
-        key: "iw5:weapon/iw5_mp7_mp",
-        group: UniqueGroup::Smg,
-    },
-    UniqueWeapon {
-        key: "iw5:weapon/iw5_pp90m1_mp",
-        group: UniqueGroup::Smg,
-    },
-    UniqueWeapon {
-        key: "iw5:weapon/iw5_mk46_mp",
-        group: UniqueGroup::Lmg,
-    },
-    UniqueWeapon {
-        key: "iw5:weapon/iw5_pecheneg_mp",
-        group: UniqueGroup::Lmg,
-    },
-    UniqueWeapon {
-        key: "iw5:weapon/iw5_mg36_mp",
-        group: UniqueGroup::Lmg,
-    },
-    UniqueWeapon {
-        key: "iw5:weapon/iw5_msr_mp",
-        group: UniqueGroup::Sniper,
-    },
-    UniqueWeapon {
-        key: "iw5:weapon/iw5_as50_mp",
-        group: UniqueGroup::Sniper,
-    },
-    UniqueWeapon {
-        key: "iw5:weapon/iw5_rsass_mp",
-        group: UniqueGroup::Sniper,
-    },
-    UniqueWeapon {
-        key: "iw5:weapon/iw5_ksg_mp",
-        group: UniqueGroup::Shotgun,
-    },
-    UniqueWeapon {
-        key: "iw5:weapon/iw5_usas12_mp",
-        group: UniqueGroup::Shotgun,
-    },
-    UniqueWeapon {
-        key: "iw5:weapon/iw5_1887_mp",
-        group: UniqueGroup::Shotgun,
-    },
-    UniqueWeapon {
-        key: "iw5:weapon/iw5_p99_mp",
-        group: UniqueGroup::Pistol,
-    },
-    UniqueWeapon {
-        key: "iw5:weapon/iw5_fnfiveseven_mp",
-        group: UniqueGroup::Pistol,
-    },
-    UniqueWeapon {
-        key: "iw5:weapon/iw5_mp412_mp",
-        group: UniqueGroup::Pistol,
-    },
-    UniqueWeapon {
-        key: "iw5:weapon/iw5_fmg9_mp",
-        group: UniqueGroup::MachinePistol,
-    },
-    UniqueWeapon {
-        key: "iw5:weapon/iw5_g18_mp",
-        group: UniqueGroup::MachinePistol,
-    },
-    UniqueWeapon {
-        key: "iw5:weapon/iw5_skorpion_mp",
-        group: UniqueGroup::MachinePistol,
-    },
-    UniqueWeapon {
-        key: "iw5:weapon/iw5_xm25_mp",
-        group: UniqueGroup::Projectile,
-    },
-    UniqueWeapon {
-        key: "iw5:weapon/iw5_smaw_mp",
-        group: UniqueGroup::Projectile,
-    },
-    UniqueWeapon {
-        key: "iw5:weapon/m320_mp",
-        group: UniqueGroup::Projectile,
-    },
 ];
 
 #[must_use]
@@ -343,4 +159,47 @@ pub fn family_stem(name: &str) -> String {
         "1887" => "model1887".to_owned(),
         _ => stem.to_owned(),
     }
+}
+
+/// Installed weapon pools, visited in family-token order.
+#[derive(Default)]
+pub struct BotWeaponFamilies {
+    families: std::collections::BTreeMap<asset_core::FamilyId, &'static [UniqueWeapon]>,
+}
+
+impl BotWeaponFamilies {
+    pub fn register(
+        &mut self,
+        id: asset_core::FamilyId,
+        weapons: &'static [UniqueWeapon],
+    ) -> Result<(), &'static str> {
+        if self.families.contains_key(&id) {
+            return Err("duplicate bot weapon family");
+        }
+        for weapon in weapons {
+            if weapon.key.split_once(':').map(|(owner, _)| owner) != Some(id.as_str()) {
+                return Err("bot weapon belongs to another family");
+            }
+        }
+        self.families.insert(id, weapons);
+        Ok(())
+    }
+    pub fn iter(&self) -> impl Iterator<Item = &'static UniqueWeapon> + '_ {
+        self.families.values().flat_map(|rows| rows.iter())
+    }
+}
+
+static BOT_WEAPONS: std::sync::OnceLock<BotWeaponFamilies> = std::sync::OnceLock::new();
+
+pub fn install_bot_weapon_families(families: BotWeaponFamilies) -> Result<(), &'static str> {
+    BOT_WEAPONS
+        .set(families)
+        .map_err(|_| "bot weapon families already installed")
+}
+
+pub fn bot_weapons() -> impl Iterator<Item = &'static UniqueWeapon> {
+    BOT_WEAPONS
+        .get()
+        .expect("builder must install bot weapons")
+        .iter()
 }

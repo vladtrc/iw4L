@@ -6,6 +6,7 @@ pub struct ScriptSources {
     tables: BTreeMap<String, ScriptTable>,
     schemas: BTreeMap<String, std::sync::Arc<structured_data_iw4::DefinitionSet>>,
     entities: Option<String>,
+    path_nodes: Option<std::sync::Arc<[asset_core::PathNode]>>,
     configs: BTreeMap<String, String>,
 }
 
@@ -33,6 +34,18 @@ fn normalize(name: &str) -> String {
 }
 
 impl ScriptSources {
+    pub(crate) fn set_path_nodes(&mut self, nodes: Vec<asset_core::PathNode>) {
+        self.path_nodes = Some(nodes.into());
+    }
+    pub fn path_nodes(&self) -> std::sync::Arc<[asset_core::PathNode]> {
+        self.path_nodes.clone().unwrap_or_default()
+    }
+
+    pub fn text(&self, module: &str) -> Option<&str> {
+        let bytes = self.sources.get(module)?.bytes.as_ref().ok()?;
+        std::str::from_utf8(bytes).ok()
+    }
+
     pub fn read(&self, module: &str) -> Result<Vec<u8>, String> {
         self.sources
             .get(module)
@@ -66,6 +79,16 @@ impl ScriptSources {
     }
 
     pub(crate) fn fx_references(&self) -> BTreeMap<String, String> {
+        self.call_string_references(b"loadfx")
+    }
+
+    pub(crate) fn script_viewmodels(&self) -> BTreeSet<String> {
+        self.call_string_references(b"setviewmodel")
+            .into_keys()
+            .collect()
+    }
+
+    fn call_string_references(&self, function: &[u8]) -> BTreeMap<String, String> {
         let mut references = BTreeMap::new();
         for (module, source) in &self.sources {
             let Ok(bytes) = &source.bytes else {
@@ -96,7 +119,7 @@ impl ScriptSources {
                     {
                         at += 1;
                     }
-                    if !bytes[start..at].eq_ignore_ascii_case(b"loadfx") {
+                    if !bytes[start..at].eq_ignore_ascii_case(function) {
                         continue;
                     }
                     let mut value = at;
@@ -133,11 +156,7 @@ impl ScriptSources {
         &self.schemas
     }
 
-    pub(crate) fn capture_schema(
-        &mut self,
-        name: String,
-        schema: structured_data_iw4::DefinitionSet,
-    ) {
+    pub fn capture_schema(&mut self, name: String, schema: structured_data_iw4::DefinitionSet) {
         self.schemas
             .insert(normalize(&name), std::sync::Arc::new(schema));
     }
@@ -161,9 +180,13 @@ impl ScriptSources {
         })
     }
 
-    pub(crate) fn capture(&mut self, name: &str, data: &[u8], compressed: bool) {
+    pub fn capture(&mut self, name: &str, data: &[u8], compressed: bool) {
         let name = normalize(name);
-        if name.ends_with(".cfg") || name.ends_with(".shock") || name == "radiant/keys.txt" {
+        if name.ends_with(".cfg")
+            || name.ends_with(".shock")
+            || (name.starts_with("animtrees/") && name.ends_with(".atr"))
+            || name == "radiant/keys.txt"
+        {
             if let Some(text) = asset_world::decode_rawfile_text(data, compressed) {
                 self.configs.insert(name, text);
             }
@@ -192,7 +215,7 @@ impl ScriptSources {
         );
     }
 
-    pub(crate) fn capture_table(&mut self, table: &asset_game::CapturedStringTable) {
+    pub fn capture_table(&mut self, table: &asset_game::CapturedStringTable) {
         self.tables.insert(
             normalize(&table.name),
             ScriptTable {
@@ -228,7 +251,7 @@ impl ScriptSources {
         true
     }
 
-    pub(crate) fn insert_source(&mut self, module: &str, source: String) {
+    pub fn insert_source(&mut self, module: &str, source: String) {
         self.sources.insert(
             normalize(module),
             ScriptSource {
@@ -238,7 +261,7 @@ impl ScriptSources {
         );
     }
 
-    pub(crate) fn set_entities(&mut self, entities: String) {
+    pub fn set_entities(&mut self, entities: String) {
         self.entities = Some(entities);
     }
 
@@ -247,6 +270,9 @@ impl ScriptSources {
         self.tables.extend(other.tables);
         self.schemas.extend(other.schemas);
         self.configs.extend(other.configs);
+        if other.path_nodes.is_some() {
+            self.path_nodes = other.path_nodes;
+        }
         if other.entities.is_some() {
             self.entities = other.entities;
         }

@@ -53,6 +53,7 @@ pub struct CapturedCombatInput {
     pub reload_empty_time_ms: i32,
     pub empty_reload: crate::reload::EmptyReloadPolicy,
     pub clip_size: i32,
+    pub clip_only: bool,
     pub start_ammo: i32,
     pub max_ammo: i32,
     pub ammo_index: i32,
@@ -193,6 +194,7 @@ pub struct WeaponCombatFacts {
     pub reload_empty_time_ms: i32,
     pub empty_reload: crate::reload::EmptyReloadPolicy,
     pub clip_size: i32,
+    pub clip_only: bool,
     pub start_ammo: i32,
     pub max_ammo: i32,
 
@@ -337,6 +339,7 @@ impl WeaponCombatFacts {
             reload_empty_time_ms: 0,
             empty_reload: crate::reload::EmptyReloadPolicy::Authored,
             clip_size: 0,
+            clip_only: false,
             start_ammo: 0,
             max_ammo: 0,
             ammo_index: 0,
@@ -455,6 +458,7 @@ impl WeaponCombatFacts {
             reload_empty_time_ms: input.reload_empty_time_ms,
             empty_reload: input.empty_reload,
             clip_size: input.clip_size,
+            clip_only: input.clip_only,
             start_ammo: input.start_ammo,
             max_ammo: input.max_ammo,
             ammo_index: input.ammo_index,
@@ -782,7 +786,7 @@ pub fn weapon_time_adjust(
     facts: &WeaponCombatFacts,
     cmd: &WeaponCmd,
 ) -> i32 {
-    let reload_family = matches!(hand.weaponstate, 0x8 | 0x9 | 0xA | 0xB | 0xC);
+    let reload_family = matches!(hand.weaponstate, 0x8..=0xC);
     if !(reload_family && perk_fastreload_eligible(cmd.perks0, facts.inherits_perks)) {
         return cmd.msec;
     }
@@ -1066,7 +1070,10 @@ fn finish_weapon_tick(
         Ok(WeaponState::Dropping)
         | Ok(WeaponState::DroppingQuick)
         | Ok(WeaponState::DroppingAltswitch) => {
-            if hand.weapon_time <= 0 {
+            // Decay captures delayed-action expiry before change processing.
+            // A reload pulse can therefore dispatch a newly entered putaway
+            // in this command, despite its freshly armed drop timer.
+            if delayed_action || (hand.weapon_time <= 0 && hand.weapon_delay <= 0) {
                 if crate::weapon_change::traversal_forces_holster(cmd) {
                     crate::weapon_change::finish_putaway_while_holstered(hand);
                     event = Some(WeaponTickEvent::DropFinished);
@@ -1474,26 +1481,7 @@ pub fn weapon_hands(
     cmd.melee_charge.pm_flags = cmd.pm_flags;
     cmd.melee_charge.pm_type = cmd.pm_type;
     cmd.melee_charge.e_flags = cmd.e_flags;
-    let melee_buttons = |buttons: u32| {
-        if facts.fire_melees && buttons & BUTTON_ATTACK != 0 {
-            buttons | crate::BUTTON_MELEE
-        } else {
-            buttons
-        }
-    };
-    cmd.melee_started = crate::melee::weapon_try_melee(
-        hands,
-        &facts.melee_facts(),
-        melee_buttons(cmd.buttons),
-        melee_buttons(cmd.old_buttons),
-        cmd.f_weapon_pos_frac,
-        cmd.last_weapon_hand,
-        &mut cmd.melee_charge,
-        cmd.melee_charge_yaw,
-        cmd.melee_charge_dist,
-        cmd.is_in_air,
-        cmd.player_melee_range,
-    );
+    cmd.melee_started = cmd.try_melee(hands, &facts.melee_facts(), facts.fire_melees);
     cmd.pm_flags = cmd.melee_charge.pm_flags;
     let mut prepared = [PreparedWeaponTick::Complete(None); 2];
     for i in 0..n {
@@ -1641,9 +1629,7 @@ fn check_stunned(
     facts: &WeaponCombatFacts,
     cmd: &WeaponCmd,
 ) -> Option<WeaponState> {
-    let Some(primary) = hands.first() else {
-        return None;
-    };
+    let primary = hands.first()?;
     if cmd.cmd_weapon == 0 || matches!(primary.weaponstate, 1..=5 | 16..=21 | 29..=30) {
         return None;
     }

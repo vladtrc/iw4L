@@ -48,7 +48,7 @@ fn describe(value: &Value) -> &'static str {
     }
 }
 
-pub(crate) fn entity_id(world: &World, value: &Value) -> Result<u64, String> {
+pub fn entity_id(world: &World, value: &Value) -> Result<u64, String> {
     match world.resource::<RoundScript>().entity(value) {
         Some((id, e)) if e.kind != EntityKind::HudElem => Ok(id),
         Some(_) => Err("hud element is not an entity".into()),
@@ -73,7 +73,7 @@ fn vector_field(world: &mut World, id: u64, name: &str) -> [f32; 3] {
     }
 }
 
-fn origin_of(world: &mut World, value: &Value) -> Result<[f32; 3], String> {
+pub(crate) fn origin_of(world: &mut World, value: &Value) -> Result<[f32; 3], String> {
     match value {
         Value::Object(id) if world.resource::<RoundScript>().live(id) => {
             Ok(vector_field(world, *id, "origin"))
@@ -176,7 +176,7 @@ fn surface_name(collider: crate::bullet_collision::ColliderId) -> &'static str {
         ColliderId::World { surface_flags, .. }
         | ColliderId::EntityDObjBone { surface_flags, .. }
         | ColliderId::EntityLinkedBrush { surface_flags, .. } => surface_flags,
-        ColliderId::Player { .. } => return "flesh",
+        ColliderId::Player { .. } | ColliderId::EntityBody { .. } => return "flesh",
     };
     weapon_iw4::SURFACE_TYPE_NAMES
         .get(trace_iw4::surface_type_from_flags(flags) as usize)
@@ -193,7 +193,9 @@ pub(crate) fn collider_entity(
     let found = match collider {
         ColliderId::World { .. } => None,
         ColliderId::Player { client, .. } => runtime.players.get(&client.0).map(|s| s.object),
-        ColliderId::EntityDObjBone { owner, .. } | ColliderId::EntityLinkedBrush { owner, .. } => {
+        ColliderId::EntityDObjBone { owner, .. }
+        | ColliderId::EntityLinkedBrush { owner, .. }
+        | ColliderId::EntityBody { owner } => {
             let model = owner.script_model();
             runtime
                 .entities
@@ -335,7 +337,7 @@ fn array_values(world: &World, value: &Value) -> Result<Vec<Value>, String> {
 }
 
 fn seconds_ms(seconds: f32) -> Result<i64, String> {
-    if !(seconds > 0.0) {
+    if seconds <= 0.0 || seconds.is_nan() {
         return Err("total time must be positive".into());
     }
     Ok((seconds * 1000.0).round().max(1.0) as i64)
@@ -587,11 +589,7 @@ fn team_clients(world: &mut World, team: &str, except: Option<u32>) -> Vec<crate
         .collect()
 }
 
-pub(crate) fn play_sound_at(
-    world: &mut World,
-    origin: [f32; 3],
-    alias: &str,
-) -> Result<(), String> {
+pub fn play_sound_at(world: &mut World, origin: [f32; 3], alias: &str) -> Result<(), String> {
     if crate::frame::FrameWorld::from_world(world).script_sound_is_looping(alias)? {
         return Err("cannot play a looping alias as a one-shot sound".into());
     }
@@ -709,7 +707,9 @@ fn weapon_facts(
     let index = frame
         .weapon_index_by_script_name(&name)
         .ok_or_else(|| format!("unknown weapon '{name}'"))?;
-    Ok(frame.weapon_combat_row(index).unwrap_or_default())
+    Ok(frame
+        .weapon_combat_row(index)
+        .unwrap_or_else(weapon_iw4::WeaponCombatFacts::default))
 }
 
 const WEAPON_TYPES: &[&str] = &["bullet", "grenade", "projectile", "riotshield"];
@@ -800,7 +800,14 @@ fn register_entities(registry: &mut NativeRegistry) {
         let ids = classname_prefix(world, ids, "info_vehicle_node");
         objects(world, ids)
     });
-    registry.register(Function, "isspawner", |_, _, _| Ok(Value::Int(0)));
+    registry.register(Function, "isspawner", |world, _, args| {
+        let value = arg(args, 0)?;
+        let runtime = world.resource::<RoundScript>();
+        let spawner = runtime.entity(value).is_some_and(|(id, entity)| {
+            runtime.spawners.contains_key(&id) || entity.kind == EntityKind::VehicleSpawner
+        });
+        Ok(Value::Int(i32::from(spawner)))
+    });
     registry.register(Function, "getteamplayersalive", |world, _, args| {
         let team = team_key(args)?;
         Ok(Value::Int(super::super::players::alive_on_team(
@@ -834,7 +841,7 @@ fn register_entities(registry: &mut NativeRegistry) {
         Ok(Value::Int(i32::from(
             piece >= 0
                 && stage >= 0
-                && crate::t5_destructible::stage_matches(
+                && crate::model_behaviors::stage_matches(
                     &crate::frame::FrameWorld::from_world(world),
                     crate::AuthorityModelOwner::ScriptModel(target),
                     piece as usize,
@@ -967,7 +974,13 @@ fn register_placement(registry: &mut NativeRegistry) {
         let id = entity_id(world, receiver)?;
         let tag = string(args, 0)?;
         let origin = vector_field(world, id, "origin");
-        let offset = super::super::presence::tag_offset(world, id, &tag).unwrap_or(ZERO);
+        let offset = match super::super::presence::tag_lookup(world, id, &tag) {
+            Some(Some(offset)) => offset,
+            Some(None) if !tag.eq_ignore_ascii_case("tag_origin") => {
+                return Err(format!("tag '{tag}' does not exist on entity"));
+            }
+            _ => ZERO,
+        };
         let axis = math_iw4::angles_to_axis(vector_field(world, id, "angles"));
         Ok(Value::Vector(std::array::from_fn(|i| {
             origin[i] + axis[0][i] * offset[0] + axis[1][i] * offset[1] + axis[2][i] * offset[2]
@@ -1020,6 +1033,9 @@ fn register_placement(registry: &mut NativeRegistry) {
                     .map_or(ZERO, |ps| ps.velocity),
             ));
         }
+        if let Some(actor) = world.resource::<RoundScript>().actors.get(&id) {
+            return Ok(Value::Vector(actor.motion.velocity));
+        }
         let now = now_ms(world);
         Ok(Value::Vector(
             world.resource::<Mechanics>().velocity(id, now),
@@ -1033,7 +1049,48 @@ fn register_placement(registry: &mut NativeRegistry) {
     });
 }
 
+fn set_aim_assist(world: &mut World, receiver: &Value, enabled: bool) -> Result<Value, String> {
+    let id = entity_id(world, receiver)?;
+    let mut runtime = runtime(world);
+    if runtime.profile != asset_core::RuntimeProfile::Campaign {
+        return Err("aim assist: requires campaign entity contract".into());
+    }
+    let entity = runtime.entities.get_mut(&id).unwrap();
+    if !matches!(
+        entity.classname.as_ref(),
+        "script_model" | "script_brushmodel"
+    ) {
+        return Err("aim assist: entity is not a script mover".into());
+    }
+    entity.aim_assist = enabled;
+    Ok(Value::Undefined)
+}
+
 fn register_appearance(registry: &mut NativeRegistry) {
+    registry.register(
+        Namespace::Method,
+        "enableaimassist",
+        |world, receiver, _| set_aim_assist(world, receiver, true),
+    );
+    registry.register(
+        Namespace::Method,
+        "disableaimassist",
+        |world, receiver, _| set_aim_assist(world, receiver, false),
+    );
+    registry.register(
+        Namespace::Method,
+        "startusingheroonlylighting",
+        |world, receiver, _| {
+            with_entity(world, receiver, |entity| entity.hero_only_lighting = true)
+        },
+    );
+    registry.register(
+        Namespace::Method,
+        "stopusingheroonlylighting",
+        |world, receiver, _| {
+            with_entity(world, receiver, |entity| entity.hero_only_lighting = false)
+        },
+    );
     use Namespace::Method;
 
     registry.register(Method, "setmodel", |world, receiver, args| {
@@ -1064,7 +1121,7 @@ fn register_appearance(registry: &mut NativeRegistry) {
             let entity = runtime.entities.get_mut(&id).unwrap();
             entity.brush = Some(brush);
             let presence = entity.presence;
-            drop(runtime);
+
             if let Some(presence) = presence
                 && let Some(row) =
                     crate::frame::FrameWorld::from_world(world).collision_owner_mut(presence)
@@ -1441,7 +1498,7 @@ fn register_attachments(registry: &mut NativeRegistry) {
 
     registry.register(Method, "attach", |world, receiver, args| {
         let model: Arc<str> = string(args, 0)?.into();
-        let tag: Arc<str> = optional(args, 1, string)?.unwrap_or_default().into();
+        let tag: Arc<str> = optional(args, 1, string)?.unwrap_or(String::new()).into();
         let id = entity_id(world, receiver)?;
         let mut runtime = runtime(world);
         let entity = runtime.entities.get_mut(&id).unwrap();
@@ -1545,18 +1602,12 @@ fn register_sound_and_fx(registry: &mut NativeRegistry) {
     registry.register(Method, "stoploopsound", |world, receiver, _| {
         with_entity(world, receiver, |e| e.loop_sound = None)
     });
-    for name in ["playsound", "playsoundasmaster"] {
-        registry.register(Method, name, |world, receiver, args| {
-            entity_id(world, receiver)?;
-            let alias = string(args, 0)?;
-            let origin = origin_of(world, receiver)?;
-            play_sound_at(world, origin, &alias)?;
-            if args.len() != 1 {
-                return Err("expected one sound alias argument".into());
-            }
-            Ok(Value::Undefined)
-        });
-    }
+    registry.register(Method, "playsound", |world, receiver, args| {
+        super::super::audio::waits::play(world, receiver, args, false)
+    });
+    registry.register(Method, "playsoundasmaster", |world, receiver, args| {
+        super::super::audio::waits::play(world, receiver, args, true)
+    });
     registry.register(Method, "playsoundtoplayer", |world, receiver, args| {
         let alias = string(args, 0)?;
         let client = super::player::player(world, arg(args, 1)?)?;
@@ -1825,7 +1876,7 @@ fn register_match(registry: &mut NativeRegistry) {
             return Err("exitlevel already called".into());
         }
         state.exit_level = true;
-        drop(state);
+
         signal(world, EXIT_LEVEL)
     });
     registry.register(Function, "map_restart", |world, _, args| {
@@ -2094,6 +2145,15 @@ fn register_weapon_facts(registry: &mut NativeRegistry) {
                 .is_some_and(|facts| facts.timed_detonation)
                 .into(),
         ))
+    });
+    registry.register(Function, "weaponhasthermalscope", |world, _, args| {
+        let name = string(args, 0)?;
+        let frame = crate::frame::FrameWorld::from_world(world);
+        let weapon = frame
+            .weapon_index_by_script_name(&name)
+            .filter(|&weapon| weapon != 0)
+            .ok_or_else(|| format!("unknown weapon '{name}'"))?;
+        Ok(Value::Int(frame.weapon_has_thermal_scope(weapon).into()))
     });
     registry.register(Function, "weaponclass", |world, _, args| {
         Ok(enum_name(

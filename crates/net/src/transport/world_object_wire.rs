@@ -23,16 +23,17 @@ pub(super) fn encode_sync(
     let content_changed;
     if full {
         content_changed = true;
-        out.put_u8(4);
+        out.put_u8(6);
         encode_world_object_full(&mut out, current);
     } else if world_object_delta(baseline, current).is_empty()
         && baseline.destructible_loop_sounds == current.destructible_loop_sounds
+        && baseline.portal_blocked_exits == current.portal_blocked_exits
     {
         content_changed = false;
         out.put_u8(0);
     } else {
         content_changed = true;
-        out.put_u8(3);
+        out.put_u8(5);
         encode_world_object_delta(&mut out, baseline, current);
     }
     EncodedWorldObjects {
@@ -112,6 +113,7 @@ fn encode_world_object_full(out: &mut WireWriter, snap: &WorldObjectSnapshot) {
         encode_glass_piece_snapshot(out, *row);
     }
     encode_destructible_loop_sounds(out, &snap.destructible_loop_sounds);
+    encode_portal_exits(out, &snap.portal_blocked_exits);
 }
 
 fn encode_world_object_delta(
@@ -132,6 +134,31 @@ fn encode_world_object_delta(
         out.put_u32(*id);
     }
     encode_destructible_loop_sounds(out, &current.destructible_loop_sounds);
+    encode_portal_exits(out, &current.portal_blocked_exits);
+}
+
+fn encode_portal_exits(out: &mut WireWriter, exits: &[[bool; 2]]) {
+    assert!(
+        exits.len() <= 255,
+        "portal availability exceeds render view identity range"
+    );
+    out.put_u8(exits.len() as u8);
+    for [a, b] in exits {
+        out.put_u8(u8::from(*a) | (u8::from(*b) << 1));
+    }
+}
+
+fn decode_portal_exits(input: &mut WireReader<'_>) -> Result<Vec<[bool; 2]>, WireError> {
+    let count = input.get_u8()?;
+    (0..count)
+        .map(|_| {
+            let bits = input.get_u8()?;
+            if bits & !3 != 0 {
+                return Err(WireError::Malformed("invalid portal exit bits"));
+            }
+            Ok([bits & 1 != 0, bits & 2 != 0])
+        })
+        .collect()
 }
 
 fn encode_destructible_loop_sounds(out: &mut WireWriter, rows: &[DestructibleLoopSound]) {
@@ -184,10 +211,12 @@ pub(super) enum WorldObjectChange {
     Delta {
         glass: PairDelta<u32, GlassPieceSnapshot>,
         loops: Vec<DestructibleLoopSound>,
+        portal_exits: Vec<[bool; 2]>,
     },
     Full {
         glass: Vec<(u32, GlassPieceSnapshot)>,
         loops: Vec<DestructibleLoopSound>,
+        portal_exits: Vec<[bool; 2]>,
     },
 }
 
@@ -205,7 +234,7 @@ fn decode_world_object_sync(input: &mut WireReader<'_>) -> Result<WorldObjectUpd
     let tag = input.get_u8()?;
     let change = match tag {
         0 => WorldObjectChange::Unchanged,
-        1 | 3 => {
+        1 | 3 | 5 => {
             let glass_changed = input.get_u16()? as usize;
             let mut glass = PairDelta::<u32, GlassPieceSnapshot>::default();
             for _ in 0..glass_changed {
@@ -222,9 +251,14 @@ fn decode_world_object_sync(input: &mut WireReader<'_>) -> Result<WorldObjectUpd
             WorldObjectChange::Delta {
                 glass,
                 loops: destructible_loop_sounds,
+                portal_exits: if tag >= 5 {
+                    decode_portal_exits(input)?
+                } else {
+                    Vec::new()
+                },
             }
         }
-        2 | 4 => {
+        2 | 4 | 6 => {
             let glass_count = input.get_u16()? as usize;
             let mut glass_pieces = Vec::with_capacity(glass_count.min(4096));
             for _ in 0..glass_count {
@@ -234,6 +268,11 @@ fn decode_world_object_sync(input: &mut WireReader<'_>) -> Result<WorldObjectUpd
             WorldObjectChange::Full {
                 glass: glass_pieces,
                 loops: destructible_loop_sounds,
+                portal_exits: if tag >= 5 {
+                    decode_portal_exits(input)?
+                } else {
+                    Vec::new()
+                },
             }
         }
         _ => return Err(WireError::Malformed("unknown world object sync tag")),

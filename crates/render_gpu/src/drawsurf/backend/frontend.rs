@@ -1,6 +1,6 @@
-use render_backend::{PackDraw, PackKind, pack_sun_shadow_frontend as pack_lists};
+use render_backend::{PackDraw, pack_sun_shadow_frontend as pack_lists};
 use render_frame::PackedFrontendLists;
-use render_frame::{RetainedDrawItem, RetainedDrawKind};
+use render_frame::RetainedDrawItem;
 
 pub fn pack_sun_shadow_frontend<'a>(
     draws: impl IntoIterator<Item = &'a RetainedDrawItem>,
@@ -12,7 +12,7 @@ pub fn pack_sun_shadow_frontend<'a>(
     scratch: &mut Vec<PackDraw>,
 ) -> PackedFrontendLists {
     scratch.clear();
-    scratch.extend(draws.into_iter().map(pack_draw));
+    scratch.extend(draws.into_iter().map(PackDraw::from));
     pack_lists(
         scratch,
         world_run_surfs,
@@ -21,62 +21,4 @@ pub fn pack_sun_shadow_frontend<'a>(
         smodel_ranges,
         xmodel_ranges,
     )
-}
-
-fn pack_draw(draw: &RetainedDrawItem) -> PackDraw {
-    let kind = match draw.kind {
-        RetainedDrawKind::World {
-            surf, run, run_off, ..
-        } => PackKind::World { surf, run, run_off },
-        RetainedDrawKind::Smodel {
-            surface,
-            lighting_handle,
-            stream: Some(lighting_iw4::SmodelSurfPath::Rigid),
-            ..
-        } => PackKind::SmodelRigid {
-            surface,
-            lighting_handle,
-        },
-        RetainedDrawKind::Smodel {
-            surface,
-            lighting_handle,
-            stream: Some(lighting_iw4::SmodelSurfPath::Skinned),
-            ..
-        } => PackKind::SmodelSkinned {
-            surface,
-            lighting_handle,
-        },
-        RetainedDrawKind::Smodel {
-            lighting_handle,
-            stream: Some(lighting_iw4::SmodelSurfPath::Pretess),
-            pretess: Some(dest),
-            ..
-        } => PackKind::SmodelPretess {
-            lighting_handle,
-            dest,
-        },
-        RetainedDrawKind::Smodel {
-            lighting_handle,
-            stream: Some(lighting_iw4::SmodelSurfPath::Cached),
-            pretess: Some(dest),
-            ..
-        } => PackKind::SmodelCached {
-            lighting_handle,
-            dest,
-        },
-        RetainedDrawKind::XModel {
-            surface,
-            lighting_handle,
-            ..
-        } => PackKind::XModel {
-            surface,
-            lighting_handle,
-        },
-        _ => PackKind::Skip,
-    };
-    PackDraw {
-        key: draw.key,
-        material_rank: draw.material_rank,
-        kind,
-    }
 }

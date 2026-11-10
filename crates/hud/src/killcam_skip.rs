@@ -5,24 +5,19 @@ use assets::PreparedLocalizedStrings;
 use bevy::prelude::*;
 use frame::ViewSubject;
 use hud_iw4::{ExprError, ExprHost, Operand};
-use net::{ClientActionInput, LocalPresentClient, PresentedSnapshot};
+use net::ClientActionInput;
 
 use crate::chrome::{ChromeAssets, execute_chrome_menu};
 use crate::draw2d::{Draw2dList, Draw2dOp, tessellate_fonts};
 use crate::font_overlay;
-use crate::gaps::{GapCause, HudPresentationGaps};
 use crate::gpu_list::{HudTessPass, TessJob};
-use crate::images::HudImages;
+use crate::images::HudImageLoader;
 use crate::scorebar::milliseconds;
 
 #[derive(Component)]
 pub(crate) struct KillcamSkipRaster;
 pub(crate) fn spawn_killcam_skip(root: &mut ChildSpawnerCommands) {
     font_overlay::spawn_overlay(root, KillcamSkipRaster);
-}
-
-fn hide(pass: &mut HudTessPass) {
-    pass.killcam_skip = TessJob::Hide;
 }
 
 struct KillcamExprHost<'a> {
@@ -100,96 +95,123 @@ impl ExprHost for KillcamExprHost<'_> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct KillcamSkipRenderer<'w> {
+    catalog: Option<Res<'w, MenuCatalog>>,
+    hud_images: HudImageLoader<'w>,
+    pass: ResMut<'w, HudTessPass>,
+    exprs: ResMut<'w, crate::expr_cache::MenuExprCache>,
+}
+
+impl KillcamSkipRenderer<'_> {
+    fn hide(&mut self) {
+        self.pass.killcam_skip = TessJob::Hide;
+    }
+
+    fn render(
+        &mut self,
+        surface: &crate::surface::Hud2dSurface,
+        meta: &sim::SnapshotMeta,
+        client: sim::ClientId,
+        strings: Option<Res<PreparedLocalizedStrings>>,
+        game_ended: i32,
+        scores_open: i32,
+    ) {
+        let Some(catalog) = self.catalog.as_ref() else {
+            diag::warn_once!(Ui, "MenuCatalog is not loaded; Font_s cannot be walked");
+            self.hide();
+            return;
+        };
+        let Some(menu) = catalog.get("killcam_fullscreen") else {
+            self.hide();
+            return;
+        };
+        let host = KillcamExprHost {
+            menu: Some(menu),
+            ms: milliseconds() as i32,
+            seated: 1,
+            game_ended,
+            scores_open,
+            dvars: meta.script_dvars(client),
+            kind: meta.kind,
+            localize: strings.as_ref().map(|s| &s.0),
+        };
+        let frame = execute_chrome_menu(
+            menu,
+            &host,
+            surface,
+            ChromeAssets {
+                catalog: Some(catalog),
+                localize: strings.as_ref().map(|s| &s.0),
+            },
+            &mut self.exprs,
+        );
+        let mut fonts: HashMap<String, &asset_game::FontDef> = HashMap::new();
+        for cmd in &frame.list.cmds {
+            let _ = self
+                .hud_images
+                .load(crate::images::HUD_CHROME_NAMESPACE, &cmd.material);
+            if let Draw2dOp::TextRun { font, .. } = &cmd.op
+                && !fonts.contains_key(font)
+                && let Some(def) = catalog.font(font)
+            {
+                fonts.insert(font.clone(), def);
+            }
+        }
+        let list = Draw2dList {
+            cmds: frame.list.cmds,
+        };
+        let (quads, _) = tessellate_fonts(&list, &fonts);
+        if quads.is_empty() {
+            self.hide();
+            return;
+        }
+        self.pass.killcam_skip = TessJob::Quads(quads);
+    }
+}
+
 pub(crate) fn update_killcam_skip(
     surface: Res<crate::surface::Hud2dSurface>,
-    catalog: Option<Res<MenuCatalog>>,
     strings: Option<Res<PreparedLocalizedStrings>>,
     view: Option<Res<ViewSubject>>,
-    local: Res<LocalPresentClient>,
-    presented: Res<PresentedSnapshot>,
+    presentation: net::LocalPresentation,
     actions: Option<Res<ClientActionInput>>,
-    mut hud_images: ResMut<HudImages>,
-    mut images: ResMut<Assets<Image>>,
-    mut gaps: ResMut<HudPresentationGaps>,
-    mut pass: ResMut<HudTessPass>,
-    mut exprs: ResMut<crate::expr_cache::MenuExprCache>,
+    mut renderer: KillcamSkipRenderer,
 ) {
     let seated = view.as_deref().is_some_and(|v| v.in_killcam());
     if !seated {
-        hide(&mut pass);
+        renderer.hide();
         return;
     }
-    let Some(snapshot) = presented.snapshot() else {
-        hide(&mut pass);
+    let Some(snapshot) = presentation.snapshot() else {
+        renderer.hide();
         return;
     };
     let Some(hud) = snapshot
         .meta
-        .for_client(local.0)
+        .for_client(presentation.client_id())
         .and_then(|meta| meta.killcam_hud)
     else {
-        hide(&mut pass);
+        renderer.hide();
         return;
     };
     let game_ended = i32::from(hud.final_kill);
 
-    let scores_open = i32::from(actions.as_ref().is_some_and(|a| a.client.kb.scores.active));
+    let scores_open = i32::from(
+        crate::scoreboard::recorded_hold(snapshot, presentation.client_id())
+            || actions.as_ref().is_some_and(|a| a.client.kb.scores.active),
+    );
 
     if !surface.is_ready() {
-        hide(&mut pass);
+        renderer.hide();
         return;
     }
-    let Some(catalog) = catalog.as_ref() else {
-        gaps.raise(GapCause::NoFontCatalog);
-        hide(&mut pass);
-        return;
-    };
-    let Some(menu) = catalog.get("killcam_fullscreen") else {
-        hide(&mut pass);
-        return;
-    };
-    let host = KillcamExprHost {
-        menu: Some(menu),
-        ms: milliseconds() as i32,
-        seated: 1,
+    renderer.render(
+        &surface,
+        &snapshot.meta,
+        presentation.client_id(),
+        strings,
         game_ended,
         scores_open,
-        dvars: snapshot.meta.script_dvars(local.0),
-        kind: snapshot.meta.kind,
-        localize: strings.as_ref().map(|s| &s.0),
-    };
-    let frame = execute_chrome_menu(
-        menu,
-        &host,
-        &surface,
-        ChromeAssets {
-            catalog: Some(catalog),
-            localize: strings.as_ref().map(|s| &s.0),
-        },
-        &mut exprs,
     );
-    let mut fonts: HashMap<String, &asset_game::FontDef> = HashMap::new();
-    for cmd in &frame.list.cmds {
-        let _ = hud_images.get(
-            crate::images::HUD_CHROME_NAMESPACE,
-            &cmd.material,
-            &mut images,
-        );
-        if let Draw2dOp::TextRun { font, .. } = &cmd.op
-            && !fonts.contains_key(font)
-            && let Some(def) = catalog.font(font)
-        {
-            fonts.insert(font.clone(), def);
-        }
-    }
-    let list = Draw2dList {
-        cmds: frame.list.cmds,
-    };
-    let (quads, _) = tessellate_fonts(&list, &fonts);
-    if quads.is_empty() {
-        hide(&mut pass);
-        return;
-    }
-    pass.killcam_skip = TessJob::Quads(quads);
 }

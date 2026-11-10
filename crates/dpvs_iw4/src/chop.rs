@@ -1,5 +1,56 @@
 const EQUAL_EPSILON: f32 = 0.001;
 
+pub(crate) fn clip_winding_to_plane(
+    winding: &[[f32; 3]],
+    plane: [f32; 4],
+    out: &mut [[f32; 3]; 128],
+) -> Option<usize> {
+    let mut count = 0;
+    let mut push = |point| {
+        let slot = out.get_mut(count)?;
+        *slot = point;
+        count += 1;
+        Some(())
+    };
+    for i in 0..winding.len() {
+        let a = winding[i];
+        let b = winding[(i + 1) % winding.len()];
+        let da = plane_dot(plane, a) + 0.01;
+        let db = plane_dot(plane, b) + 0.01;
+        if da >= 0.0 {
+            push(a)?;
+        }
+        if (da >= 0.0) != (db >= 0.0) {
+            let t = da / (da - db);
+            push(core::array::from_fn(|axis| {
+                a[axis] + (b[axis] - a[axis]) * t
+            }))?;
+        }
+    }
+    Some(count)
+}
+
+pub fn winding_survives_planes(winding: &[[f32; 3]], planes: &[[f32; 4]]) -> bool {
+    if winding.len() > 128 {
+        return true;
+    }
+    let mut a = [[0.0; 3]; 128];
+    let mut b = [[0.0; 3]; 128];
+    let mut count = winding.len();
+    a[..count].copy_from_slice(winding);
+    for &plane in planes {
+        let Some(n) = clip_winding_to_plane(&a[..count], plane, &mut b) else {
+            return true;
+        };
+        if n < 3 {
+            return false;
+        }
+        count = n;
+        core::mem::swap(&mut a, &mut b);
+    }
+    count >= 3
+}
+
 #[inline]
 fn plane_dot(plane: [f32; 4], v: [f32; 3]) -> f32 {
     plane[0] * v[0] + plane[1] * v[1] + plane[2] * v[2] + plane[3]

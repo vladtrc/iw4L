@@ -42,8 +42,8 @@ pub fn is_ads_allowed(
         return false;
     }
     match ws {
-        0x1 | 0x2 | 0x3 | 0x4 | 0x5 => return false,
-        0xd | 0xe | 0xf => return false,
+        0x1..=0x5 => return false,
+        0xd..=0xf => return false,
         0x1d | 0x1e => return false,
         _ => {}
     }

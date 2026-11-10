@@ -10,7 +10,7 @@ use hud_iw4::{
     draw_player_weapon_low_ammo_warning, fade_color, get_perk_slot_index, is_flashbanged,
     low_ammo_warning_color_pair, low_ammo_warning_pulse_frac, perk_code_key, vec4_lerp,
 };
-use net::{FrameClock, LocalPresentClient, PresentedSnapshot, WeaponSelect};
+use net::{FrameClock, PresentedSnapshot, WeaponSelect};
 use playerstate_iw4::{ENTITYNUM_NONE, PM_TYPE_DEAD, PlayerState};
 use weapon_iw4::{get_viewmodel_weapon_index, player_weapons_find_slot};
 
@@ -22,11 +22,9 @@ use crate::ammo::{
 };
 use crate::chrome::{
     ChromeAssets, ChromeFrame, ChromeGapKind, ChromeMenuAnim, MenuVisOnError, OwnerDrawArgs,
-    OwnerDrawPaint, execute_chrome_menu_ex, push_owner_pic, push_owner_text,
-    push_owner_text_right_of_rect,
+    OwnerDrawPaint, push_owner_pic, push_owner_text, push_owner_text_right_of_rect,
 };
 use crate::draw2d::{Draw2dOp, tessellate_fonts};
-use crate::gaps::{GapCause, HudGap, HudPresentationGaps, ImageMiss};
 use crate::gpu_list::{GpuListLatch, HudTessPass, TessJob};
 use crate::images::HudImages;
 use crate::playercard::UiLocalVars;
@@ -66,10 +64,6 @@ fn chrome_error(frame: &ChromeFrame) -> Option<String> {
         .gap_ids
         .first()
         .map(|(item, kind)| format!("item {item}: {kind:?}"))
-}
-
-fn hide(pass: &mut HudTessPass) {
-    pass.weaponbar = TessJob::Hide;
 }
 
 struct WeaponbarExprHost<'a> {
@@ -127,7 +121,7 @@ impl ExprHost for WeaponbarExprHost<'_> {
                     .ok()
                     .and_then(|i| ps.action_slot_type.get(i))
             })
-            .is_some_and(|kind| !matches!(kind, 0 | 1 | 2))
+            .is_some_and(|kind| !matches!(kind, 0..=2))
         {
             return Err(ExprError::Host("nightvision action slot not hosted"));
         }
@@ -327,6 +321,9 @@ fn paint_owner(
     args: OwnerDrawArgs<'_>,
     frame: &mut ChromeFrame,
 ) -> OwnerDrawPaint {
+    if state.hide_ammo && matches!(args.item.owner_draw, OWNERDRAW_CLIP | OWNERDRAW_CLIP_LEFT) {
+        return OwnerDrawPaint::Painted;
+    }
     match args.item.owner_draw {
         145 => paint_heading_tape(state, &args, frame),
         190 if state.ps.e_flags & 0x20000 == 0 => OwnerDrawPaint::Painted,
@@ -598,10 +595,7 @@ impl HudPlayerVisInput<'_> {
             };
         };
         let snapshot = presented.snapshot();
-        let bound = self
-            .weapons
-            .as_deref()
-            .and_then(|weapons| weapons.for_snapshot(presented.weapon_epoch()).ok());
+        let bound = self.weapons.as_deref().map(|weapons| weapons.bound());
         let weapons = bound.as_ref();
         HudPlayerVis {
             ui_active,
@@ -619,7 +613,7 @@ impl HudPlayerVisInput<'_> {
                         .script_name_of(get_viewmodel_weapon_index(ps))
                         .to_owned()
                 })
-                .unwrap_or_default(),
+                .unwrap_or(String::new()),
             ads_javelin: weapons.is_some_and(|w| ads_javelin(ps, w)),
             missilecam: snapshot
                 .and_then(|s| s.meta.for_client(local))
@@ -647,21 +641,21 @@ fn weapon_lock_view(
     let lock = meta
         .map(|m| m.weapon_lock)
         .filter(|lock| lock.weapon == ps.weapon && ps.health > 0)
-        .unwrap_or_default();
+        .unwrap_or_else(sim::WeaponLock::default);
     let mut screen_pos = [0.0; 2];
-    if lock.flags & 3 != 0 {
-        if let Some(Projection::Perspective(projection)) = projection {
-            let eye = Vec3::from_array(ps.origin) + Vec3::Z * ps.view_height_current;
-            let delta = Vec3::from_array(lock.target) - eye;
-            let (forward, right, up) = math_iw4::angle_vectors(ps.viewangles);
-            let depth = delta.dot(Vec3::from_array(forward));
-            if depth > 0.0 {
-                let scale = surface.height() * 0.5 / ((projection.fov * 0.5).tan() * depth);
-                screen_pos = [
-                    surface.width() * 0.5 + delta.dot(Vec3::from_array(right)) * scale,
-                    surface.height() * 0.5 - delta.dot(Vec3::from_array(up)) * scale,
-                ];
-            }
+    if lock.flags & 3 != 0
+        && let Some(Projection::Perspective(projection)) = projection
+    {
+        let eye = Vec3::from_array(ps.origin) + Vec3::Z * ps.view_height_current;
+        let delta = Vec3::from_array(lock.target) - eye;
+        let (forward, right, up) = math_iw4::angle_vectors(ps.viewangles);
+        let depth = delta.dot(Vec3::from_array(forward));
+        if depth > 0.0 {
+            let scale = surface.height() * 0.5 / ((projection.fov * 0.5).tan() * depth);
+            screen_pos = [
+                surface.width() * 0.5 + delta.dot(Vec3::from_array(right)) * scale,
+                surface.height() * 0.5 - delta.dot(Vec3::from_array(up)) * scale,
+            ];
         }
     }
     hud_iw4::WeaponLockView {
@@ -688,329 +682,361 @@ pub(crate) struct WeaponbarInput<'w, 's> {
     cameras: Query<'w, 's, &'static Projection, With<Camera3d>>,
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn update_weaponbar(
-    surface: Res<crate::surface::Hud2dSurface>,
-    catalog: Option<Res<MenuCatalog>>,
-    strings: Option<Res<PreparedLocalizedStrings>>,
-    weapons: Option<Res<PreparedWeapons>>,
-    compass: Option<Res<SessionCompass>>,
-    mut hud_images: ResMut<HudImages>,
-    mut images: ResMut<Assets<Image>>,
-    mut gaps: ResMut<HudPresentationGaps>,
-    mut pass: ResMut<HudTessPass>,
-    mut exprs: ResMut<crate::expr_cache::MenuExprCache>,
-    local_vars: Res<UiLocalVars>,
-    presented: Res<PresentedSnapshot>,
-    local: Res<LocalPresentClient>,
-    view: Option<Res<frame::ViewSubject>>,
-    cg_clock: Res<FrameClock>,
-    client_input: WeaponbarInput,
-) {
-    let weapons = weapons
-        .as_deref()
-        .and_then(|weapons| weapons.for_snapshot(presented.weapon_epoch()).ok());
-    if !surface.is_ready() {
-        return;
-    }
-    let Some(ps) = presented.player(local.0) else {
-        gaps.clear(HudGap::PerkDisplay);
-        gaps.clear(HudGap::CompassRing);
-        hide(&mut pass);
-        return;
-    };
-    let Some(catalog) = catalog.as_ref() else {
-        let perks_live = local_vars.int("ui_show_perks") != 0;
-        if perks_live {
-            gaps.raise(GapCause::PerkNoCatalog);
-        } else {
-            gaps.clear(HudGap::PerkDisplay);
-        }
-        gaps.raise(GapCause::CompassRingNoMenu {
-            name: WEAPONBAR_HD_MENU.to_owned(),
-        });
-        hide(&mut pass);
-        return;
-    };
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct WeaponHudDisplay<'w> {
+    catalog: Option<Res<'w, MenuCatalog>>,
+    strings: Option<Res<'w, PreparedLocalizedStrings>>,
+    compass: Option<Res<'w, SessionCompass>>,
+    cg_clock: Res<'w, FrameClock>,
+    hud_images: ResMut<'w, HudImages>,
+    images: ResMut<'w, Assets<Image>>,
+    pass: ResMut<'w, HudTessPass>,
+    exprs: ResMut<'w, crate::expr_cache::MenuExprCache>,
+}
 
-    let meta = presented
-        .snapshot()
-        .and_then(|s| s.meta.for_client(local.0));
-    let ammo = weapons.as_ref().and_then(|w| weaponbar_ammo(ps, w, meta));
-    let viewmodel = get_viewmodel_weapon_index(ps);
-    let weapon_script = weapons
-        .as_ref()
-        .map(|w| w.registry().script_name_of(viewmodel))
-        .unwrap_or_default();
-    let name = localized_weapon_name(
-        selected_weapon_index(ps, client_input.select.index),
-        weapons.as_ref(),
-        strings.as_deref(),
-        &mut gaps,
-    );
-    let hide_ammo = ammo_hud_hidden(ps);
-    let frag_ammo = weapons
-        .as_ref()
-        .map(|w| offhand_ammo(ps, w, ps.offhand_primary))
-        .unwrap_or(0);
-    let smoke_ammo = weapons
-        .as_ref()
-        .map(|w| offhand_ammo(ps, w, ps.offhand_secondary))
-        .unwrap_or(0);
-    let mut host = WeaponbarExprHost {
-        weapons: weapons.as_ref(),
-        ps: Some(ps),
-        input: client_input.input.as_deref(),
-        ms: milliseconds() as i32,
-        cg_time: cg_clock.time(),
-        fov: client_input.settings.fov,
-        shock_screen_type: presented
-            .shellshock(local.0)
-            .map_or(SCREEN_BLEND_BLURRED, |shock| shock.screen_type),
-        in_killcam: view.as_deref().is_some_and(|v| v.in_killcam()),
-        missilecam: meta.is_some_and(|m| m.remote_missile.is_some()),
-        game_ended: presented.snapshot().is_some_and(|s| {
-            matches!(
-                s.meta.phase,
-                sim::MatchPhase::Intermission | sim::MatchPhase::PostGame
-            )
-        }),
-        spectating_client: false,
-        dvars: presented
+impl WeaponHudDisplay<'_> {
+    fn hide(&mut self) {
+        self.pass.weaponbar = TessJob::Hide;
+    }
+
+    fn update(
+        &mut self,
+        surface: Res<crate::surface::Hud2dSurface>,
+        weapons: Option<Res<PreparedWeapons>>,
+        local_vars: Res<UiLocalVars>,
+        presentation: net::LocalPresentation,
+        view: Option<Res<frame::ViewSubject>>,
+        client_input: WeaponbarInput,
+    ) {
+        let weapons = weapons.as_deref().map(|weapons| weapons.bound());
+        if !surface.is_ready() {
+            return;
+        }
+        let Some(ps) = presentation.player() else {
+            self.hide();
+            return;
+        };
+        let Some(catalog) = self.catalog.as_ref() else {
+            let perks_live = local_vars.int("ui_show_perks") != 0;
+            if perks_live {
+                diag::warn_once!(Ui, "MenuCatalog is not loaded; perks_info_hd cannot run");
+            }
+            diag::warn_once!(
+                Ui,
+                "MenuCatalog has no `{name}`",
+                name = WEAPONBAR_HD_MENU.to_owned()
+            );
+            self.hide();
+            return;
+        };
+
+        let meta = presentation
             .snapshot()
-            .map(|s| s.meta.script_dvars(local.0))
-            .unwrap_or_default(),
-        local_vars: &local_vars,
-        catalog: Some(catalog),
-        menu: None,
-        perk_slots: ps.perk_slots,
-        weapon_script,
-        lock: Some(
-            weapons
-                .as_ref()
-                .map(|weapons| {
-                    weapon_lock_view(
-                        ps,
-                        weapons,
-                        meta,
-                        cg_clock.time(),
-                        client_input.cameras.iter().next(),
-                        &surface,
-                    )
-                })
-                .unwrap_or_default(),
-        ),
-        frag_ammo,
-        smoke_ammo,
-        stock_ammo: ammo.as_ref().and_then(|a| a.stock).unwrap_or(0),
-        clip_ammo: ammo.as_ref().and_then(|a| a.clip).unwrap_or(0),
-    };
-    let north_yaw = compass.as_ref().and_then(|c| c.north_yaw).unwrap_or(0.0);
-    let owner_state = OwnerDrawState {
-        ps,
-        weapons: weapons.as_ref(),
-        ammo,
-        name,
-        select_time: client_input.select.time,
-        cg_time: cg_clock.time(),
-        yaw: ps.viewangles[1],
-        north_yaw,
-        ticker_stretch: host
-            .dvars
-            .string("compassTickertapeStretch")
-            .and_then(|value| value.parse::<f32>().ok())
-            .unwrap_or(0.5)
-            .clamp(0.01, 1.0),
-        hide_ammo,
-    };
-
-    let mut list = crate::draw2d::Draw2dList::default();
-    let mut weaponbar_vis = false;
-    let mut weaponbar_failed = false;
-    let mut ring_cmds = 0usize;
-    if let Some(menu) = catalog.get(WEAPONBAR_HD_MENU) {
-        host.menu = Some(menu);
-        let mut hook = |args: OwnerDrawArgs<'_>, frame: &mut ChromeFrame| {
-            let ring = args.item.owner_draw == OWNERDRAW_COMPASS_RING;
-            let before = frame.list.cmds.len();
-            let out = paint_owner(&owner_state, args, frame);
-            if ring {
-                ring_cmds += frame.list.cmds.len().saturating_sub(before);
-            }
-            out
-        };
-        let frame = execute_chrome_menu_ex(
-            menu,
-            &host,
-            &surface,
-            ChromeAssets {
-                catalog: Some(catalog),
-                localize: strings.as_ref().map(|s| &s.0),
-            },
-            ChromeMenuAnim::IDENTITY,
-            &mut exprs,
-            MenuVisOnError::HideAll,
-            Some(&mut hook),
+            .and_then(|s| s.meta.for_client(presentation.client_id()));
+        let ammo = weapons.as_ref().and_then(|w| weaponbar_ammo(ps, w, meta));
+        let viewmodel = get_viewmodel_weapon_index(ps);
+        let weapon_script = weapons
+            .as_ref()
+            .map(|w| w.registry().script_name_of(viewmodel))
+            .unwrap_or(String::new());
+        let name = localized_weapon_name(
+            selected_weapon_index(ps, client_input.select.index),
+            weapons.as_ref(),
+            self.strings.as_deref(),
         );
-        if let Some(error) = chrome_error(&frame) {
-            weaponbar_failed = true;
-            gaps.raise(GapCause::WeaponbarPaint { error });
-        }
-        weaponbar_vis =
-            frame.coverage.vis_false < frame.coverage.items_total || !frame.list.cmds.is_empty();
-        list.cmds.extend(frame.list.cmds);
-    } else {
-        gaps.raise(GapCause::CompassRingNoMenu {
-            name: WEAPONBAR_HD_MENU.to_owned(),
-        });
-    }
-
-    for name in [
-        "dpad_hd",
-        "javelin_overlay_hd",
-        "missilecam_hud_hd",
-        "remote_chopper_overlay_hd",
-        "ac130_hud_hd",
-    ] {
-        let Some(menu) = catalog.get(name) else {
-            continue;
-        };
-        host.menu = Some(menu);
-        let mut hook = |args: OwnerDrawArgs<'_>, frame: &mut ChromeFrame| {
-            paint_owner(&owner_state, args, frame)
-        };
-        let frame = execute_chrome_menu_ex(
-            menu,
-            &host,
-            &surface,
-            ChromeAssets {
-                catalog: Some(catalog),
-                localize: strings.as_ref().map(|s| &s.0),
-            },
-            ChromeMenuAnim::IDENTITY,
-            &mut exprs,
-            MenuVisOnError::HideAll,
-            Some(&mut hook),
-        );
-        if let Some(error) = chrome_error(&frame) {
-            gaps.raise(GapCause::WeaponbarPaint { error });
-            weaponbar_failed = true;
-        }
-        list.cmds.extend(frame.list.cmds);
-    }
-
-    let perks_live = {
-        let show = local_vars.int("ui_show_perks");
-        host.ms.wrapping_sub(show) < 5000 || host.in_killcam
-    };
-    let mut perk_painted = false;
-    let mut perk_failed = false;
-    if let Some(menu) = catalog.get(PERKS_INFO_HD_MENU) {
-        host.menu = Some(menu);
-        if host.table("mp/perkTable.csv").is_none() && perks_live {
-            gaps.raise(GapCause::PerkTableMissing {
-                name: String::from("mp/perkTable.csv"),
+        let hide_ammo = ammo_hud_hidden(ps)
+            || presentation.snapshot().is_some_and(|snapshot| {
+                snapshot
+                    .meta
+                    .script_dvars(presentation.client_id())
+                    .int("ammocounterhide")
+                    .is_some_and(|value| value != 0)
             });
-        }
-        let mut hook = |args: OwnerDrawArgs<'_>, frame: &mut ChromeFrame| {
-            paint_owner(&owner_state, args, frame)
+        let frag_ammo = weapons
+            .as_ref()
+            .map(|w| offhand_ammo(ps, w, ps.offhand_primary))
+            .unwrap_or(0);
+        let smoke_ammo = weapons
+            .as_ref()
+            .map(|w| offhand_ammo(ps, w, ps.offhand_secondary))
+            .unwrap_or(0);
+        let mut host = WeaponbarExprHost {
+            weapons: weapons.as_ref(),
+            ps: Some(ps),
+            input: client_input.input.as_deref(),
+            ms: milliseconds() as i32,
+            cg_time: self.cg_clock.time(),
+            fov: client_input.settings.fov,
+            shock_screen_type: presentation
+                .shellshock()
+                .map_or(SCREEN_BLEND_BLURRED, |shock| shock.screen_type),
+            in_killcam: view.as_deref().is_some_and(|v| v.in_killcam()),
+            missilecam: meta.is_some_and(|m| m.remote_missile.is_some()),
+            game_ended: presentation.snapshot().is_some_and(|s| {
+                matches!(
+                    s.meta.phase,
+                    sim::MatchPhase::Intermission | sim::MatchPhase::PostGame
+                )
+            }),
+            spectating_client: false,
+            dvars: presentation
+                .snapshot()
+                .map(|s| s.meta.script_dvars(presentation.client_id()))
+                .unwrap_or_else(sim::ScriptDvars::default),
+            local_vars: &local_vars,
+            catalog: Some(catalog),
+            menu: None,
+            perk_slots: ps.perk_slots,
+            weapon_script,
+            lock: Some(
+                weapons
+                    .as_ref()
+                    .map(|weapons| {
+                        weapon_lock_view(
+                            ps,
+                            weapons,
+                            meta,
+                            self.cg_clock.time(),
+                            client_input.cameras.iter().next(),
+                            &surface,
+                        )
+                    })
+                    .unwrap_or_else(hud_iw4::WeaponLockView::default),
+            ),
+            frag_ammo,
+            smoke_ammo,
+            stock_ammo: ammo.as_ref().and_then(|a| a.stock).unwrap_or(0),
+            clip_ammo: ammo.as_ref().and_then(|a| a.clip).unwrap_or(0),
         };
-        let frame = execute_chrome_menu_ex(
-            menu,
-            &host,
-            &surface,
-            ChromeAssets {
-                catalog: Some(catalog),
-                localize: strings.as_ref().map(|s| &s.0),
-            },
-            ChromeMenuAnim::IDENTITY,
-            &mut exprs,
-            MenuVisOnError::HideAll,
-            Some(&mut hook),
-        );
-        if let Some(error) = chrome_error(&frame) {
-            perk_failed = true;
-            gaps.raise(GapCause::PerkPaint { error });
-        }
-        perk_painted = !frame.list.cmds.is_empty();
-        if perks_live
-            && frame.list.cmds.is_empty()
-            && frame.coverage.vis_false < frame.coverage.items_total
-        {
-            gaps.raise(GapCause::PerkEmptyPaint {
-                name: PERKS_INFO_HD_MENU.to_owned(),
-            });
-        }
-        list.cmds.extend(frame.list.cmds);
-    } else if perks_live {
-        gaps.raise(GapCause::PerkNoMenu {
-            name: PERKS_INFO_HD_MENU.to_owned(),
-        });
-    }
+        let north_yaw = self
+            .compass
+            .as_ref()
+            .and_then(|c| c.at(ps.origin))
+            .and_then(|c| c.north_yaw)
+            .unwrap_or(0.0);
+        let owner_state = OwnerDrawState {
+            ps,
+            weapons: weapons.as_ref(),
+            ammo,
+            name,
+            select_time: client_input.select.time,
+            cg_time: self.cg_clock.time(),
+            yaw: ps.viewangles[1],
+            north_yaw,
+            ticker_stretch: host
+                .dvars
+                .string("compassTickertapeStretch")
+                .and_then(|value| value.parse::<f32>().ok())
+                .unwrap_or(0.5)
+                .clamp(0.01, 1.0),
+            hide_ammo,
+        };
 
-    let mut fonts: HashMap<String, &asset_game::FontDef> = HashMap::new();
-    let mut ring_miss = false;
-    let mut perk_miss = false;
-    for cmd in &list.cmds {
-        if hud_images
-            .get(cmd.material_namespace, &cmd.material, &mut images)
-            .is_none()
-        {
-            let miss = if hud_images.has_games_root() {
-                ImageMiss::NotDecoded
-            } else {
-                ImageMiss::NoGamesRoot
+        let mut list = crate::draw2d::Draw2dList::default();
+
+        if let Some(menu) = catalog.get(WEAPONBAR_HD_MENU) {
+            host.menu = Some(menu);
+            let mut hook = |args: OwnerDrawArgs<'_>, frame: &mut ChromeFrame| {
+                paint_owner(&owner_state, args, frame)
             };
-            if matches!(
-                cmd.provenance,
-                crate::draw2d::Draw2dProvenance::OwnerDraw(OWNERDRAW_COMPASS_RING)
-            ) || cmd.material.contains("compass_letters")
-            {
-                ring_miss = true;
-                gaps.raise(GapCause::CompassRingMaterialMissing {
-                    name: cmd.material.clone(),
-                    miss,
-                });
-            } else if matches!(&cmd.provenance, crate::Draw2dProvenance::MenuItem { menu, .. } if menu == PERKS_INFO_HD_MENU)
-            {
-                perk_miss = true;
-                gaps.raise(GapCause::PerkMaterialMissing {
-                    name: cmd.material.clone(),
-                    miss,
-                });
-            } else {
-                weaponbar_failed = true;
-                gaps.raise(GapCause::WeaponbarPaint {
-                    error: format!("image `{}` is {miss}", cmd.material),
-                });
+            let frame = crate::chrome::ChromeMenuPainter::new(
+                menu,
+                &host,
+                &surface,
+                ChromeAssets {
+                    catalog: Some(catalog),
+                    localize: self.strings.as_ref().map(|s| &s.0),
+                },
+                ChromeMenuAnim::IDENTITY,
+                &mut self.exprs,
+            )
+            .paint(
+                MenuVisOnError::HideAll,
+                Some(&mut hook),
+                crate::chrome::ChromeMenuOverrides::default(),
+            );
+            if let Some(error) = chrome_error(&frame) {
+                diag::warn_once!(Ui, "weaponbar_hd: {error}");
             }
+
+            list.cmds.extend(frame.list.cmds);
+        } else {
+            diag::warn_once!(
+                Ui,
+                "MenuCatalog has no `{name}`",
+                name = WEAPONBAR_HD_MENU.to_owned()
+            );
         }
-        if let Draw2dOp::TextRun { font, .. } = &cmd.op {
-            if fonts.contains_key(font) {
+
+        for name in [
+            "dpad_hd",
+            "javelin_overlay_hd",
+            "missilecam_hud_hd",
+            "remote_chopper_overlay_hd",
+            "ac130_hud_hd",
+        ] {
+            if name == "dpad_hd" && host.in_killcam {
                 continue;
             }
-            if let Some(def) = catalog.font(font) {
-                fonts.insert(font.clone(), def);
+            let Some(menu) = catalog.get(name) else {
+                continue;
+            };
+            host.menu = Some(menu);
+            let mut hook = |args: OwnerDrawArgs<'_>, frame: &mut ChromeFrame| {
+                paint_owner(&owner_state, args, frame)
+            };
+            let frame = crate::chrome::ChromeMenuPainter::new(
+                menu,
+                &host,
+                &surface,
+                ChromeAssets {
+                    catalog: Some(catalog),
+                    localize: self.strings.as_ref().map(|s| &s.0),
+                },
+                ChromeMenuAnim::IDENTITY,
+                &mut self.exprs,
+            )
+            .paint(
+                MenuVisOnError::HideAll,
+                Some(&mut hook),
+                crate::chrome::ChromeMenuOverrides::default(),
+            );
+            if let Some(error) = chrome_error(&frame) {
+                diag::warn_once!(Ui, "weaponbar_hd: {error}");
+            }
+            list.cmds.extend(frame.list.cmds);
+        }
+
+        let perks_live = {
+            let show = local_vars.int("ui_show_perks");
+            host.ms.wrapping_sub(show) < 5000 || host.in_killcam
+        };
+
+        if let Some(menu) = catalog.get(PERKS_INFO_HD_MENU) {
+            host.menu = Some(menu);
+            if host.table("mp/perkTable.csv").is_none() && perks_live {
+                diag::warn_once!(
+                    Ui,
+                    "string table `{name}` was not in the UI-zone walk",
+                    name = String::from("mp/perkTable.csv")
+                );
+            }
+            let mut hook = |args: OwnerDrawArgs<'_>, frame: &mut ChromeFrame| {
+                paint_owner(&owner_state, args, frame)
+            };
+            let frame = crate::chrome::ChromeMenuPainter::new(
+                menu,
+                &host,
+                &surface,
+                ChromeAssets {
+                    catalog: Some(catalog),
+                    localize: self.strings.as_ref().map(|s| &s.0),
+                },
+                ChromeMenuAnim::IDENTITY,
+                &mut self.exprs,
+            )
+            .paint(
+                MenuVisOnError::HideAll,
+                Some(&mut hook),
+                crate::chrome::ChromeMenuOverrides::default(),
+            );
+            if let Some(error) = chrome_error(&frame) {
+                diag::warn_once!(Ui, "perks_info_hd: {error}");
+            }
+
+            if perks_live
+                && frame.list.cmds.is_empty()
+                && frame.coverage.vis_false < frame.coverage.items_total
+            {
+                diag::warn_once!(
+                    Ui,
+                    "`{name}` paint emitted no tess quads",
+                    name = PERKS_INFO_HD_MENU.to_owned()
+                );
+            }
+            list.cmds.extend(frame.list.cmds);
+        } else if perks_live {
+            diag::warn_once!(
+                Ui,
+                "MenuCatalog has no `{name}`",
+                name = PERKS_INFO_HD_MENU.to_owned()
+            );
+        }
+
+        let mut fonts: HashMap<String, &asset_game::FontDef> = HashMap::new();
+
+        for cmd in &list.cmds {
+            if self
+                .hud_images
+                .get(cmd.material_namespace, &cmd.material, &mut self.images)
+                .is_none()
+            {
+                let miss = if self.hud_images.has_games_root() {
+                    "not a zone atlas and not in the IWD"
+                } else {
+                    "no games root is set"
+                };
+                if matches!(
+                    cmd.provenance,
+                    crate::draw2d::Draw2dProvenance::OwnerDraw(OWNERDRAW_COMPASS_RING)
+                ) || cmd.material.contains("compass_letters")
+                {
+                    diag::warn_once!(
+                        Ui,
+                        "compass ring image `{name}` is {miss}",
+                        name = cmd.material.clone()
+                    );
+                } else if matches!(&cmd.provenance, crate::Draw2dProvenance::MenuItem { menu, .. } if menu == PERKS_INFO_HD_MENU)
+                {
+                    diag::warn_once!(
+                        Ui,
+                        "perk image `{name}` is {miss}",
+                        name = cmd.material.clone()
+                    );
+                } else {
+                    diag::warn_once!(
+                        Ui,
+                        "weaponbar_hd: {error}",
+                        error = format!("image `{}` is {miss}", cmd.material)
+                    );
+                }
+            }
+            if let Draw2dOp::TextRun { font, .. } = &cmd.op {
+                if fonts.contains_key(font) {
+                    continue;
+                }
+                if let Some(def) = catalog.font(font) {
+                    fonts.insert(font.clone(), def);
+                }
             }
         }
-    }
 
-    if (!ring_miss && ring_cmds > 0) || !weaponbar_vis {
-        gaps.clear(HudGap::CompassRing);
+        let (quads, _) = tessellate_fonts(&list, &fonts);
+        if quads.is_empty() {
+            self.hide();
+            return;
+        }
+        self.pass.weaponbar = TessJob::Quads(quads);
     }
-    if !weaponbar_failed {
-        gaps.clear(HudGap::Weaponbar);
-    }
-    if !perk_failed && ((perk_painted && !perk_miss) || !perks_live) {
-        gaps.clear(HudGap::PerkDisplay);
-    }
+}
 
-    let (quads, _) = tessellate_fonts(&list, &fonts);
-    if quads.is_empty() {
-        hide(&mut pass);
-        return;
-    }
-    pass.weaponbar = TessJob::Quads(quads);
+pub(crate) fn update_weaponbar(
+    surface: Res<crate::surface::Hud2dSurface>,
+    weapons: Option<Res<PreparedWeapons>>,
+    local_vars: Res<UiLocalVars>,
+    presentation: net::LocalPresentation,
+    view: Option<Res<frame::ViewSubject>>,
+    client_input: WeaponbarInput,
+    mut display: WeaponHudDisplay,
+) {
+    display.update(
+        surface,
+        weapons,
+        local_vars,
+        presentation,
+        view,
+        client_input,
+    );
 }
 
 fn action_slot_weapon(
@@ -1056,7 +1082,7 @@ fn paint_action_slot(
         .ps
         .action_slot_type
         .get((args.item.owner_draw - 171) as usize)
-        .is_some_and(|kind| !matches!(kind, 0 | 1 | 2))
+        .is_some_and(|kind| !matches!(kind, 0..=2))
     {
         return OwnerDrawPaint::Gap(ChromeGapKind::OwnerDraw);
     }

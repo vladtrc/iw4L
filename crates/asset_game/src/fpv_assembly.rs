@@ -77,12 +77,7 @@ impl FpvSkeletons {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
-pub enum FpvHideMode {
-    #[default]
-    Surfaces,
-    Bones,
-}
+use crate::FpvHideMode;
 
 #[derive(Debug)]
 pub enum FpvAssemblyError {
@@ -167,19 +162,33 @@ fn hide_words(
     Some(words)
 }
 
+pub(crate) struct FpvAssemblyInput<'a> {
+    pub hands: FpvMeshIndex,
+    pub mounts: &'a FpvMountPlan,
+    pub rocket: bool,
+    pub knife: Option<FpvMeshIndex>,
+    pub ads: bool,
+    pub hide_tags: &'a [String],
+    pub hide_mode: FpvHideMode,
+    pub jammed: bool,
+}
+
 impl FpvAssembly {
     pub(crate) fn build(
         catalog: &FpvMeshCatalog,
-        hands: FpvMeshIndex,
-        mounts: &FpvMountPlan,
-        rocket: bool,
-        knife: Option<FpvMeshIndex>,
-        ads: bool,
-        hide_tags: &[String],
-        hide_mode: FpvHideMode,
-        jammed: bool,
+        input: FpvAssemblyInput<'_>,
         skeletons: &mut FpvSkeletons,
     ) -> Result<Self, FpvAssemblyError> {
+        let FpvAssemblyInput {
+            hands,
+            mounts,
+            rocket,
+            knife,
+            ads,
+            hide_tags,
+            hide_mode,
+            jammed,
+        } = input;
         if catalog.identity() == 0 {
             return Err(FpvAssemblyError::Catalog("published mesh owner"));
         }

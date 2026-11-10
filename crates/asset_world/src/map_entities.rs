@@ -61,18 +61,16 @@ pub struct ScriptBrushModelPlacement {
     pub script_fxid: String,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub enum ScriptBrushModelLink {
+    #[default]
     None,
     Linked(ScriptBrushModelPlacement),
 
-    Ambiguous { target: String, matches: usize },
-}
-
-impl Default for ScriptBrushModelLink {
-    fn default() -> Self {
-        Self::None
-    }
+    Ambiguous {
+        target: String,
+        matches: usize,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -236,20 +234,6 @@ pub fn flag_descriptors(s: &ZoneStream<'_>) -> Vec<FlagDescriptor> {
     parse_flag_descriptors(text)
 }
 
-pub fn flag_descriptors_t5(s: &fastfile_t5::ZoneStream<'_>) -> Vec<FlagDescriptor> {
-    let Some(text) = entity_string_t5(s) else {
-        return Vec::new();
-    };
-    parse_flag_descriptors(text)
-}
-
-pub fn flag_descriptors_iw5(s: &fastfile_iw5::ZoneStream<'_>) -> Vec<FlagDescriptor> {
-    let Some(text) = entity_string_iw5(s) else {
-        return Vec::new();
-    };
-    parse_flag_descriptors(text)
-}
-
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MapScriptStruct {
     pub targetname: String,
@@ -283,34 +267,6 @@ pub fn map_script_structs(s: &ZoneStream<'_>) -> Vec<MapScriptStruct> {
     parse_map_script_structs(text)
 }
 
-pub fn map_script_structs_t5(s: &fastfile_t5::ZoneStream<'_>) -> Vec<MapScriptStruct> {
-    let Some(text) = entity_string_t5(s) else {
-        return Vec::new();
-    };
-    parse_map_script_structs(text)
-}
-
-pub fn map_script_structs_iw5(s: &fastfile_iw5::ZoneStream<'_>) -> Vec<MapScriptStruct> {
-    let Some(text) = entity_string_iw5(s) else {
-        return Vec::new();
-    };
-    parse_map_script_structs(text)
-}
-
-pub fn map_use_triggers_t5(s: &fastfile_t5::ZoneStream<'_>) -> Vec<MapUseTrigger> {
-    let Some(text) = entity_string_t5(s) else {
-        return Vec::new();
-    };
-    parse_map_use_triggers(text)
-}
-
-pub fn map_use_triggers_iw5(s: &fastfile_iw5::ZoneStream<'_>) -> Vec<MapUseTrigger> {
-    let Some(text) = entity_string_iw5(s) else {
-        return Vec::new();
-    };
-    parse_map_use_triggers(text)
-}
-
 fn has_ascii_prefix(value: &str, prefix: &str) -> bool {
     value.len() >= prefix.len()
         && value.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
@@ -337,7 +293,7 @@ pub struct MinimapCorners {
     pub b: [f32; 2],
 }
 
-const MP_SPAWN_CLASSNAMES: &[&str] = &[
+pub const REFERENCE_MP_SPAWN_CLASSNAMES: &[&str] = &[
     "mp_dm_spawn",
     "mp_dm_spawn_start",
     "mp_dom_spawn",
@@ -357,7 +313,7 @@ pub fn dm_spawn_points(s: &ZoneStream<'_>) -> Vec<SpawnPoint> {
     let Some(text) = entity_string(s) else {
         return Vec::new();
     };
-    parse_spawn_points(text, MP_SPAWN_CLASSNAMES)
+    parse_spawn_points(text, REFERENCE_MP_SPAWN_CLASSNAMES)
 }
 
 pub fn minimap_corners(s: &ZoneStream<'_>) -> Option<MinimapCorners> {
@@ -374,28 +330,6 @@ pub fn airstrike_height(s: &ZoneStream<'_>) -> Option<f32> {
     parse_airstrike_height(entity_string(s)?)
 }
 
-pub fn airstrike_height_iw5(s: &fastfile_iw5::ZoneStream<'_>) -> Option<f32> {
-    parse_airstrike_height(entity_string_iw5(s)?)
-}
-
-pub fn minimap_corners_t5(s: &fastfile_t5::ZoneStream<'_>) -> Option<MinimapCorners> {
-    let text = entity_string_t5(s)?;
-    parse_minimap_corners(text)
-}
-
-pub fn minimap_corners_iw5(s: &fastfile_iw5::ZoneStream<'_>) -> Option<MinimapCorners> {
-    let text = entity_string_iw5(s)?;
-    parse_minimap_corners(text)
-}
-
-pub fn worldspawn_north_yaw_t5(s: &fastfile_t5::ZoneStream<'_>) -> Option<f32> {
-    parse_worldspawn_north_yaw(entity_string_t5(s)?)
-}
-
-pub fn worldspawn_north_yaw_iw5(s: &fastfile_iw5::ZoneStream<'_>) -> Option<f32> {
-    parse_worldspawn_north_yaw(entity_string_iw5(s)?)
-}
-
 pub fn script_model_placements(s: &ZoneStream<'_>) -> Vec<ScriptModelPlacement> {
     let Some(text) = entity_string(s) else {
         return Vec::new();
@@ -403,287 +337,8 @@ pub fn script_model_placements(s: &ZoneStream<'_>) -> Vec<ScriptModelPlacement> 
     parse_script_model_placements(text)
 }
 
-pub fn intermission_view_t5(s: &fastfile_t5::ZoneStream<'_>) -> Option<IntermissionView> {
-    let text = entity_string_t5(s)?;
-    parse_intermission_view(text)
-}
-
-pub fn dm_spawn_points_t5(s: &fastfile_t5::ZoneStream<'_>) -> Vec<SpawnPoint> {
-    let Some(text) = entity_string_t5(s) else {
-        return Vec::new();
-    };
-    dm_spawn_points_treyarch(text)
-}
-
-pub fn dm_spawn_points_treyarch(text: &str) -> Vec<SpawnPoint> {
-    let names: Vec<_> = MP_SPAWN_CLASSNAMES
-        .iter()
-        .map(|name| name.replace("mp_dd_", "mp_dem_"))
-        .collect();
-    let names: Vec<_> = names.iter().map(String::as_str).collect();
-    let mut spawns = parse_spawn_points(text, &names);
-    for spawn in &mut spawns {
-        if let Some(suffix) = spawn.classname.strip_prefix("mp_dem_") {
-            spawn.classname = format!("mp_dd_{suffix}");
-        }
-    }
-    spawns
-}
-
-pub fn t5_entities_for_iw4_rules(text: &str) -> String {
-    native_entities_for_iw4_rules(text, asset_core::FamilyId::T5)
-}
-
-pub fn t6_entities_for_iw4_rules(text: &str) -> String {
-    native_entities_for_iw4_rules(text, asset_core::FamilyId::T6)
-}
-
-fn native_entities_for_iw4_rules(text: &str, family: asset_core::FamilyId) -> String {
-    type Block = Vec<(String, String)>;
-    fn get<'a>(block: &'a Block, key: &str) -> Option<&'a str> {
-        block
-            .iter()
-            .find(|(k, _)| k == key)
-            .map(|(_, v)| v.as_str())
-    }
-    fn set(block: &mut Block, key: &str, value: String) {
-        match block.iter_mut().find(|(k, _)| k == key) {
-            Some((_, v)) => *v = value,
-            None => block.push((key.to_owned(), value)),
-        }
-    }
-
-    let mut blocks: Vec<Block> = Vec::new();
-    let mut open: Option<Block> = None;
-    for line in text.lines() {
-        match (line.trim(), open.as_mut()) {
-            ("{", None) => open = Some(Vec::new()),
-            ("}", Some(_)) => blocks.extend(open.take()),
-            (trimmed, Some(block)) => {
-                let mut quoted = trimmed.split('"').skip(1).step_by(2);
-                if let (Some(key), Some(value)) = (quoted.next(), quoted.next()) {
-                    block.push((key.to_owned(), value.to_owned()));
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let mut flag_visuals: Vec<(String, String)> = Vec::new();
-    let mut spawned: Vec<Block> = Vec::new();
-    for block in &mut blocks {
-        let team = get(block, "script_team").map(str::to_owned);
-        if let Some(suffix) = get(block, "classname").and_then(|c| c.strip_prefix("mp_dem_spawn_"))
-        {
-            set(block, "classname", format!("mp_dd_spawn_{suffix}"));
-        }
-        match (get(block, "targetname"), team.as_deref()) {
-            (Some("dd_bombzone"), _)
-                if family == asset_core::FamilyId::Iw5
-                    && get(block, "script_label") == Some("_c") =>
-            {
-                set(block, "targetname", "dd_overtime_bombzone".to_owned());
-                set(block, "script_gameobjectname", "dd_overtime".to_owned());
-            }
-            (Some("bombzone_dem"), _)
-                if family == asset_core::FamilyId::T6
-                    && get(block, "script_label") == Some("_overtime") =>
-            {
-                set(block, "targetname", "dem_overtime_bombzone".to_owned());
-                set(block, "script_gameobjectname", "dem_overtime".to_owned());
-            }
-            (Some("bombzone_dem"), _) => set(block, "targetname", "dd_bombzone".to_owned()),
-            (Some("ctf_flag_zone_trig"), Some(team)) => {
-                set(block, "targetname", format!("ctf_zone_{team}"));
-                if get(block, "height").is_none() {
-                    set(block, "height", "128".to_owned());
-                }
-            }
-            (Some("ctf_flag_pickup_trig"), Some(team)) => match get(block, "target") {
-                Some(target) => flag_visuals.push((target.to_owned(), format!("ctf_flag_{team}"))),
-                None => spawned.push(
-                    [("classname", "script_model".to_owned())]
-                        .into_iter()
-                        .chain(
-                            ["origin", "angles"]
-                                .into_iter()
-                                .filter_map(|key| Some((key, get(block, key)?.to_owned()))),
-                        )
-                        .chain([("targetname", format!("ctf_flag_{team}"))])
-                        .map(|(k, v)| (k.to_owned(), v))
-                        .collect(),
-                ),
-            },
-            _ => {}
-        }
-        if let Some(names) = get(block, "script_gameobjectname") {
-            let mut tokens: Vec<&str> = Vec::new();
-            for token in names.split_whitespace() {
-                let token = match token {
-                    "bombzone_dem" => "dd_bombzone",
-                    token => token,
-                };
-                tokens.push(token);
-                tokens.extend(match token {
-                    "dem" => Some("dd"),
-                    "tdm" => Some("war"),
-                    "koth" if family == asset_core::FamilyId::T5 => Some("hq"),
-                    _ => None,
-                });
-            }
-            let mut seen = std::collections::BTreeSet::new();
-            tokens.retain(|token| seen.insert(*token));
-            let names = tokens.join(" ");
-            set(block, "script_gameobjectname", names);
-        }
-    }
-    for block in &mut blocks {
-        if let Some((_, name)) = get(block, "targetname")
-            .and_then(|own| flag_visuals.iter().find(|(target, _)| target == own))
-        {
-            let name = name.clone();
-            set(block, "targetname", name);
-        }
-    }
-    if family == asset_core::FamilyId::T6 {
-        let source = blocks.clone();
-        let has = |key: &str, name: &str| source.iter().any(|block| get(block, key) == Some(name));
-        let authored = |block: &Block, classname: &str, targetname: &str| {
-            let mut copy = block.clone();
-            set(&mut copy, "classname", classname.to_owned());
-            set(&mut copy, "targetname", targetname.to_owned());
-            set(&mut copy, "script_gameobjectname", "sab".to_owned());
-            copy
-        };
-        if !has("targetname", "sab_bomb_pickup_trig")
-            && let Some(trigger) = source
-                .iter()
-                .find(|block| get(block, "targetname") == Some("bombtrigger"))
-                .or_else(|| {
-                    source
-                        .iter()
-                        .find(|block| get(block, "targetname") == Some("sd_bomb_pickup_trig"))
-                })
-        {
-            spawned.push(authored(
-                trigger,
-                "trigger_multiple",
-                "sab_bomb_pickup_trig",
-            ));
-            if !has("targetname", "sab_bomb") {
-                let mut bomb = trigger.clone();
-                set(&mut bomb, "model", "prop_suitcase_bomb".to_owned());
-                spawned.push(authored(&bomb, "script_model", "sab_bomb"));
-            }
-        }
-        for team in ["allies", "axis"] {
-            let site = format!("sab_bomb_{team}");
-            if !has("targetname", &site)
-                && let Some(trigger) = source
-                    .iter()
-                    .find(|block| get(block, "targetname") == Some(&format!("ctf_zone_{team}")))
-            {
-                let mut copy = trigger.clone();
-                let visual = format!("iw4l_sab_site_{team}");
-                set(&mut copy, "target", visual.clone());
-                spawned.push(authored(&copy, "trigger_use_touch", &site));
-                set(&mut copy, "model", "prop_suitcase_bomb".to_owned());
-                spawned.push(authored(&copy, "script_model", &visual));
-            }
-            for suffix in ["", "_start", "_planted"] {
-                let classname = format!("mp_sab_spawn_{team}{suffix}");
-                if has("classname", &classname) {
-                    continue;
-                }
-                let native = format!(
-                    "mp_ctf_spawn_{team}{}",
-                    if suffix == "_planted" { "" } else { suffix }
-                );
-                for block in source
-                    .iter()
-                    .filter(|block| get(block, "classname") == Some(&native))
-                {
-                    let mut copy = block.clone();
-                    set(&mut copy, "classname", classname.clone());
-                    set(&mut copy, "script_gameobjectname", "sab".to_owned());
-                    spawned.push(copy);
-                }
-            }
-        }
-    }
-    blocks.extend(spawned);
-    if !blocks
-        .iter()
-        .any(|block| get(block, "targetname") == Some("care_package"))
-    {
-        blocks.push(vec![
-            ("classname".into(), "script_model".into()),
-            ("targetname".into(), "care_package".into()),
-            ("target".into(), "care_package_collision".into()),
-        ]);
-        blocks.push(vec![
-            ("classname".into(), "script_brushmodel".into()),
-            ("targetname".into(), "care_package_collision".into()),
-        ]);
-    }
-
-    let mut out = String::with_capacity(text.len() + text.len() / 16);
-    for block in blocks {
-        out.push_str("{\n");
-        for (key, value) in block {
-            out.push_str(&format!("\"{key}\" \"{value}\"\n"));
-        }
-        out.push_str("}\n");
-    }
-    out
-}
-
-pub fn script_model_placements_t5(s: &fastfile_t5::ZoneStream<'_>) -> Vec<ScriptModelPlacement> {
-    let Some(text) = entity_string_t5(s) else {
-        return Vec::new();
-    };
-    parse_script_model_placements(text)
-}
-
-pub fn dm_spawn_points_iw5(s: &fastfile_iw5::ZoneStream<'_>) -> Vec<SpawnPoint> {
-    let Some(text) = entity_string_iw5(s) else {
-        return Vec::new();
-    };
-    parse_spawn_points(text, MP_SPAWN_CLASSNAMES)
-}
-
-pub fn intermission_view_iw5(s: &fastfile_iw5::ZoneStream<'_>) -> Option<IntermissionView> {
-    let text = entity_string_iw5(s)?;
-    parse_intermission_view(text)
-}
-
-pub fn script_model_placements_iw5(s: &fastfile_iw5::ZoneStream<'_>) -> Vec<ScriptModelPlacement> {
-    let Some(text) = entity_string_iw5(s) else {
-        return Vec::new();
-    };
-    parse_script_model_placements(text)
-}
-
 pub fn script_brush_model_placements(s: &ZoneStream<'_>) -> Vec<ScriptBrushModelPlacement> {
     let Some(text) = entity_string(s) else {
-        return Vec::new();
-    };
-    parse_script_brush_model_placements(text)
-}
-
-pub fn script_brush_model_placements_t5(
-    s: &fastfile_t5::ZoneStream<'_>,
-) -> Vec<ScriptBrushModelPlacement> {
-    let Some(text) = entity_string_t5(s) else {
-        return Vec::new();
-    };
-    parse_script_brush_model_placements(text)
-}
-
-pub fn script_brush_model_placements_iw5(
-    s: &fastfile_iw5::ZoneStream<'_>,
-) -> Vec<ScriptBrushModelPlacement> {
-    let Some(text) = entity_string_iw5(s) else {
         return Vec::new();
     };
     parse_script_brush_model_placements(text)
@@ -700,19 +355,11 @@ pub fn map_ents_entity_string<'a>(s: &'a ZoneStream<'_>) -> Option<&'a str> {
     entity_string(s)
 }
 
-pub fn map_ents_entity_string_t5<'a>(s: &'a fastfile_t5::ZoneStream<'_>) -> Option<&'a str> {
-    entity_string_t5(s)
-}
-
-pub fn map_ents_entity_string_iw5<'a>(s: &'a fastfile_iw5::ZoneStream<'_>) -> Option<&'a str> {
-    entity_string_iw5(s)
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MapEntsKeyCensus {
     pub quoted_pairs: u32,
     pub unquoted_named: u32,
-    pub iw5_numbered: u32,
+    pub numbered: u32,
 }
 
 impl MapEntsKeyCensus {
@@ -720,11 +367,11 @@ impl MapEntsKeyCensus {
         match (
             self.quoted_pairs > 0,
             self.unquoted_named > 0,
-            self.iw5_numbered > 0,
+            self.numbered > 0,
         ) {
             (true, false, false) => "quoted",
             (false, true, false) => "unquoted",
-            (false, false, true) => "iw5-numbered",
+            (false, false, true) => "numbered",
             (false, false, false) => "none",
             _ => "mixed",
         }
@@ -736,7 +383,7 @@ impl MapEntsKeyCensus {
             self.style(),
             self.quoted_pairs,
             self.unquoted_named,
-            self.iw5_numbered
+            self.numbered
         )
     }
 }
@@ -745,13 +392,13 @@ pub fn census_entity_string_keys(text: &str) -> MapEntsKeyCensus {
     let mut census = MapEntsKeyCensus {
         quoted_pairs: 0,
         unquoted_named: 0,
-        iw5_numbered: 0,
+        numbered: 0,
     };
     for line in text.lines() {
         match entity_string_pair_kind(line) {
             Some("quoted") => census.quoted_pairs += 1,
             Some("unquoted") => census.unquoted_named += 1,
-            Some("iw5-numbered") => census.iw5_numbered += 1,
+            Some("numbered") => census.numbered += 1,
             _ => {}
         }
     }
@@ -771,29 +418,15 @@ fn entity_string_pair_kind(line: &str) -> Option<&'static str> {
         return None;
     }
     if key.chars().all(|c| c.is_ascii_digit()) {
-        Some("iw5-numbered")
+        Some("numbered")
     } else {
         Some("unquoted")
     }
 }
 
-fn entity_string_t5<'a>(s: &'a fastfile_t5::ZoneStream<'_>) -> Option<&'a str> {
-    let map_ents = s.map_ents()?;
-    let ptr = map_ents.entity_string?;
-    let bytes = s.slice_at(ptr, 0, map_ents.entity_chars).ok()?;
-    core::str::from_utf8(bytes).ok()
-}
-
-fn entity_string_iw5<'a>(s: &'a fastfile_iw5::ZoneStream<'_>) -> Option<&'a str> {
-    let map_ents = s.map_ents()?;
-    let ptr = map_ents.entity_string?;
-    let bytes = s.slice_at(ptr, 0, map_ents.entity_chars).ok()?;
-    core::str::from_utf8(bytes).ok()
-}
-
 pub fn parse_intermission_view(text: &str) -> Option<IntermissionView> {
     for entity in parse_entities(text) {
-        if entity.classname.as_deref() == Some("mp_global_intermission") {
+        if entity.classname == Some("mp_global_intermission") {
             return Some(IntermissionView {
                 origin: entity.origin?,
                 angles: entity.angles.unwrap_or([0.0, 0.0, 0.0]),
@@ -803,13 +436,13 @@ pub fn parse_intermission_view(text: &str) -> Option<IntermissionView> {
     None
 }
 
-fn parse_spawn_points(text: &str, classnames: &[&str]) -> Vec<SpawnPoint> {
+pub fn parse_spawn_points(text: &str, classnames: &[&str]) -> Vec<SpawnPoint> {
     let mut out = Vec::new();
     for entity in parse_entities(text) {
         let Some(classname) = entity.classname else {
             continue;
         };
-        if !classnames.iter().any(|want| *want == classname) {
+        if !classnames.contains(&classname) {
             continue;
         }
         let Some(origin) = entity.origin else {
@@ -826,10 +459,10 @@ fn parse_spawn_points(text: &str, classnames: &[&str]) -> Vec<SpawnPoint> {
     out
 }
 
-fn parse_minimap_corners(text: &str) -> Option<MinimapCorners> {
+pub fn parse_minimap_corners(text: &str) -> Option<MinimapCorners> {
     let mut corners: Vec<[f32; 2]> = Vec::new();
     for entity in parse_entities(text) {
-        if entity.targetname.as_deref() != Some("minimap_corner") {
+        if entity.targetname != Some("minimap_corner") {
             continue;
         }
         let Some(origin) = entity.origin else {
@@ -846,14 +479,14 @@ fn parse_minimap_corners(text: &str) -> Option<MinimapCorners> {
     })
 }
 
-fn parse_airstrike_height(text: &str) -> Option<f32> {
+pub fn parse_airstrike_height(text: &str) -> Option<f32> {
     parse_entities(text)
         .find(|e| e.targetname == Some("airstrikeheight"))
         .and_then(|e| e.origin)
         .map(|origin| origin[2])
 }
 
-fn parse_worldspawn_north_yaw(text: &str) -> Option<f32> {
+pub fn parse_worldspawn_north_yaw(text: &str) -> Option<f32> {
     parse_entities(text)
         .find(|e| e.classname == Some("worldspawn"))
         .and_then(|e| e.north_yaw)
@@ -863,7 +496,7 @@ pub fn parse_script_model_placements(text: &str) -> Vec<ScriptModelPlacement> {
     let entities = parse_entities(text).collect::<Vec<_>>();
     let mut out = Vec::new();
     for (source_ordinal, entity) in entities.iter().enumerate() {
-        if entity.classname.as_deref() != Some("script_model") {
+        if entity.classname != Some("script_model") {
             continue;
         }
         let Some(model) = entity
@@ -945,7 +578,7 @@ pub fn parse_script_model_placements(text: &str) -> Vec<ScriptModelPlacement> {
     out
 }
 
-fn parse_script_brush_model_placements(text: &str) -> Vec<ScriptBrushModelPlacement> {
+pub fn parse_script_brush_model_placements(text: &str) -> Vec<ScriptBrushModelPlacement> {
     parse_entities(text)
         .enumerate()
         .filter_map(|(ordinal, entity)| {
@@ -1122,56 +755,6 @@ enum EntityKey {
     Other,
 }
 
-const IW5_KEYS: &[(&str, &str)] = &[
-    ("1668", "classname"),
-    ("1669", "origin"),
-    ("1670", "model"),
-    ("1671", "spawnflags"),
-    ("1672", "target"),
-    ("1673", "targetname"),
-    ("1676", "dmg"),
-    ("1677", "angles"),
-    ("1679", "script_linkname"),
-    ("1774", "script_noteworthy"),
-    ("1782", "radius"),
-    ("1783", "height"),
-    ("2009", "script_exploder"),
-    ("2328", "script_linkto"),
-    ("2369", "destructible_type"),
-    ("2814", "ltOrigin"),
-    ("7864", "script_prefab_exploder"),
-    ("11039", "animation"),
-    ("11848", "script_gameobjectname"),
-    ("11996", "script_label"),
-    ("12906", "script_type"),
-];
-
-fn iw5_key_name(key: &str) -> Option<&'static str> {
-    IW5_KEYS
-        .iter()
-        .find(|(id, _)| *id == key)
-        .map(|(_, name)| *name)
-}
-
-pub fn iw5_entity_string_named(text: &str) -> String {
-    let mut out = String::with_capacity(text.len() + text.len() / 4);
-    for line in text.lines() {
-        let trimmed = line.trim();
-        match trimmed.split_once(' ') {
-            Some((key, value)) if key.bytes().all(|b| b.is_ascii_digit()) && !key.is_empty() => {
-                let name = iw5_key_name(key).unwrap_or(key);
-                out.push('"');
-                out.push_str(name);
-                out.push_str("\" ");
-                out.push_str(value.trim());
-            }
-            _ => out.push_str(trimmed),
-        }
-        out.push('\n');
-    }
-    native_entities_for_iw4_rules(&out, asset_core::FamilyId::Iw5)
-}
-
 fn entity_pair(line: &str) -> Option<(EntityKey, &str)> {
     if let Some((key, value)) = quoted_pair(line) {
         return Some((named_key(key), value));
@@ -1213,7 +796,7 @@ fn numbered_pair(line: &str) -> Option<(EntityKey, &str)> {
     let line = line.trim();
     let (key, rest) = line.split_once(' ')?;
 
-    let key = named_key(iw5_key_name(key).unwrap_or(key));
+    let key = named_key(key);
     let mut quotes = rest.match_indices('"').map(|(index, _)| index);
     let a = quotes.next()?;
     let b = quotes.next()?;
@@ -1254,7 +837,7 @@ pub fn trigger_models(s: &ZoneStream<'_>) -> Vec<Vec<MapTriggerHull>> {
         return Vec::new();
     };
     (0..geo.trigger_model_count)
-        .map(|n| capture_trigger_hulls(s, geo, n).unwrap_or_default())
+        .map(|n| capture_trigger_hulls(s, geo, n).unwrap_or(Vec::new()))
         .collect()
 }
 
@@ -1298,47 +881,10 @@ pub fn sun_stages(s: &ZoneStream<'_>) -> Vec<MapSunStage> {
             let trigger = usize::from(s.u16_at(stage, ptr + 12).ok()?);
             Some(MapSunStage {
                 origin,
-                trigger: capture_trigger_hulls(s, geo, trigger).unwrap_or_default(),
+                trigger: capture_trigger_hulls(s, geo, trigger).unwrap_or(Vec::new()),
                 sun_primary_light: s.u8_at(stage, ptr + 14).ok()?,
             })
         })
-        .collect()
-}
-
-pub fn sun_stages_iw5(s: &fastfile_iw5::ZoneStream<'_>) -> Vec<MapSunStage> {
-    let Some(clip) = s.clip_map() else {
-        return Vec::new();
-    };
-    let Some(stages) = clip.stages else {
-        return Vec::new();
-    };
-    let stride = s.layout(fastfile_iw5::size::STAGE, 24);
-    let ptr = s.layout(4, 8);
-    (0..clip.stage_count)
-        .map_while(|n| {
-            let stage = stages.at(n * stride);
-            let origin = [
-                s.f32_at(stage, ptr).ok()?,
-                s.f32_at(stage, ptr + 4).ok()?,
-                s.f32_at(stage, ptr + 8).ok()?,
-            ];
-            let trigger = usize::from(s.u16_at(stage, ptr + 12).ok()?);
-            Some(MapSunStage {
-                origin,
-                trigger: capture_iw5_trigger_hulls(s, clip.stage_trigger, trigger)
-                    .unwrap_or_default(),
-                sun_primary_light: s.u8_at(stage, ptr + 14).ok()?,
-            })
-        })
-        .collect()
-}
-
-pub fn trigger_models_iw5(s: &fastfile_iw5::ZoneStream<'_>) -> Vec<Vec<MapTriggerHull>> {
-    let Some(geo) = s.map_ents() else {
-        return Vec::new();
-    };
-    (0..geo.trigger_model_count)
-        .map(|n| capture_iw5_trigger_hulls(s, geo, n).unwrap_or_default())
         .collect()
 }
 
@@ -1392,52 +938,155 @@ fn capture_trigger_hulls(
     Some(out)
 }
 
-fn capture_iw5_trigger_hulls(
-    s: &fastfile_iw5::ZoneStream<'_>,
-    g: fastfile_iw5::MapEntsGeometry,
-    index: usize,
-) -> Option<Vec<MapTriggerHull>> {
-    if index >= g.trigger_model_count {
-        return None;
+pub type EntityBlock = Vec<(String, String)>;
+pub fn entity_value<'a>(block: &'a EntityBlock, key: &str) -> Option<&'a str> {
+    block
+        .iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.as_str())
+}
+pub fn set_entity_value(block: &mut EntityBlock, key: &str, value: String) {
+    match block.iter_mut().find(|(k, _)| k == key) {
+        Some((_, v)) => *v = value,
+        None => block.push((key.to_owned(), value)),
     }
-    let model = g.trigger_models?.at(index * 8);
-    let count = usize::from(s.u16_at(model, 4).ok()?);
-    let first = usize::from(s.u16_at(model, 6).ok()?);
-    if first.checked_add(count)? > g.trigger_hull_count || count == 0 {
-        return None;
-    }
-    let mut out = Vec::new();
-    for n in first..first + count {
-        let hull = g.trigger_hulls?.at(n * 32);
-        let mid = [
-            s.f32_at(hull, 0).ok()?,
-            s.f32_at(hull, 4).ok()?,
-            s.f32_at(hull, 8).ok()?,
-        ];
-        let half = [
-            s.f32_at(hull, 12).ok()?,
-            s.f32_at(hull, 16).ok()?,
-            s.f32_at(hull, 20).ok()?,
-        ];
-        let count = usize::from(s.u16_at(hull, 28).ok()?);
-        let first = usize::from(s.u16_at(hull, 30).ok()?);
-        if first.checked_add(count)? > g.trigger_slab_count {
-            return None;
+}
+
+#[derive(Clone, Copy)]
+pub struct OvertimeEntityRule {
+    pub target: &'static str,
+    pub label: &'static str,
+    pub replacement: &'static str,
+    pub gameobject: &'static str,
+}
+
+pub struct EntityRules {
+    pub overtime: Option<OvertimeEntityRule>,
+    pub gametype_aliases: &'static [(&'static str, &'static str)],
+    pub augment: fn(&[EntityBlock], &mut Vec<EntityBlock>),
+}
+
+pub fn normalize_map_entities(text: &str, rules: &EntityRules) -> String {
+    let mut blocks: Vec<EntityBlock> = Vec::new();
+    let mut open: Option<EntityBlock> = None;
+    for line in text.lines() {
+        match (line.trim(), open.as_mut()) {
+            ("{", None) => open = Some(Vec::new()),
+            ("}", Some(_)) => blocks.extend(open.take()),
+            (trimmed, Some(block)) => {
+                let mut quoted = trimmed.split('"').skip(1).step_by(2);
+                if let (Some(key), Some(value)) = (quoted.next(), quoted.next()) {
+                    block.push((key.to_owned(), value.to_owned()));
+                }
+            }
+            _ => {}
         }
-        let mut slabs = Vec::new();
-        for i in first..first + count {
-            let slab = g.trigger_slabs?.at(i * 20);
-            slabs.push((
-                [
-                    s.f32_at(slab, 0).ok()?,
-                    s.f32_at(slab, 4).ok()?,
-                    s.f32_at(slab, 8).ok()?,
-                ],
-                s.f32_at(slab, 12).ok()?,
-                s.f32_at(slab, 16).ok()?,
-            ));
-        }
-        out.push(MapTriggerHull { mid, half, slabs });
     }
-    Some(out)
+
+    let mut flag_visuals: Vec<(String, String)> = Vec::new();
+    let mut spawned: Vec<EntityBlock> = Vec::new();
+    for block in &mut blocks {
+        let team = entity_value(block, "script_team").map(str::to_owned);
+        if let Some(suffix) =
+            entity_value(block, "classname").and_then(|c| c.strip_prefix("mp_dem_spawn_"))
+        {
+            set_entity_value(block, "classname", format!("mp_dd_spawn_{suffix}"));
+        }
+        if let Some(overtime) = rules.overtime
+            && entity_value(block, "targetname") == Some(overtime.target)
+            && entity_value(block, "script_label") == Some(overtime.label)
+        {
+            set_entity_value(block, "targetname", overtime.replacement.to_owned());
+            set_entity_value(
+                block,
+                "script_gameobjectname",
+                overtime.gameobject.to_owned(),
+            );
+        }
+        match (entity_value(block, "targetname"), team.as_deref()) {
+            (Some("bombzone_dem"), _) => {
+                set_entity_value(block, "targetname", "dd_bombzone".to_owned())
+            }
+            (Some("ctf_flag_zone_trig"), Some(team)) => {
+                set_entity_value(block, "targetname", format!("ctf_zone_{team}"));
+                if entity_value(block, "height").is_none() {
+                    set_entity_value(block, "height", "128".to_owned());
+                }
+            }
+            (Some("ctf_flag_pickup_trig"), Some(team)) => match entity_value(block, "target") {
+                Some(target) => flag_visuals.push((target.to_owned(), format!("ctf_flag_{team}"))),
+                None => {
+                    spawned.push(
+                        [("classname", "script_model".to_owned())]
+                            .into_iter()
+                            .chain(["origin", "angles"].into_iter().filter_map(|key| {
+                                Some((key, entity_value(block, key)?.to_owned()))
+                            }))
+                            .chain([("targetname", format!("ctf_flag_{team}"))])
+                            .map(|(k, v)| (k.to_owned(), v))
+                            .collect(),
+                    )
+                }
+            },
+            _ => {}
+        }
+        if let Some(names) = entity_value(block, "script_gameobjectname") {
+            let mut tokens: Vec<&str> = Vec::new();
+            for token in names.split_whitespace() {
+                let token = match token {
+                    "bombzone_dem" => "dd_bombzone",
+                    token => token,
+                };
+                tokens.push(token);
+                tokens.extend(
+                    rules
+                        .gametype_aliases
+                        .iter()
+                        .find_map(|&(native, reference)| (native == token).then_some(reference)),
+                );
+            }
+            let mut seen = std::collections::BTreeSet::new();
+            tokens.retain(|token| seen.insert(*token));
+            let names = tokens.join(" ");
+            set_entity_value(block, "script_gameobjectname", names);
+        }
+    }
+    for block in &mut blocks {
+        if let Some((_, name)) = entity_value(block, "targetname")
+            .and_then(|own| flag_visuals.iter().find(|(target, _)| target == own))
+        {
+            let name = name.clone();
+            set_entity_value(block, "targetname", name);
+        }
+    }
+    (rules.augment)(&blocks, &mut spawned);
+    blocks.extend(spawned);
+    if !blocks
+        .iter()
+        .any(|block| entity_value(block, "targetname") == Some("care_package"))
+    {
+        blocks.push(vec![
+            ("classname".into(), "script_model".into()),
+            ("targetname".into(), "care_package".into()),
+            ("target".into(), "care_package_collision".into()),
+        ]);
+        blocks.push(vec![
+            ("classname".into(), "script_brushmodel".into()),
+            ("targetname".into(), "care_package_collision".into()),
+        ]);
+    }
+
+    let mut out = String::with_capacity(text.len() + text.len() / 16);
+    for block in blocks {
+        out.push_str("{\n");
+        for (key, value) in block {
+            out.push_str(&format!("\"{key}\" \"{value}\"\n"));
+        }
+        out.push_str("}\n");
+    }
+    out
+}
+
+pub fn parse_reference_spawn_points(text: &str) -> Vec<SpawnPoint> {
+    parse_spawn_points(text, REFERENCE_MP_SPAWN_CLASSNAMES)
 }

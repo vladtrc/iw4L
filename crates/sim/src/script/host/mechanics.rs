@@ -163,9 +163,6 @@ impl Mechanics {
 
 pub(crate) fn advance_mechanics(world: &mut World) {
     let request = world.resource::<crate::step::StepRequest>();
-    if !request.reason.advances_authority_world() {
-        return;
-    }
     let now = i64::from(request.tick.0) * i64::from(crate::MATCH_TICK_MS);
     let runtime = world.resource::<RoundScript>();
     if runtime.fault.is_some() || runtime.program.is_none() {

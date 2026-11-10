@@ -5,24 +5,22 @@ use fastfile_iw4::{ScriptStrings, ZoneStream};
 use crate::asset_graph::{
     AssetEdge, AssetEdgeCensus, capture_xmodel_material_slots, stamp_xmodel_material_edges,
 };
-use crate::model_skel::{FpvSkel, capture_fpv_skel, capture_fpv_skel_iw5, capture_fpv_skel_t5};
+use crate::model_skel::{FpvSkel, capture_fpv_skel};
 use crate::{ModelKind, model_kind};
-use asset_core::AssetNamespace;
+use asset_core::FamilyId;
 use asset_core::FpvMeshIndex;
 use asset_material::{MaterialCatalog, MaterialDefinitions};
 
 pub const VIEWHANDS_NAME: &str = "viewmodel_base_viewhands";
 
-pub const VIEWHANDS_NAME_T5: &str = "viewhands_usmc";
-
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FpvMeshKey {
-    pub namespace: AssetNamespace,
+    pub namespace: FamilyId,
     pub name: String,
 }
 
 impl FpvMeshKey {
-    pub fn new(namespace: AssetNamespace, name: &str) -> Self {
+    pub fn new(namespace: FamilyId, name: &str) -> Self {
         Self {
             namespace,
             name: ascii_lower(name),
@@ -34,85 +32,72 @@ impl FpvMeshKey {
     }
 }
 
-const fn game_default_hands_name(ns: AssetNamespace) -> &'static str {
-    match ns {
-        AssetNamespace::Iw4 | AssetNamespace::Iw5 | AssetNamespace::T6 => VIEWHANDS_NAME,
-        AssetNamespace::T5 => VIEWHANDS_NAME_T5,
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FpvHands {
-    FromKit {
-        namespace: AssetNamespace,
-        name: String,
-    },
+    FromScript { namespace: FamilyId, name: String },
+    FromKit { namespace: FamilyId, name: String },
 
-    FromWeaponDef {
-        namespace: AssetNamespace,
-        name: String,
-    },
+    FromWeaponDef { namespace: FamilyId, name: String },
 
-    GameDefault {
-        namespace: AssetNamespace,
-        name: String,
-    },
+    GameDefault { namespace: FamilyId, name: String },
     Unresolved,
 }
 
 impl FpvHands {
-    pub fn key(&self) -> Option<(AssetNamespace, &str)> {
+    pub fn key(&self) -> Option<(FamilyId, &str)> {
         match self {
-            Self::FromKit { namespace, name }
+            Self::FromScript { namespace, name }
+            | Self::FromKit { namespace, name }
             | Self::FromWeaponDef { namespace, name }
             | Self::GameDefault { namespace, name } => Some((*namespace, name.as_str())),
             Self::Unresolved => None,
         }
     }
 
-    pub fn game_default(ns: AssetNamespace) -> Self {
-        Self::GameDefault {
+    pub fn game_default(ns: FamilyId) -> Self {
+        crate::model_family(ns).map_or(Self::Unresolved, |family| Self::GameDefault {
             namespace: ns,
-            name: game_default_hands_name(ns).to_owned(),
-        }
+            name: family.default_hands.to_owned(),
+        })
     }
 
     pub fn resolve(
         catalog: &FpvMeshCatalog,
-        map_ns: AssetNamespace,
+        map_ns: FamilyId,
         kit: Option<&crate::SoldierKit>,
         weapon_hand: Option<&str>,
-        weapon_ns: AssetNamespace,
+        weapon_ns: FamilyId,
     ) -> Self {
         if let Some(kit) = kit {
-            if let Some(name) = kit.arms.as_deref() {
-                if catalog.contains(map_ns, name) {
-                    return Self::FromKit {
-                        namespace: map_ns,
-                        name: name.to_owned(),
-                    };
-                }
+            if let Some(name) = kit.arms.as_deref()
+                && catalog.contains(map_ns, name)
+            {
+                return Self::FromKit {
+                    namespace: map_ns,
+                    name: name.to_owned(),
+                };
             }
             let arm_names: Vec<&str> = catalog
                 .names_in(map_ns)
                 .filter(|n| crate::is_arms_model(n))
                 .collect();
-            if let Some(name) = crate::arms_for_body(&kit.body, &arm_names) {
-                if catalog.contains(map_ns, &name) {
-                    return Self::FromKit {
-                        namespace: map_ns,
-                        name,
-                    };
-                }
-            }
-        }
-        if let Some(name) = weapon_hand {
-            if weapon_ns == map_ns && catalog.contains(weapon_ns, name) {
-                return Self::FromWeaponDef {
-                    namespace: weapon_ns,
-                    name: name.to_owned(),
+            if let Some(name) = crate::arms_for_body(&kit.body, &arm_names)
+                && catalog.contains(map_ns, &name)
+            {
+                return Self::FromKit {
+                    namespace: map_ns,
+                    name,
                 };
             }
+        }
+        if let Some(name) = weapon_hand
+            && weapon_ns == map_ns
+            && catalog.contains(weapon_ns, name)
+        {
+            return Self::FromWeaponDef {
+                namespace: weapon_ns,
+                name: name.to_owned(),
+            };
         }
         Self::Unresolved
     }
@@ -126,7 +111,7 @@ pub struct TagViewBind {
 
 #[derive(Clone, Debug)]
 pub struct FpvMeshEntry {
-    pub namespace: AssetNamespace,
+    pub namespace: FamilyId,
     pub skel: std::sync::Arc<FpvSkel>,
 
     pub material_keys: Vec<Option<asset_core::MaterialKey>>,
@@ -136,7 +121,7 @@ pub struct FpvMeshEntry {
 
 impl FpvMeshEntry {
     fn from_skel(
-        namespace: AssetNamespace,
+        namespace: FamilyId,
         skel: std::sync::Arc<FpvSkel>,
         materials: Option<&MaterialCatalog>,
     ) -> Self {
@@ -203,26 +188,15 @@ pub struct FpvMeshCatalog {
 
     zones: Vec<crate::ZoneOwner>,
 
-    pub map_namespace: Option<AssetNamespace>,
+    pub map_namespace: Option<FamilyId>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct FpvMeshBuild {
     catalog: FpvMeshCatalog,
     capture_zone: crate::ZoneOwner,
     strings: ScriptStrings,
-    capture_ns: Option<AssetNamespace>,
-}
-
-impl Default for FpvMeshBuild {
-    fn default() -> Self {
-        Self {
-            catalog: FpvMeshCatalog::default(),
-            capture_zone: crate::ZoneOwner::default(),
-            strings: ScriptStrings::default(),
-            capture_ns: None,
-        }
-    }
+    capture_ns: Option<FamilyId>,
 }
 
 impl std::ops::Deref for FpvMeshBuild {
@@ -245,7 +219,7 @@ impl FpvMeshBuild {
         self.strings = strings;
     }
 
-    pub fn set_capture_ns(&mut self, ns: AssetNamespace) {
+    pub fn set_capture_ns(&mut self, ns: FamilyId) {
         self.capture_ns = Some(ns);
     }
 
@@ -253,7 +227,7 @@ impl FpvMeshBuild {
         self.capture_zone = zone;
     }
 
-    pub fn set_map_namespace(&mut self, ns: Option<AssetNamespace>) {
+    pub fn set_map_namespace(&mut self, ns: Option<FamilyId>) {
         self.catalog.map_namespace = ns;
     }
 
@@ -276,61 +250,18 @@ impl FpvMeshBuild {
         self.insert_captured(skel, Some(materials));
     }
 
-    pub fn capture_t5(
-        &mut self,
-        stream: &fastfile_t5::ZoneStream<'_>,
-        strings: &fastfile_t5::ScriptStrings,
-        materials: &MaterialCatalog,
-    ) {
-        let Some(geometry) = stream.latest_xmodel() else {
-            return;
-        };
-        let Some(name_ptr) = geometry.name else {
-            return;
-        };
-        let Ok(name) = stream.cstr(name_ptr) else {
-            return;
-        };
-        if model_kind(name) != Some(ModelKind::Fpv) {
-            return;
-        }
-        let Some(skel) = capture_fpv_skel_t5(stream, strings, geometry, Some(materials)) else {
-            return;
-        };
-        self.insert_in(AssetNamespace::T5, skel, Some(materials));
-    }
-
-    pub fn capture_iw5(
-        &mut self,
-        stream: &fastfile_iw5::ZoneStream<'_>,
-        strings: &fastfile_iw5::ScriptStrings,
-        materials: &MaterialCatalog,
-    ) {
-        let Some(geometry) = stream.latest_xmodel() else {
-            return;
-        };
-        let Some(name_ptr) = geometry.name else {
-            return;
-        };
-        let Ok(name) = stream.cstr(name_ptr) else {
-            return;
-        };
-        if model_kind(name) != Some(ModelKind::Fpv) {
-            return;
-        }
-        let Some(skel) = capture_fpv_skel_iw5(stream, strings, geometry, Some(materials)) else {
-            return;
-        };
-        self.insert_in(AssetNamespace::Iw5, skel, Some(materials));
-    }
-
     pub fn capture_shared(
         &mut self,
-        ns: Option<AssetNamespace>,
+        ns: Option<FamilyId>,
         skel: &std::sync::Arc<FpvSkel>,
         materials: &MaterialCatalog,
     ) {
-        if model_kind(&skel.name) == Some(ModelKind::Fpv) {
+        if crate::classify_model(
+            ns.or(self.capture_ns)
+                .expect("asset capture requires an explicit family"),
+            &skel.name,
+        ) == Some(ModelKind::Fpv)
+        {
             self.insert_in(
                 ns.or(self.capture_ns)
                     .expect("asset capture requires an explicit family"),
@@ -351,7 +282,7 @@ impl FpvMeshBuild {
 
     pub fn insert_in(
         &mut self,
-        ns: AssetNamespace,
+        ns: FamilyId,
         skel: impl Into<std::sync::Arc<FpvSkel>>,
         materials: Option<&MaterialCatalog>,
     ) {
@@ -407,13 +338,16 @@ impl FpvMeshCatalog {
         self.identity
     }
 
-    pub fn index_by_name(&self, ns: AssetNamespace, name: &str) -> Option<usize> {
+    pub fn index_by_name(&self, ns: FamilyId, name: &str) -> Option<usize> {
         let key = FpvMeshKey::new(ns, name);
         self.indices.get(&key).copied()
     }
 
     pub fn zone_of(&self, index: usize) -> crate::ZoneOwner {
-        self.zones.get(index).copied().unwrap_or_default()
+        self.zones
+            .get(index)
+            .copied()
+            .unwrap_or(asset_core::ZoneOwner::UNKNOWN)
     }
 
     pub fn get_at(&self, index: usize) -> Option<&FpvMeshEntry> {
@@ -459,7 +393,7 @@ impl FpvMeshCatalog {
         )
     }
 
-    pub fn get(&self, ns: AssetNamespace, name: &str) -> Option<&FpvMeshEntry> {
+    pub fn get(&self, ns: FamilyId, name: &str) -> Option<&FpvMeshEntry> {
         self.index_by_name(ns, name)
             .and_then(|index| self.get_at(index))
     }
@@ -474,10 +408,10 @@ impl FpvMeshCatalog {
     }
 
     pub fn hands(&self) -> Option<&FpvMeshEntry> {
-        self.hands_in(AssetNamespace::Iw4)
+        self.hands_in(FamilyId::IW4)
     }
 
-    pub fn hands_in(&self, ns: AssetNamespace) -> Option<&FpvMeshEntry> {
+    pub fn hands_in(&self, ns: FamilyId) -> Option<&FpvMeshEntry> {
         self.get_hands(&FpvHands::game_default(ns))
     }
 
@@ -486,7 +420,7 @@ impl FpvMeshCatalog {
         self.get(ns, name)
     }
 
-    pub fn names_in(&self, ns: AssetNamespace) -> impl Iterator<Item = &str> {
+    pub fn names_in(&self, ns: FamilyId) -> impl Iterator<Item = &str> {
         self.order
             .iter()
             .filter(move |k| k.namespace == ns)
@@ -501,25 +435,22 @@ impl FpvMeshCatalog {
         self.entries.is_empty()
     }
 
-    pub fn contains(&self, ns: AssetNamespace, name: &str) -> bool {
+    pub fn contains(&self, ns: FamilyId, name: &str) -> bool {
         self.indices.contains_key(&FpvMeshKey::new(ns, name))
     }
 
-    pub fn namespace_count(&self, ns: AssetNamespace) -> usize {
+    pub fn namespace_count(&self, ns: FamilyId) -> usize {
         self.order.iter().filter(|k| k.namespace == ns).count()
     }
 
     pub fn collide_name_count(&self) -> usize {
-        let mut seen: HashMap<&str, u8> = HashMap::new();
-        for k in &self.order {
-            *seen.entry(k.name.as_str()).or_insert(0) |= match k.namespace {
-                AssetNamespace::Iw4 => 1,
-                AssetNamespace::T5 => 2,
-                AssetNamespace::Iw5 => 4,
-                AssetNamespace::T6 => 8,
-            };
+        let mut seen: HashMap<&str, std::collections::BTreeSet<FamilyId>> = HashMap::new();
+        for key in &self.order {
+            seen.entry(key.name.as_str())
+                .or_default()
+                .insert(key.namespace);
         }
-        seen.values().filter(|bits| bits.count_ones() >= 2).count()
+        seen.values().filter(|families| families.len() >= 2).count()
     }
 
     pub fn tag_view_count(&self) -> usize {
@@ -532,15 +463,6 @@ impl FpvMeshCatalog {
 
 fn ascii_lower(name: &str) -> String {
     name.to_ascii_lowercase()
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub struct PoseStats {
-    pub hands_rigid: usize,
-    pub hands_blend: usize,
-    pub gun_rigid: usize,
-    pub gun_blend: usize,
-    pub idle_sampled: bool,
 }
 
 const SCOPE_ATTACH_TAGS: &[&str] = &[
@@ -827,31 +749,34 @@ pub fn plan_fpv_mounts(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct FamilyFpvMesh<F: asset_core::Family> {
+pub struct FpvMeshHandle {
     index: crate::FpvMeshIndex,
     owner: u64,
-    family: core::marker::PhantomData<F>,
+    family: FamilyId,
 }
-
-impl<F: asset_core::Family> FamilyFpvMesh<F> {
+impl FpvMeshHandle {
     pub fn index(self) -> crate::FpvMeshIndex {
         self.index
     }
     pub fn owner(self) -> u64 {
         self.owner
     }
+    pub fn family(self) -> FamilyId {
+        self.family
+    }
 }
-
 impl FpvMeshCatalog {
-    pub fn family_mesh<F: asset_core::Family>(
+    pub fn family_mesh(
         &self,
         index: crate::FpvMeshIndex,
-    ) -> Option<FamilyFpvMesh<F>> {
-        (self.identity() != 0 && self.get_at(index.order())?.namespace == F::ID).then_some(
-            FamilyFpvMesh {
+        family: FamilyId,
+    ) -> Option<FpvMeshHandle> {
+        crate::model_family(family)?;
+        (self.identity() != 0 && self.get_at(index.order())?.namespace == family).then_some(
+            FpvMeshHandle {
                 index,
                 owner: self.identity(),
-                family: core::marker::PhantomData,
+                family,
             },
         )
     }

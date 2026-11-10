@@ -62,8 +62,6 @@ pub fn calc_fov(i: &FovInputs) -> f32 {
         local
     };
 
-    if (i.e_flags & EFLAGS_TURRET_FOV) != 0 {}
-
     fov *= i.fov_scale;
     if (fov < i.fov_min) != (fov == i.fov_min) {
         fov = i.fov_min;

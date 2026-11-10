@@ -8,7 +8,6 @@ use fx_iw4::{
 use std::collections::HashMap;
 
 use crate::elem::{FX_ELEM_HANDLE_NONE, elem_slot_for_handle};
-use crate::gaps::{ChildSpawn, FxGapCause};
 use crate::spark::{
     FxSparkFillVisual, spark_elem_axis, spark_elem_world_origin, update_spark_history,
 };
@@ -174,30 +173,28 @@ pub struct FxSparkFillQuery<'a> {
     pub norm_time: f32,
 }
 
+pub trait FxUpdateHooks: crate::trail::FxTrailUpdateHooks {
+    fn pending_loop(
+        &mut self,
+        host: &mut FxSystemHost,
+        slot: usize,
+        prev: i32,
+        now: i32,
+        def_name: &str,
+    ) -> Option<i32>;
+    fn motion(&mut self, q: FxElemMotionQuery<'_>) -> Option<FxElemMotionResult>;
+    fn emit(&mut self, q: FxEmitQuery<'_>) -> Option<fx_iw4::FxEmitSchedule>;
+    fn child(&mut self, host: &mut FxSystemHost, req: FxChildSpawnRequest<'_>) -> bool;
+    fn spark_fill(&mut self, q: FxSparkFillQuery<'_>) -> Option<FxSparkFillVisual>;
+    fn fountain_trace(&mut self, start: [f32; 3], end: [f32; 3]) -> (f32, [f32; 3]);
+}
+
 pub fn update(
     host: &mut FxSystemHost,
     non_bolted_only: bool,
     camera_origin: [f32; 3],
-    mut pending_loop: impl FnMut(&mut FxSystemHost, usize, i32, i32, &str) -> Option<i32>,
-    mut motion: impl FnMut(FxElemMotionQuery<'_>) -> Option<FxElemMotionResult>,
-    mut on_emit: impl FnMut(FxEmitQuery<'_>) -> Option<fx_iw4::FxEmitSchedule>,
-    mut on_child: impl FnMut(&mut FxSystemHost, FxChildSpawnRequest<'_>) -> bool,
-    mut on_trail_def: impl FnMut(u16, u8) -> Option<crate::def::FxElemDefInfo>,
-    mut on_trail_trace: impl FnMut(
-        [f32; 3],
-        [f32; 3],
-        [f32; 3],
-        [f32; 3],
-        u32,
-    ) -> Option<crate::trail::FxTrailCollideHit>,
-    mut on_trail_vel_graphs: impl FnMut(
-        u16,
-        u8,
-    )
-        -> (Vec<fx_iw4::FxElemVec3Range>, Vec<fx_iw4::FxElemVec3Range>),
-    mut on_spark_fill: impl FnMut(FxSparkFillQuery<'_>) -> Option<FxSparkFillVisual>,
+    hooks: &mut impl FxUpdateHooks,
     collide_parallel: impl FnOnce(&[PendingCollide]) -> HashMap<u16, Option<FxElemMotionResult>>,
-    mut on_fountain_trace: impl FnMut([f32; 3], [f32; 3]) -> (f32, [f32; 3]),
 ) {
     host.iterator_count = begin_iterating_over_effects_exclusive(host.iterator_count);
 
@@ -211,13 +208,12 @@ pub fn update(
         let mut cursor = start;
         while cursor != end {
             let handle = host.handle_at_ring(cursor);
-            if let Some(slot) = host.slot_index_for_handle(handle) {
-                if let Some((prev_msec, msec_now)) =
-                    stamp_and_pending_loop(host, slot, want_bolted, &mut pending_loop)
-                {
-                    collect_collide_jobs(host, slot, prev_msec, msec_now, &mut collide_jobs);
-                    pending_apply.push((slot, prev_msec, msec_now));
-                }
+            if let Some(slot) = host.slot_index_for_handle(handle)
+                && let Some((prev_msec, msec_now)) =
+                    stamp_and_pending_loop(host, slot, want_bolted, hooks)
+            {
+                collect_collide_jobs(host, slot, prev_msec, msec_now, &mut collide_jobs);
+                pending_apply.push((slot, prev_msec, msec_now));
             }
             cursor = cursor.wrapping_add(1);
         }
@@ -232,15 +228,8 @@ pub fn update(
             prev_msec,
             msec_now,
             camera_origin,
-            &mut motion,
+            hooks,
             &collide_cache,
-            &mut on_emit,
-            &mut on_child,
-            &mut on_trail_def,
-            &mut on_trail_trace,
-            &mut on_trail_vel_graphs,
-            &mut on_spark_fill,
-            &mut on_fountain_trace,
         );
     }
 
@@ -291,7 +280,7 @@ fn stamp_and_pending_loop(
     host: &mut FxSystemHost,
     slot: usize,
     want_bolted: bool,
-    pending_loop: &mut impl FnMut(&mut FxSystemHost, usize, i32, i32, &str) -> Option<i32>,
+    hooks: &mut impl FxUpdateHooks,
 ) -> Option<(i32, i32)> {
     let frame = host.frame_stamp;
     let msec_now = host.msec_now;
@@ -322,27 +311,25 @@ fn stamp_and_pending_loop(
         return None;
     }
     apply_fx_update_effect_bolt_to_slot(host, slot);
-    let prev_msec = match host.effect_at(slot) {
-        Some(e) => e.msec_last_update,
-        None => return None,
+    let prev_msec = {
+        let e = host.effect_at(slot)?;
+        e.msec_last_update
     };
 
-    let (pending, def_name, msec_begin) = match host.effect_at(slot) {
-        Some(e) => (
+    let (pending, def_name, msec_begin) = {
+        let e = host.effect_at(slot)?;
+        (
             (e.status & FX_STATUS_HAS_PENDING_LOOP_ELEMS) != 0,
             slot_def_name(e),
             e.msec_begin,
-        ),
-        None => return None,
+        )
     };
-    if pending {
-        if let Some(msec_looping_life) =
-            pending_loop(host, slot, prev_msec, msec_now, def_name.as_str())
-        {
-            if msec_looping_life < msec_now.wrapping_sub(msec_begin) {
-                stop_pending_loop(host, slot);
-            }
-        }
+    if pending
+        && let Some(msec_looping_life) =
+            hooks.pending_loop(host, slot, prev_msec, msec_now, def_name.as_str())
+        && msec_looping_life < msec_now.wrapping_sub(msec_begin)
+    {
+        stop_pending_loop(host, slot);
     }
     Some((prev_msec, msec_now))
 }
@@ -399,14 +386,14 @@ fn pending_collide_for_elem(
     let origin = elem.origin;
     let msec_begin = elem.msec_begin;
     let life_msec = elem.life_span_msec.max(1);
-    let (def_name, catalog_index, now, alt) = match host.effect_at(effect_slot) {
-        Some(e) => (
+    let (def_name, catalog_index, now, alt) = {
+        let e = host.effect_at(effect_slot)?;
+        (
             slot_def_name(e),
             e.catalog_index,
             e.frame_now(),
             e.frame_when_played(),
-        ),
-        None => return None,
+        )
     };
     let orient = elem.orientation(&now, &alt);
     let life_ms = life_msec as f32;
@@ -438,19 +425,7 @@ pub(crate) fn apply_update_effect_partial_trails(
     slot: usize,
     prev_msec: i32,
     msec_now: i32,
-    on_trail_def: &mut impl FnMut(u16, u8) -> Option<crate::def::FxElemDefInfo>,
-    on_trail_trace: &mut impl FnMut(
-        [f32; 3],
-        [f32; 3],
-        [f32; 3],
-        [f32; 3],
-        u32,
-    ) -> Option<crate::trail::FxTrailCollideHit>,
-    on_trail_vel_graphs: &mut impl FnMut(
-        u16,
-        u8,
-    )
-        -> (Vec<fx_iw4::FxElemVec3Range>, Vec<fx_iw4::FxElemVec3Range>),
+    hooks: &mut impl crate::trail::FxTrailUpdateHooks,
 ) {
     let Some(e) = host.effect_at(slot) else {
         return;
@@ -461,15 +436,7 @@ pub(crate) fn apply_update_effect_partial_trails(
     let looping = (e.status & FX_STATUS_HAS_PENDING_LOOP_ELEMS) != 0;
     let distance = e.distance + fx_iw4::vec3_distance(e.origin_last, e.origin);
     crate::trail::apply_partial_last_trail_spawn_dist(
-        host,
-        slot,
-        prev_msec,
-        msec_now,
-        distance,
-        looping,
-        on_trail_def,
-        on_trail_trace,
-        on_trail_vel_graphs,
+        host, slot, prev_msec, msec_now, distance, looping, hooks,
     );
 }
 
@@ -479,67 +446,29 @@ fn apply_effect_partial(
     prev_msec: i32,
     msec_now: i32,
     camera_origin: [f32; 3],
-    motion: &mut impl FnMut(FxElemMotionQuery<'_>) -> Option<FxElemMotionResult>,
+    hooks: &mut impl FxUpdateHooks,
     collide_cache: &HashMap<u16, Option<FxElemMotionResult>>,
-    on_emit: &mut impl FnMut(FxEmitQuery<'_>) -> Option<fx_iw4::FxEmitSchedule>,
-    on_child: &mut impl FnMut(&mut FxSystemHost, FxChildSpawnRequest<'_>) -> bool,
-    on_trail_def: &mut impl FnMut(u16, u8) -> Option<crate::def::FxElemDefInfo>,
-    on_trail_trace: &mut impl FnMut(
-        [f32; 3],
-        [f32; 3],
-        [f32; 3],
-        [f32; 3],
-        u32,
-    ) -> Option<crate::trail::FxTrailCollideHit>,
-    on_trail_vel_graphs: &mut impl FnMut(
-        u16,
-        u8,
-    )
-        -> (Vec<fx_iw4::FxElemVec3Range>, Vec<fx_iw4::FxElemVec3Range>),
-    on_spark_fill: &mut impl FnMut(FxSparkFillQuery<'_>) -> Option<FxSparkFillVisual>,
-    on_fountain_trace: &mut impl FnMut([f32; 3], [f32; 3]) -> (f32, [f32; 3]),
 ) {
     let has_trails = host
         .effect_at(slot)
         .is_some_and(|e| e.first_trail_handle != crate::trail::FX_TRAIL_HANDLE_NONE);
     for class in 0..3 {
-        update_partial_for_class(
-            host,
-            slot,
-            class,
-            prev_msec,
-            msec_now,
-            motion,
-            collide_cache,
-            on_emit,
-            on_child,
-            on_spark_fill,
-            on_fountain_trace,
-        );
+        update_partial_for_class(host, slot, class, prev_msec, msec_now, hooks, collide_cache);
     }
 
     if has_trails {
         crate::trail::update_effect_trails(
             host,
             slot,
-            i32::MIN,
-            i32::MAX,
+            i32::MIN..i32::MAX,
             prev_msec,
             msec_now,
             camera_origin,
-            &mut *on_trail_def,
+            |index, def_index| hooks.trail_def(index, def_index),
         );
 
-        apply_update_effect_partial_trails(
-            host,
-            slot,
-            prev_msec,
-            msec_now,
-            on_trail_def,
-            on_trail_trace,
-            on_trail_vel_graphs,
-        );
-        drain_pending_trail_impacts(host, on_child);
+        apply_update_effect_partial_trails(host, slot, prev_msec, msec_now, hooks);
+        drain_pending_trail_impacts(host, hooks);
     }
 
     crate::sort::sort_new_elems_in_effect(host, slot, camera_origin);
@@ -557,12 +486,8 @@ fn update_partial_for_class(
     class: usize,
     prev_msec: i32,
     msec_now: i32,
-    motion: &mut impl FnMut(FxElemMotionQuery<'_>) -> Option<FxElemMotionResult>,
+    hooks: &mut impl FxUpdateHooks,
     collide_cache: &HashMap<u16, Option<FxElemMotionResult>>,
-    on_emit: &mut impl FnMut(FxEmitQuery<'_>) -> Option<fx_iw4::FxEmitSchedule>,
-    on_child: &mut impl FnMut(&mut FxSystemHost, FxChildSpawnRequest<'_>) -> bool,
-    on_spark_fill: &mut impl FnMut(FxSparkFillQuery<'_>) -> Option<FxSparkFillVisual>,
-    on_fountain_trace: &mut impl FnMut([f32; 3], [f32; 3]) -> (f32, [f32; 3]),
 ) {
     let mut handle = host
         .effect_at(effect_slot)
@@ -578,12 +503,8 @@ fn update_partial_for_class(
             handle,
             prev_msec,
             msec_now,
-            motion,
+            hooks,
             collide_cache,
-            on_emit,
-            on_child,
-            on_spark_fill,
-            on_fountain_trace,
         );
         if !keep {
             free_elem(host, handle);
@@ -598,12 +519,8 @@ fn update_element(
     handle: u16,
     prev_msec: i32,
     msec_now: i32,
-    motion: &mut impl FnMut(FxElemMotionQuery<'_>) -> Option<FxElemMotionResult>,
+    hooks: &mut impl FxUpdateHooks,
     collide_cache: &HashMap<u16, Option<FxElemMotionResult>>,
-    on_emit: &mut impl FnMut(FxEmitQuery<'_>) -> Option<fx_iw4::FxEmitSchedule>,
-    on_child: &mut impl FnMut(&mut FxSystemHost, FxChildSpawnRequest<'_>) -> bool,
-    on_spark_fill: &mut impl FnMut(FxSparkFillQuery<'_>) -> Option<FxSparkFillVisual>,
-    on_fountain_trace: &mut impl FnMut([f32; 3], [f32; 3]) -> (f32, [f32; 3]),
 ) -> bool {
     let Some(slot) = elem_slot_for_handle(handle) else {
         return false;
@@ -642,17 +559,20 @@ fn update_element(
     let orient = elem.orientation(&now, &alt);
 
     if msec_now >= death {
-        spawn_death_child(
+        spawn_child(
             host,
-            on_child,
-            def_name.as_str(),
-            catalog_index,
-            def_index,
-            origin,
-            orient,
-            msec_now,
-            products,
-            mark_entity,
+            hooks,
+            FxChildSpawnRequest {
+                products,
+                mark_entity,
+                kind: FxChildKind::Death,
+                parent_def_name: def_name.as_str(),
+                catalog_index,
+                def_index,
+                origin: fx_iw4::orientation_pos_to_world(orient.origin, orient.axis, origin),
+                axis: orient.axis,
+                msec: msec_now,
+            },
         );
         return false;
     }
@@ -684,7 +604,7 @@ fn update_element(
     match collide_cache
         .get(&handle)
         .copied()
-        .unwrap_or_else(|| motion(q))
+        .unwrap_or_else(|| hooks.motion(q))
     {
         Some(result) => {
             let origin_end = [
@@ -701,7 +621,7 @@ fn update_element(
                 elem.supported_since_ms = result.supported_since_ms;
             }
             let emit_residual = host.elems.get(slot).map(|e| e.emit_residual).unwrap_or(0);
-            if let Some(sched) = on_emit(FxEmitQuery {
+            if let Some(sched) = hooks.emit(FxEmitQuery {
                 def_name: def_name.as_str(),
                 catalog_index,
                 def_index,
@@ -722,16 +642,19 @@ fn update_element(
                     origin_end[2] - origin[2],
                 ];
                 let axis = if (flags & fx_iw4::FX_ELEM_EMIT_ORIENT_AXIS) != 0 {
-                    host.gaps
-                        .raise(FxGapCause::EmitOrientQuatNotUnpacked { def_index });
+                    diag::warn_once!(
+                        World,
+                        "elem {def_index} authored an unread orient-quat axis"
+                    );
                     now.axis
                 } else {
                     vector_vectors(travel)
                 };
                 for spawn in sched.spawns() {
                     let spawn_origin = fx_iw4::emit_lerp_origin(origin, origin_end, spawn.lerp);
-                    let played = on_child(
+                    spawn_child(
                         host,
+                        hooks,
                         FxChildSpawnRequest {
                             products,
                             mark_entity,
@@ -744,17 +667,12 @@ fn update_element(
                             msec: spawn.msec_at_spawn,
                         },
                     );
-                    if !played {
-                        host.gaps.raise(FxGapCause::ChildSpawnRefused {
-                            child: ChildSpawn::Emitted,
-                            def_index,
-                        });
-                    }
                 }
             }
             if let Some(impact) = result.spawn_impact {
-                let played = on_child(
+                spawn_child(
                     host,
+                    hooks,
                     FxChildSpawnRequest {
                         products,
                         mark_entity,
@@ -767,40 +685,41 @@ fn update_element(
                         msec: msec_now,
                     },
                 );
-                if !played {
-                    host.gaps.raise(FxGapCause::ChildSpawnRefused {
-                        child: ChildSpawn::Impact,
-                        def_index,
-                    });
-                }
             }
             if result.remove {
                 let death_origin = match host.elems.get(slot) {
                     Some(e) => e.origin,
                     None => origin,
                 };
-                spawn_death_child(
+                spawn_child(
                     host,
-                    on_child,
-                    def_name.as_str(),
-                    catalog_index,
-                    def_index,
-                    death_origin,
-                    orient,
-                    msec_now,
-                    products,
-                    mark_entity,
+                    hooks,
+                    FxChildSpawnRequest {
+                        products,
+                        mark_entity,
+                        kind: FxChildKind::Death,
+                        parent_def_name: def_name.as_str(),
+                        catalog_index,
+                        def_index,
+                        origin: fx_iw4::orientation_pos_to_world(
+                            orient.origin,
+                            orient.axis,
+                            death_origin,
+                        ),
+                        axis: orient.axis,
+                        msec: msec_now,
+                    },
                 );
                 return false;
             }
         }
         None => {
-            host.gaps.raise(FxGapCause::ElemDefNotFound { def_index });
+            diag::warn_once!(World, "elem {def_index} has no def to evaluate motion from");
         }
     }
 
-    if elem_type == FX_ELEM_TYPE_SPARK_CLOUD {
-        if let Some(visual) = on_spark_fill(FxSparkFillQuery {
+    if elem_type == FX_ELEM_TYPE_SPARK_CLOUD
+        && let Some(visual) = hooks.spark_fill(FxSparkFillQuery {
             def_name: def_name.as_str(),
             catalog_index,
             def_index,
@@ -808,49 +727,38 @@ fn update_element(
             life_msec,
             elem_random_seed: elem_seed,
             norm_time: elem_norm_time(msec_now.saturating_sub(msec_begin).max(0), life_msec),
-        }) {
-            let (world, at_rest_now) = match host.elems.get(slot) {
-                Some(e) => (e.world_origin(&now, &alt), e.at_rest_fraction),
-                None => (
-                    spark_elem_world_origin(origin, flags, &now, &alt, None),
-                    at_rest_fraction,
-                ),
-            };
-            let axis = spark_elem_axis(
-                visual.spawn_angles,
-                visual.angular_velocity,
-                elem_seed,
-                msec_now.saturating_sub(msec_begin).max(0),
-                life_msec,
-                at_rest_now,
-                orient.axis,
-            );
-            update_spark_history(
-                host,
-                spark_handle,
-                world,
-                axis,
-                visual.size0,
-                visual.scale,
-                visual.color_rgba,
-                flags,
-                msec_now,
-            );
-        }
+        })
+    {
+        let (world, at_rest_now) = match host.elems.get(slot) {
+            Some(e) => (e.world_origin(&now, &alt), e.at_rest_fraction),
+            None => (
+                spark_elem_world_origin(origin, flags, &now, &alt, None),
+                at_rest_fraction,
+            ),
+        };
+        let axis = spark_elem_axis(
+            visual.spawn_angles,
+            visual.angular_velocity,
+            elem_seed,
+            msec_now.saturating_sub(msec_begin).max(0),
+            life_msec,
+            at_rest_now,
+            orient.axis,
+        );
+        update_spark_history(host, spark_handle, world, axis, &visual, flags, msec_now);
     }
     if elem_type == FX_ELEM_TYPE_SPARK_FOUNTAIN {
-        crate::spark_fountain::update_spark_fountain(host, spark_handle, on_fountain_trace);
+        crate::spark_fountain::update_spark_fountain(host, spark_handle, |start, end| {
+            hooks.fountain_trace(start, end)
+        });
     }
     true
 }
 
-fn drain_pending_trail_impacts(
-    host: &mut FxSystemHost,
-    on_child: &mut impl FnMut(&mut FxSystemHost, FxChildSpawnRequest<'_>) -> bool,
-) {
+fn drain_pending_trail_impacts(host: &mut FxSystemHost, hooks: &mut impl FxUpdateHooks) {
     let impacts = core::mem::take(&mut host.pending_trail_impacts);
     for imp in impacts {
-        let played = on_child(
+        let played = hooks.child(
             host,
             FxChildSpawnRequest {
                 products: imp.products,
@@ -865,45 +773,41 @@ fn drain_pending_trail_impacts(
             },
         );
         if !played {
-            host.gaps.raise(FxGapCause::ChildSpawnRefused {
-                child: ChildSpawn::Impact,
-                def_index: imp.def_index,
-            });
+            diag::warn_once!(
+                World,
+                "elem {def_index} could not play its {child} child",
+                child = "effectOnImpact",
+                def_index = imp.def_index
+            );
         }
     }
 }
 
-fn spawn_death_child(
+fn spawn_child(
     host: &mut FxSystemHost,
-    on_child: &mut impl FnMut(&mut FxSystemHost, FxChildSpawnRequest<'_>) -> bool,
-    parent_def_name: &str,
-    catalog_index: u16,
-    def_index: u8,
-    elem_origin: [f32; 3],
-    orient: fx_iw4::FxOrientation,
-    msec: i32,
-    products: crate::FxSpawnProducts,
-    mark_entity: Option<u16>,
+    hooks: &mut impl FxUpdateHooks,
+    request: FxChildSpawnRequest<'_>,
 ) {
-    let world = fx_iw4::orientation_pos_to_world(orient.origin, orient.axis, elem_origin);
-    let played = on_child(
-        host,
-        FxChildSpawnRequest {
-            products,
-            mark_entity,
-            kind: FxChildKind::Death,
-            parent_def_name,
-            catalog_index,
-            def_index,
-            origin: world,
-            axis: orient.axis,
-            msec,
-        },
-    );
-    if !played {
-        host.gaps.raise(FxGapCause::ChildSpawnRefused {
-            child: ChildSpawn::Death,
-            def_index,
-        });
+    let FxChildSpawnRequest {
+        kind, def_index, ..
+    } = request;
+    if !hooks.child(host, request) {
+        match kind {
+            FxChildKind::Emitted => diag::warn_once!(
+                World,
+                "elem {def_index} could not play its {child} child",
+                child = "effectEmitted"
+            ),
+            FxChildKind::Impact => diag::warn_once!(
+                World,
+                "elem {def_index} could not play its {child} child",
+                child = "effectOnImpact"
+            ),
+            FxChildKind::Death => diag::warn_once!(
+                World,
+                "elem {def_index} could not play its {child} child",
+                child = "effectOnDeath"
+            ),
+        }
     }
 }

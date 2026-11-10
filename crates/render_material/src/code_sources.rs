@@ -227,6 +227,15 @@ impl RuntimeCodeSources {
             .cloned()
     }
 
+    pub fn live_constants(&self) -> impl Iterator<Item = (u16, &[[u32; 4]])> {
+        self.constants
+            .iter()
+            .enumerate()
+            .filter_map(|(index, slot)| {
+                Some((u16::try_from(index).ok()?, slot.live_rows()?.as_ref()))
+            })
+    }
+
     pub fn has_constant(&self, index: u16) -> bool {
         self.constant_rows(index).is_some()
     }

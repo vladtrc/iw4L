@@ -1,3 +1,6 @@
+pub(crate) mod campaign;
+pub(crate) mod campaign_damage;
+
 use crate::frame::FrameWorld;
 use crate::script::runtime::{raise, run_now};
 use crate::script::{Arc, BTreeMap, Fault, Location, RoundScript, Value, VecDeque};
@@ -11,7 +14,7 @@ pub(crate) const KILLED: &str = "maps/mp/gametypes/_callbacksetup::codecallback_
 pub(crate) const LAST_STAND: &str =
     "maps/mp/gametypes/_callbacksetup::codecallback_playerlaststand";
 
-pub(crate) fn now_ms(world: &World) -> i64 {
+pub fn now_ms(world: &World) -> i64 {
     i64::from(world.resource::<crate::step::StepRequest>().tick.0) * i64::from(crate::MATCH_TICK_MS)
 }
 
@@ -24,6 +27,10 @@ pub(crate) fn player_object(world: &World, client: u32) -> Value {
 }
 
 pub(crate) fn player_damage(world: &mut World, tick: crate::Tick, hit: &crate::script_player::Hit) {
+    if world.resource::<RoundScript>().profile == asset_core::RuntimeProfile::Campaign {
+        campaign_damage::apply(world, tick, hit, None);
+        return;
+    }
     if crate::script_player::god_mode(&FrameWorld::from_world(world), hit.victim) {
         return;
     }
@@ -72,6 +79,36 @@ pub(crate) fn player_damage(world: &mut World, tick: crate::Tick, hit: &crate::s
 }
 
 pub(crate) fn crush_player(world: &mut World, victim: ClientId, pusher: u64, point: [f32; 3]) {
+    if world.resource::<RoundScript>().profile == asset_core::RuntimeProfile::Campaign {
+        if !world
+            .resource::<RoundScript>()
+            .entities
+            .contains_key(&pusher)
+        {
+            return;
+        }
+        let tick = world.resource::<crate::step::StepRequest>().tick;
+        campaign_damage::apply(
+            world,
+            tick,
+            &crate::script_player::Hit {
+                victim,
+                attacker: None,
+                amount: 99999,
+                flags: 0,
+                means: "MOD_CRUSH",
+                weapon: 0,
+                point,
+                dir: [0.0, 0.0, -1.0],
+                direction_present: true,
+                hitloc: 0,
+                inflictor: None,
+                commit: None,
+            },
+            Some(Value::Object(pusher)),
+        );
+        return;
+    }
     if crate::script_player::god_mode(&FrameWorld::from_world(world), victim) {
         return;
     }
@@ -168,8 +205,8 @@ pub(crate) fn flashbang(
         "flashbang",
         vec![
             Value::Vector(origin),
-            Value::Float(amount_distance.into()),
-            Value::Float(amount_angle.into()),
+            Value::Float(amount_distance),
+            Value::Float(amount_angle),
             attacker,
         ],
     );
@@ -251,6 +288,250 @@ fn profile_data(world: &World, profile: crate::PlayerProfile) -> Option<Vec<(Vec
     Some(data)
 }
 
+pub(crate) fn prepare_card(
+    world: &mut World,
+    client: u32,
+    title: u32,
+    icon: u32,
+) -> Result<(), String> {
+    let tables = &world.resource::<RoundScript>().tables;
+    let title_name = super::tables::table(tables, "mp/cardTitleTable.csv")
+        .and_then(|table| table.cell(title as usize, 0))
+        .filter(|s| !s.is_empty())
+        .ok_or("unknown title row")?
+        .to_owned();
+    let icon_name = super::tables::table(tables, "mp/cardIconTable.csv")
+        .and_then(|table| table.cell(icon as usize, 0))
+        .filter(|s| !s.is_empty())
+        .ok_or("unknown icon row")?
+        .to_owned();
+    super::natives::player::write_class_data(
+        world,
+        client,
+        &[
+            (vec![Value::string("cardTitle")], Value::string(&title_name)),
+            (vec![Value::string("cardIcon")], Value::string(&icon_name)),
+        ],
+    )?;
+    let mut frame = FrameWorld::from_world(world);
+    let meta = frame.client_meta_mut(ClientId(client));
+    meta.player_card_title = title;
+    meta.player_card_icon = icon;
+    Ok(())
+}
+
+pub(crate) fn prepare_round_stats(
+    world: &mut World,
+    client: u32,
+    score: i32,
+    kills: i32,
+    deaths: i32,
+) -> Result<(), String> {
+    let mut runtime = world.resource_mut::<RoundScript>();
+    let object = runtime
+        .players
+        .get(&client)
+        .ok_or("missing script player")?
+        .object;
+    let Value::Array(pers) = runtime.object_field(object, "pers") else {
+        return Err("missing player pers".into());
+    };
+    let previous_kills = match runtime
+        .arrays
+        .get(&pers)
+        .and_then(|values| values.get(&crate::script::ArrayKey::String("kills".into())))
+    {
+        Some(Value::Int(value)) => *value,
+        _ => return Err("missing player kill history".into()),
+    };
+    let Value::Int(round_kills) = runtime.object_field(0, "numkills") else {
+        return Err("missing round kill history".into());
+    };
+    let round_kills = round_kills
+        .checked_sub(previous_kills)
+        .and_then(|value| value.checked_add(kills))
+        .filter(|value| *value >= 0)
+        .ok_or("invalid prepared round kill history")?;
+    let pers = runtime.arrays.get_mut(&pers).ok_or("invalid player pers")?;
+    for (name, value) in [("score", score), ("kills", kills), ("deaths", deaths)] {
+        pers.insert(
+            crate::script::ArrayKey::String(name.into()),
+            Value::Int(value),
+        );
+    }
+    runtime.set_object_field(0, "numkills", Value::Int(round_kills));
+    Ok(())
+}
+
+pub(crate) fn validate_streak(
+    world: &World,
+    prep: &crate::input_program::InputStreakPreparation,
+) -> Result<(), String> {
+    if !(0..=25).contains(&prep.count) || prep.owned.len() > 3 {
+        return Err("invalid prepared streak count or inventory".into());
+    }
+    let tables = &world.resource::<RoundScript>().tables;
+    let table =
+        super::tables::table(tables, "mp/killstreakTable.csv").ok_or("missing killstreak table")?;
+    let cost = |name: &str| -> Option<i32> {
+        table
+            .cell(super::tables::table_search(table, 1, name)?, 4)?
+            .parse()
+            .ok()
+    };
+    let mut costs = Vec::new();
+    for name in &prep.loadout {
+        let n = cost(name)
+            .filter(|n| (1..=25).contains(n))
+            .ok_or("unknown streak loadout")?;
+        if costs.contains(&n) {
+            return Err("duplicate streak cost".into());
+        }
+        costs.push(n);
+    }
+    if prep.last_earned.as_ref().is_some_and(|name| {
+        !prep.loadout.contains(name) || cost(name).is_none_or(|n| n > prep.count)
+    }) || prep.owned.iter().any(|name| cost(name).is_none())
+    {
+        return Err("invalid last earned or owned streak".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn apply_streak_preparations(world: &mut World) {
+    let Some(pending) = world.remove_resource::<crate::input_program::PendingInputStreaks>() else {
+        return;
+    };
+    for (client, prep) in pending.0 {
+        if let Err(error) = prepare_streak(world, client.0, &prep) {
+            let fault = Fault::at(
+                &Location {
+                    module: "<input preparation>".into(),
+                    function: "streak".into(),
+                    line: 0,
+                    column: 0,
+                },
+                error,
+            );
+            world.resource_mut::<RoundScript>().fault = Some(fault);
+            return;
+        }
+    }
+}
+
+fn prepare_streak(
+    world: &mut World,
+    client: u32,
+    prep: &crate::input_program::InputStreakPreparation,
+) -> Result<(), String> {
+    let me = player_object(world, client);
+    let Value::Object(object) = me else {
+        return Err("missing script player".into());
+    };
+    super::natives::player::write_class_data(
+        world,
+        client,
+        &prep
+            .loadout
+            .iter()
+            .enumerate()
+            .map(|(slot, name)| {
+                (
+                    vec![Value::string("killstreaks"), Value::Int(slot as i32)],
+                    Value::string(name),
+                )
+            })
+            .collect::<Vec<_>>(),
+    )?;
+    let now = now_ms(world);
+    run_now(
+        world,
+        "maps/mp/gametypes/_class::setkillstreaks",
+        me,
+        prep.loadout.iter().map(|s| Value::string(s)).collect(),
+        now,
+    )
+    .map_err(|e| format!("{e:?}"))?;
+    {
+        let mut runtime = world.resource_mut::<RoundScript>();
+        let Value::Array(pers) = runtime.object_field(object, "pers") else {
+            return Err("missing player pers".into());
+        };
+        let pers = runtime.arrays.get_mut(&pers).ok_or("invalid player pers")?;
+        pers.insert(
+            crate::script::ArrayKey::String("cur_kill_streak".into()),
+            Value::Int(prep.count),
+        );
+        pers.insert(
+            crate::script::ArrayKey::String("lastEarnedStreak".into()),
+            prep.last_earned
+                .as_deref()
+                .map_or(Value::Undefined, Value::string),
+        );
+    }
+    for name in &prep.owned {
+        if !give_killstreak(world, client, name) {
+            return Err(format!("could not prepare owned streak {name}"));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn streak_state(world: &World, client: u32) -> crate::input_program::InputStreakState {
+    let runtime = world.resource::<RoundScript>();
+    let read_field = |object: u64, name: &str| {
+        let name = name.to_ascii_lowercase();
+        runtime
+            .program
+            .as_ref()
+            .and_then(|p| p.symbol_ids.get(name.as_str()))
+            .or_else(|| runtime.dynamic_symbols.get(name.as_str()))
+            .and_then(|id| runtime.objects.get(&object)?.get(id))
+            .cloned()
+            .unwrap_or(Value::Undefined)
+    };
+    let Some(slot) = runtime.players.get(&client) else {
+        return Default::default();
+    };
+    let Value::Array(pers) = read_field(slot.object, "pers") else {
+        return Default::default();
+    };
+    let Some(pers) = runtime.arrays.get(&pers) else {
+        return Default::default();
+    };
+    let field = |name: &str| {
+        pers.get(&crate::script::ArrayKey::String(name.into()))
+            .cloned()
+            .unwrap_or(Value::Undefined)
+    };
+    let mut state = crate::input_program::InputStreakState {
+        count: match field("cur_kill_streak") {
+            Value::Int(n) => n,
+            _ => 0,
+        },
+        last_earned: match field("lastEarnedStreak") {
+            Value::String(s) => Some(s.to_string()),
+            _ => None,
+        },
+        owned: Vec::new(),
+    };
+    if let Value::Array(streaks) = field("killstreaks") {
+        for reward in runtime
+            .arrays
+            .get(&streaks)
+            .into_iter()
+            .flat_map(|a| a.values())
+        {
+            if let Value::Object(object) = reward
+                && let Value::String(name) = read_field(*object, "streakName")
+            {
+                state.owned.push(name.to_string());
+            }
+        }
+    }
+    state
+}
+
 pub(crate) fn set_profile(world: &mut World, client: u32, profile: crate::PlayerProfile) -> bool {
     if FrameWorld::from_world(world)
         .client_meta(ClientId(client))
@@ -311,6 +592,16 @@ pub(crate) fn settle_deaths(world: &mut World) {
         }
         if callback == KILLED {
             let attacker = args.get(1).cloned().unwrap_or(Value::Undefined);
+            if world.resource::<RoundScript>().profile == asset_core::RuntimeProfile::Campaign {
+                let cause = args.get(3).cloned().unwrap_or(Value::Undefined);
+                let weapon = args
+                    .get(4)
+                    .filter(|v| **v != Value::string("none"))
+                    .cloned()
+                    .unwrap_or(Value::Undefined);
+                raise(world, victim, "death", vec![attacker, cause, weapon]);
+                continue;
+            }
             raise(world, victim.clone(), "death", vec![attacker]);
         }
         if run_now(world, callback, victim, args, now).is_err() {
@@ -327,6 +618,7 @@ pub(crate) struct MenuAnswer {
     menu: Arc<str>,
     response: Arc<str>,
     data: Vec<(Vec<Value>, Value)>,
+    skip_if_bypassed: bool,
 }
 
 impl MenuAnswer {
@@ -343,13 +635,23 @@ pub(crate) fn answer_menu(world: &mut World, client: u32, menu: &str, response: 
             menu: menu.into(),
             response: response.into(),
             data: Vec::new(),
+            skip_if_bypassed: false,
         },
     );
 }
 
 pub(crate) fn answer_join(world: &mut World, client: u32) {
     if world.resource_mut::<RoundScript>().joined.insert(client) {
-        answer_menu(world, client, TEAM_MENU, "autoassign");
+        push_answer(
+            world,
+            client,
+            MenuAnswer {
+                menu: TEAM_MENU.into(),
+                response: "autoassign".into(),
+                data: Vec::new(),
+                skip_if_bypassed: true,
+            },
+        );
     }
 }
 
@@ -368,14 +670,8 @@ fn push_answer(world: &mut World, client: u32, answer: MenuAnswer) {
         .push_back(answer);
 }
 
-const T5_DEFAULT_CLASSES: [&str; 5] = ["smg_mp", "cqb_mp", "assault_mp", "lmg_mp", "sniper_mp"];
-
-pub(crate) fn is_t5(world: &World) -> bool {
-    world
-        .resource::<RoundScript>()
-        .program
-        .as_ref()
-        .is_some_and(|p| p.rules() == crate::script::Realm::T5)
+pub(crate) fn bot_custom_classes_allowed(world: &World) -> bool {
+    crate::script::families::policy_for_world(world).custom_bot_classes
 }
 
 pub(crate) fn choose_default_class(world: &mut World, client: u32, index: u8) {
@@ -383,68 +679,25 @@ pub(crate) fn choose_default_class(world: &mut World, client: u32, index: u8) {
         .resource_mut::<RoundScript>()
         .selected_classes
         .remove(&client);
-    let realm = world
-        .resource::<RoundScript>()
-        .program
-        .as_ref()
-        .map(|p| p.rules());
-    let response = match realm {
-        Some(crate::script::Realm::T5) => {
-            T5_DEFAULT_CLASSES[index as usize % T5_DEFAULT_CLASSES.len()].to_owned()
-        }
-        _ => format!("class{}", index % 5),
-    };
+    let policy = crate::script::families::policy_for_world(world);
+    let response = policy.default_classes[index as usize % policy.default_classes.len()].to_owned();
     answer_menu(world, client, CLASS_MENU, &response);
 }
 
-pub(crate) fn t5_class_response(class: crate::ClassId) -> Option<String> {
-    match class.0 {
-        slot @ 0..5 => Some(format!("custom{}", slot + 1)),
-        slot @ 5..10 => Some(format!("prestige{}", slot - 4)),
-        _ => None,
-    }
-}
-
-const IW4_STAND_INS: [&str; 4] = ["m4_mp", "usp_mp", "frag_grenade_mp", "flash_grenade_mp"];
-const T5_STAND_INS: [&str; 4] = ["ak47_mp", "m1911_mp", "frag_grenade_mp", "flash_grenade_mp"];
-
-pub(crate) fn stand_in_for(world: &mut World, slot: usize, weapon: u32) -> Option<u32> {
+pub fn stand_in_for(world: &mut World, slot: usize, weapon: u32) -> Option<u32> {
     let realm = world
         .resource::<RoundScript>()
         .program
         .as_ref()
-        .map_or(crate::script::Realm::Iw4, |p| p.rules());
+        .map_or(crate::script::FamilyId::IW4, |p| p.rules());
     let frame = FrameWorld::from_world(world);
     let setup = frame.weapon_setup(weapon).filter(|_| weapon != 0)?;
     if setup.realm == realm {
         return None;
     }
-    if realm == crate::script::Realm::Iw4
-        && frame
-            .weapon_combat_row(weapon)
-            .is_some_and(|facts| facts.weap_type == weapon_iw4::WEAPTYPE_SHIELD)
-    {
-        return frame.weapon_index_by_script_name("riotshield_mp");
-    }
-    if realm == crate::script::Realm::Iw4
-        && let Some(facts) = frame.missile_launch_facts(weapon)
-        && facts.require_lock_to_fire
-    {
-        let launcher = match facts.missile_guidance {
-            1 => Some("stinger_mp"),
-            3 => Some("javelin_mp"),
-            _ => None,
-        };
-        if let Some(launcher) = launcher {
-            return frame.weapon_index_by_script_name(launcher);
-        }
-    }
-    let stand_ins = if realm == crate::script::Realm::T5 {
-        T5_STAND_INS
-    } else {
-        IW4_STAND_INS
-    };
-    frame.weapon_index_by_script_name(stand_ins[slot])
+    (crate::script::families::policy_for_world(frame.ecs_ref()).foreign_weapon)(
+        &frame, slot, weapon,
+    )
 }
 
 fn bridge_class_weapon(world: &mut World, client: u32, slot: usize, weapon: u32) {
@@ -462,14 +715,14 @@ fn offhand_stand_in(world: &mut World, weapon: u32) -> Option<u32> {
         .resource::<RoundScript>()
         .program
         .as_ref()
-        .map_or(crate::script::Realm::Iw4, |p| p.rules());
+        .map_or(crate::script::FamilyId::IW4, |p| p.rules());
     let frame = FrameWorld::from_world(world);
     let stand_in = frame
         .weapon_setup(weapon)
         .filter(|setup| setup.realm != realm)
         .and_then(|setup| {
             setup.stand_in.as_deref().or_else(|| {
-                (realm == crate::script::Realm::Iw4).then(|| match setup.base.as_str() {
+                (realm == crate::script::FamilyId::IW4).then(|| match setup.base.as_str() {
                     "willy_pete" => "smoke_grenade_mp",
                     "tabun_gas" => "concussion_grenade_mp",
                     "sticky_grenade" => "semtex_mp",
@@ -701,7 +954,7 @@ pub(crate) fn bridged_weapon(world: &World, client: u32, weapon: u32) -> u32 {
         .map_or(weapon, |(_, native)| *native)
 }
 
-pub(crate) fn script_weapon(world: &mut World, client: u32, weapon: u32) -> u32 {
+pub fn script_weapon(world: &mut World, client: u32, weapon: u32) -> u32 {
     if let Some(stand_in) = world
         .resource::<crate::script::MatchScript>()
         .weapon_bridge
@@ -719,7 +972,7 @@ pub(crate) fn script_weapon(world: &mut World, client: u32, weapon: u32) -> u32 
         .weapon_bridge
         .get(&client)
         .cloned()
-        .unwrap_or_default();
+        .unwrap_or(Vec::new());
     let frame = FrameWorld::from_world(world);
     if let Some(setup) = frame.weapon_setup(weapon)
         && let Some((stand_in, _)) = bridge
@@ -744,7 +997,7 @@ pub(crate) fn script_weapon(world: &mut World, client: u32, weapon: u32) -> u32 
     weapon
 }
 
-pub(crate) fn personal_class(
+pub fn personal_class(
     world: &World,
     client: u32,
     class: crate::ClassId,
@@ -777,21 +1030,18 @@ pub(crate) fn choose_class(world: &mut World, client: u32, class: &crate::ClassD
         .resource_mut::<crate::script::MatchScript>()
         .personal_classes
         .insert((client, class.id.0), class.clone());
-    let realm = world
-        .resource::<RoundScript>()
-        .program
-        .as_ref()
-        .map(|p| p.rules());
     world
         .resource_mut::<crate::script::MatchScript>()
         .weapon_bridge
         .remove(&client);
     bridge_class_weapon(world, client, 0, class.primary);
     bridge_class_weapon(world, client, 1, class.secondary);
-    if realm == Some(crate::script::Realm::T5) {
+    if let Some(class_response) =
+        crate::script::families::policy_for_world(world).native_class_response
+    {
         bridge_class_weapon(world, client, 2, class.lethal);
         bridge_class_weapon(world, client, 3, class.tactical);
-        if let Some(response) = t5_class_response(class.id) {
+        if let Some(response) = class_response(class.id) {
             answer_menu(world, client, CLASS_MENU, &response);
         }
         return;
@@ -808,6 +1058,7 @@ pub(crate) fn choose_class(world: &mut World, client: u32, class: &crate::ClassD
             menu: CLASS_MENU.into(),
             response: format!("custom{}", class.id.0 as usize % 10 + 1).into(),
             data,
+            skip_if_bypassed: false,
         },
     );
 }
@@ -917,7 +1168,8 @@ fn menu_kind(menu: &str) -> Option<bool> {
 }
 
 fn deliver_answers(world: &mut World, client: u32) {
-    // Answers queued ahead of the open menu's kind were for a menu the scripts skipped.
+    // Scripts may bypass automatic team selection. Explicit choices remain
+    // ordered input even when another menu is already open.
     let runtime = world.resource::<RoundScript>();
     let Some(slot) = runtime.players.get(&client) else {
         return;
@@ -930,11 +1182,16 @@ fn deliver_answers(world: &mut World, client: u32) {
         .as_deref()
         .and_then(menu_kind)
         .and_then(|open| {
-            runtime
-                .menu_answers
-                .get(&client)?
-                .iter()
-                .position(|answer| menu_kind(&answer.menu) == Some(open))
+            Some(
+                runtime
+                    .menu_answers
+                    .get(&client)?
+                    .iter()
+                    .take_while(|answer| {
+                        answer.skip_if_bypassed && menu_kind(&answer.menu) != Some(open)
+                    })
+                    .count(),
+            )
         })
         .unwrap_or(0);
     if skipped > 0 {
@@ -991,7 +1248,7 @@ fn deliver_answers(world: &mut World, client: u32) {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct PlayerSlot {
+pub struct PlayerSlot {
     pub object: u64,
     pub begun: bool,
     pub sessionstate: Arc<str>,
@@ -1001,7 +1258,7 @@ pub(crate) struct PlayerSlot {
     pub presented: BTreeMap<&'static str, Vec<Value>>,
     pub perks: std::collections::BTreeSet<Arc<str>>,
     pub spectate: BTreeMap<Arc<str>, bool>,
-    pub spectator: super::spectators::Spectator,
+    pub(crate) spectator: super::spectators::Spectator,
     pub seat: crate::ScriptSeat,
     pub weapon: u32,
     pub switching: bool,
@@ -1009,7 +1266,8 @@ pub(crate) struct PlayerSlot {
     pub has_radar: bool,
     pub radar_mode: crate::RadarMode,
     pub radar_blocked: bool,
-    pub link: Option<PlayerLink>,
+    pub(crate) link: Option<PlayerLink>,
+    pub(crate) campaign_damage: campaign_damage::PlayerDamage,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1056,6 +1314,7 @@ impl PlayerSlot {
             radar_mode: crate::RadarMode::Normal,
             radar_blocked: false,
             link: None,
+            campaign_damage: Default::default(),
         }
     }
 }
@@ -1169,13 +1428,6 @@ fn store_seat_field(seat: &mut crate::ScriptSeat, name: &str, value: &Value) -> 
 }
 
 pub(crate) fn apply_disconnects(world: &mut World) {
-    if !world
-        .resource::<crate::step::StepRequest>()
-        .reason
-        .advances_authority_world()
-    {
-        return;
-    }
     let disconnects = std::mem::take(&mut world.resource_mut::<RoundScript>().disconnects);
     for client in disconnects {
         FrameWorld::from_world(world).retire_client(ClientId(client));
@@ -1206,14 +1458,16 @@ pub(crate) fn disconnect_player(world: &mut World, client: u32) {
     else {
         return;
     };
-    let now = now_ms(world);
-    let _ = run_now(
-        world,
-        DISCONNECT,
-        Value::Object(slot.object),
-        Vec::new(),
-        now,
-    );
+    if world.resource::<RoundScript>().profile == asset_core::RuntimeProfile::Multiplayer {
+        let now = now_ms(world);
+        let _ = run_now(
+            world,
+            DISCONNECT,
+            Value::Object(slot.object),
+            Vec::new(),
+            now,
+        );
+    }
     world
         .resource_mut::<crate::PersistentDataStore>()
         .unbind(crate::ClientId(client));
@@ -1238,7 +1492,7 @@ pub(crate) fn disconnect_player(world: &mut World, client: u32) {
         .filter(|(_, e)| e.audience == super::entities::HudAudience::Client(client))
         .map(|(id, _)| *id)
         .collect();
-    drop(runtime);
+
     for id in owned {
         super::hud::destroy(world, id);
     }
@@ -1246,12 +1500,16 @@ pub(crate) fn disconnect_player(world: &mut World, client: u32) {
 
 pub(crate) fn sync_players(world: &mut World) {
     let request = world.resource::<crate::step::StepRequest>();
-    if !request.reason.advances_authority_world() {
-        return;
-    }
     let now = i64::from(request.tick.0) * i64::from(crate::MATCH_TICK_MS);
     let runtime = world.resource::<RoundScript>();
     if runtime.program.is_none() || runtime.fault.is_some() || !runtime.started {
+        return;
+    }
+    if runtime.profile == asset_core::RuntimeProfile::Campaign {
+        let clients: Vec<u32> = runtime.players.keys().copied().collect();
+        for client in clients {
+            deliver_answers(world, client);
+        }
         return;
     }
     let clients: Vec<(u32, bool)> = {
@@ -1335,6 +1593,9 @@ fn client_name(name: &[u8]) -> String {
 }
 
 pub(crate) fn load_field(world: &mut World, client: u32, name: &str) -> Option<Value> {
+    if let Some(value) = campaign_damage::load_field(world, client, name) {
+        return Some(value);
+    }
     let id = ClientId(client);
     if name == "sessionstate" {
         let runtime = world.resource::<RoundScript>();
@@ -1383,7 +1644,7 @@ pub(crate) fn load_field(world: &mut World, client: u32, name: &str) -> Option<V
     })
 }
 
-pub(crate) fn entity_field(world: &mut World, id: u64, name: &str) -> Value {
+pub fn entity_field(world: &mut World, id: u64, name: &str) -> Value {
     if let Some(client) = world.resource::<RoundScript>().player_client(id)
         && let Some(value) = load_field(world, client, name)
     {
@@ -1417,6 +1678,9 @@ pub(crate) fn store_field(
     name: &str,
     value: &Value,
 ) -> Result<bool, String> {
+    if campaign_damage::store_field(world, client, name, value)? {
+        return Ok(true);
+    }
     let id = ClientId(client);
     let int = |value: &Value| match value {
         Value::Int(n) => Ok(*n),
@@ -1616,8 +1880,8 @@ pub(crate) fn unlink_player(world: &mut World, client: u32) {
         if let Some(link) = link.filter(|link| link.view == LinkView::WeaponDelta) {
             ps.link_flags &= !playerstate_iw4::LINK_FLAGS_WEAPON_VIEW_ONLY;
             if let Some(view) = link.restore_view {
-                for i in 0..3 {
-                    ps.delta_angles[i] += angle_delta(view[i], ps.viewangles[i]);
+                for (i, view_entry) in view[..3].iter().enumerate() {
+                    ps.delta_angles[i] += angle_delta(*view_entry, ps.viewangles[i]);
                 }
                 ps.viewangles = view;
             }
@@ -1720,8 +1984,8 @@ pub(crate) fn apply_player_links(world: &mut World) {
             _ => {}
         }
         if let Some(ps) = frame.player_mut(id) {
-            for i in 0..3 {
-                ps.delta_angles[i] += angle_delta(view[i], ps.viewangles[i]);
+            for (i, view_entry) in view[..3].iter().enumerate() {
+                ps.delta_angles[i] += angle_delta(*view_entry, ps.viewangles[i]);
             }
             ps.viewangles = view;
             if link.view == LinkView::WeaponDelta {

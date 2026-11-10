@@ -1,4 +1,4 @@
-use crate::tick::{WeaponCombatFacts, WeaponHandState};
+use crate::tick::{BUTTON_ATTACK, WeaponCmd, WeaponCombatFacts, WeaponHandState};
 use crate::weap_anim::{set_weap_anim, start_weapon_anim, weap_anim_event};
 use crate::weaponstate::WeaponState;
 use playerstate_iw4::pm_flags;
@@ -22,31 +22,44 @@ pub const MELEE_TRACE_OFFSETS: [[f32; 2]; 9] = [
     [-1.0, -1.0],
 ];
 
-pub fn melee_trace_count(width: f32, height: f32) -> usize {
-    if width > 0.0 || height > 0.0 {
-        MELEE_TRACE_OFFSETS.len()
-    } else {
-        1
-    }
+#[derive(Clone, Copy, Debug)]
+pub struct MeleeTrace {
+    pub muzzle: [f32; 3],
+    pub forward: [f32; 3],
+    pub right: [f32; 3],
+    pub up: [f32; 3],
+    pub range: f32,
+    pub width: f32,
+    pub height: f32,
 }
 
-pub fn melee_trace_end(
-    muzzle: [f32; 3],
-    forward: [f32; 3],
-    right: [f32; 3],
-    up: [f32; 3],
-    range: f32,
-    width: f32,
-    height: f32,
-    offset: [f32; 2],
-) -> [f32; 3] {
-    let wr = width * offset[0];
-    let hu = height * offset[1];
-    [
-        muzzle[0] + forward[0] * range + right[0] * wr + up[0] * hu,
-        muzzle[1] + forward[1] * range + right[1] * wr + up[1] * hu,
-        muzzle[2] + forward[2] * range + right[2] * wr + up[2] * hu,
-    ]
+impl MeleeTrace {
+    pub fn sample_count(&self) -> usize {
+        if self.width > 0.0 || self.height > 0.0 {
+            MELEE_TRACE_OFFSETS.len()
+        } else {
+            1
+        }
+    }
+
+    pub fn endpoint(&self, offset: [f32; 2]) -> [f32; 3] {
+        let Self {
+            muzzle,
+            forward,
+            right,
+            up,
+            range,
+            width,
+            height,
+        } = *self;
+        let wr = width * offset[0];
+        let hu = height * offset[1];
+        [
+            muzzle[0] + forward[0] * range + right[0] * wr + up[0] * hu,
+            muzzle[1] + forward[1] * range + right[1] * wr + up[1] * hu,
+            muzzle[2] + forward[2] * range + right[2] * wr + up[2] * hu,
+        ]
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -102,7 +115,7 @@ pub fn melee_weaponstate_blocks(ws: i32) -> bool {
 
 fn hand_blocks_melee(hand: &WeaponHandState) -> bool {
     let ws = hand.weaponstate;
-    if hand.weapon_time != 0 && !matches!(ws, 0x8 | 0x9 | 0xa | 0xb | 0xc) {
+    if hand.weapon_time != 0 && !matches!(ws, 0x8..=0xc) {
         return true;
     }
     (1..=5).contains(&ws)
@@ -200,79 +213,90 @@ pub fn weapon_start_melee(
         if let Some(sec) = secondary.as_mut() {
             sec.weap_anim = sec_anim;
         }
-    } else if let Some(sec) = secondary.as_mut() {
-        if last_weapon_hand != 1 {
-            sec.weap_anim = 0;
-        }
+    } else if let Some(sec) = secondary.as_mut()
+        && last_weapon_hand != 1
+    {
+        sec.weap_anim = 0;
     }
 
     primary.weaponstate = WeaponState::MeleeInit as i32;
-    if last_weapon_hand == 1 {
-        if let Some(sec) = secondary {
-            sec.weaponstate = WeaponState::MeleeInit as i32;
-            sec.weapon_time = primary.weapon_time;
-            sec.weapon_delay = primary.weapon_delay;
-        }
+    if last_weapon_hand == 1
+        && let Some(sec) = secondary
+    {
+        sec.weaponstate = WeaponState::MeleeInit as i32;
+        sec.weapon_time = primary.weapon_time;
+        sec.weapon_delay = primary.weapon_delay;
     }
 }
 
-pub fn weapon_try_melee(
-    hands: &mut [WeaponHandState],
-    facts: &MeleeWeaponFacts,
-    buttons: u32,
-    old_buttons: u32,
-    f_weapon_pos_frac: f32,
-    last_weapon_hand: i32,
-    charge: &mut MeleeChargeState,
-    cmd_melee_charge_yaw: f32,
-    cmd_melee_charge_dist: u8,
-    is_in_air: bool,
-    player_melee_range: f32,
-) -> Option<bool> {
-    if hands.is_empty() {
-        return None;
-    }
-    if melee_weaponstate_blocks(hands[0].weaponstate) {
-        return None;
-    }
-    if facts.melee_damage == 0 {
-        return None;
-    }
-    if buttons & BUTTON_MELEE == 0 || old_buttons & BUTTON_MELEE != 0 {
-        return None;
-    }
-
-    if f_weapon_pos_frac > 0.0 && facts.overlay_reticle != 0 {
-        return None;
-    }
-
-    let last = last_weapon_hand.clamp(0, 1) as usize;
-    let n = hands.len().min(last + 1);
-    for hand in hands.iter().take(n) {
-        if hand_blocks_melee(hand) {
+impl WeaponCmd {
+    pub fn try_melee(
+        &mut self,
+        hands: &mut [WeaponHandState],
+        facts: &MeleeWeaponFacts,
+        fire_melees: bool,
+    ) -> Option<bool> {
+        let melee_buttons = |buttons: u32| {
+            if fire_melees && buttons & BUTTON_ATTACK != 0 {
+                buttons | BUTTON_MELEE
+            } else {
+                buttons
+            }
+        };
+        let buttons = melee_buttons(self.buttons);
+        let old_buttons = melee_buttons(self.old_buttons);
+        let f_weapon_pos_frac = self.f_weapon_pos_frac;
+        let last_weapon_hand = self.last_weapon_hand;
+        let cmd_melee_charge_yaw = self.melee_charge_yaw;
+        let cmd_melee_charge_dist = self.melee_charge_dist;
+        let is_in_air = self.is_in_air;
+        let player_melee_range = self.player_melee_range;
+        let charge = &mut self.melee_charge;
+        if hands.is_empty() {
             return None;
         }
+        if melee_weaponstate_blocks(hands[0].weaponstate) {
+            return None;
+        }
+        if facts.melee_damage == 0 {
+            return None;
+        }
+        if buttons & BUTTON_MELEE == 0 || old_buttons & BUTTON_MELEE != 0 {
+            return None;
+        }
+
+        if f_weapon_pos_frac > 0.0 && facts.overlay_reticle != 0 {
+            return None;
+        }
+
+        let last = last_weapon_hand.clamp(0, 1) as usize;
+        let n = hands.len().min(last + 1);
+        for hand in hands.iter().take(n) {
+            if hand_blocks_melee(hand) {
+                return None;
+            }
+        }
+
+        melee_charge_start(
+            charge,
+            cmd_melee_charge_yaw,
+            cmd_melee_charge_dist,
+            is_in_air,
+        );
+        let use_charge = weapon_start_melee_uses_charge(charge, player_melee_range, facts);
+
+        let (primary, rest) = hands.split_first_mut().expect("non-empty");
+        let secondary = rest.first_mut();
+        weapon_start_melee(
+            primary,
+            secondary,
+            facts,
+            last_weapon_hand,
+            charge.pm_type,
+            use_charge,
+        );
+        Some(use_charge)
     }
-
-    melee_charge_start(
-        charge,
-        cmd_melee_charge_yaw,
-        cmd_melee_charge_dist,
-        is_in_air,
-    );
-    let use_charge = weapon_start_melee_uses_charge(charge, player_melee_range, facts);
-
-    let (primary, rest) = hands.split_first_mut().expect("non-empty");
-    let secondary = rest.first_mut();
-    weapon_start_melee(
-        primary,
-        secondary,
-        facts,
-        last_weapon_hand,
-        charge.pm_type,
-        use_charge,
-    );
-    Some(use_charge)
 }
 
 pub fn weapon_melee_to_fire(hand: &mut WeaponHandState) {

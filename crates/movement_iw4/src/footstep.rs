@@ -133,7 +133,7 @@ pub fn get_bob_max_speed(
     } else {
         max_speed *= ((strafe - 1.0) * STRAFE_BLEND + 1.0 + 1.0) * DIAG_SCALE;
         if forwardmove < 0 {
-            max_speed = DIAG_SCALE * (back + 1.0) * max_speed;
+            max_speed *= DIAG_SCALE * (back + 1.0);
         }
     }
     if walking {

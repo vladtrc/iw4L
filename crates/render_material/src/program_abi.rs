@@ -1,7 +1,122 @@
 use crate::{
     PassAbiRefusal, PassProgramAbi, PortId, RuntimeMaterialCatalog, RuntimePass, RuntimeShaderPair,
-    RuntimeShaderProgram, RuntimeShaderStage, Sm3IrError, Sm3ProgramIr,
+    RuntimeShaderProgram, RuntimeShaderStage, RuntimeVertexDecl, Sm3IrError,
 };
+use asset_core::FamilyId;
+use std::collections::BTreeMap;
+use std::sync::OnceLock;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProgramLoweringError {
+    pub family: FamilyId,
+    pub reason: String,
+    pub census_key: String,
+}
+
+pub trait PreparedShaderProgram: Send + Sync {
+    /// Backend-specific data affecting emitted source. None disables disk caching.
+    fn cache_key(&self, abi: &PassProgramAbi) -> Option<Vec<u8>>;
+    fn lower(&self, abi: &PassProgramAbi) -> Result<d3d9_sm3::PassWgsl, ProgramLoweringError>;
+    fn lower_exit_clip(
+        &self,
+        abi: &PassProgramAbi,
+        _mode: d3d9_sm3::ExitClipMode,
+    ) -> Result<d3d9_sm3::PassWgsl, ProgramLoweringError> {
+        Err(ProgramLoweringError {
+            family: abi.vertex_layout.owner,
+            reason: "material adapter has no exit-plane lowering".into(),
+            census_key: "Wgsl/ExitClipUnsupported".into(),
+        })
+    }
+}
+
+/// Retain the admitted program's IR so GPU variants are lowered lazily rather
+/// than reconstructed by editing WGSL. Identity is the content-addressed port;
+/// its ABI is retained and compared separately by the port owner.
+#[derive(Clone)]
+pub struct ProgramLoweringRecipe {
+    id: PortId,
+    program: std::sync::Arc<dyn PreparedShaderProgram>,
+}
+impl ProgramLoweringRecipe {
+    pub fn new(id: PortId, program: Box<dyn PreparedShaderProgram>) -> Self {
+        Self {
+            id,
+            program: program.into(),
+        }
+    }
+    pub fn lower_exit_clip(
+        &self,
+        abi: &PassProgramAbi,
+        mode: d3d9_sm3::ExitClipMode,
+    ) -> Result<d3d9_sm3::PassWgsl, ProgramLoweringError> {
+        self.program.lower_exit_clip(abi, mode)
+    }
+}
+impl std::fmt::Debug for ProgramLoweringRecipe {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("ProgramLoweringRecipe")
+            .field(&self.id)
+            .finish()
+    }
+}
+impl PartialEq for ProgramLoweringRecipe {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+impl Eq for ProgramLoweringRecipe {}
+
+pub struct ProgramPreparation<'a> {
+    pub pass: &'a RuntimePass,
+    pub declaration: &'a RuntimeVertexDecl,
+    pub vertex_type: u8,
+    pub vertex: &'a RuntimeShaderProgram,
+    pub pixel: &'a RuntimeShaderProgram,
+}
+
+pub struct PreparedMaterialProgram {
+    pub abi: PassProgramAbi,
+    pub program: Box<dyn PreparedShaderProgram>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LightingConstantBindings {
+    pub reflection_sh: &'static [u16],
+    pub grid_sh: &'static [u16],
+}
+
+pub trait MaterialAdapter: Send + Sync + 'static {
+    fn lighting_constants(&self) -> LightingConstantBindings;
+    fn prepare(
+        &self,
+        input: ProgramPreparation<'_>,
+    ) -> Result<PreparedMaterialProgram, ProgramAbiRefusal>;
+}
+
+#[derive(Default)]
+pub struct MaterialAdapters(BTreeMap<FamilyId, &'static dyn MaterialAdapter>);
+impl MaterialAdapters {
+    pub fn register(&mut self, family: FamilyId, adapter: &'static dyn MaterialAdapter) {
+        assert!(!self.0.contains_key(&family), "duplicate material adapter");
+        self.0.insert(family, adapter);
+    }
+}
+static ADAPTERS: OnceLock<MaterialAdapters> = OnceLock::new();
+pub fn material_lighting_bindings() -> impl Iterator<Item = LightingConstantBindings> {
+    ADAPTERS
+        .get()
+        .expect("builder must install material adapters before rendering")
+        .0
+        .values()
+        .map(|adapter| adapter.lighting_constants())
+}
+
+pub fn install_material_adapters(adapters: MaterialAdapters) -> Result<(), &'static str> {
+    ADAPTERS
+        .set(adapters)
+        .map_err(|_| "material adapters already installed")
+}
 
 pub struct PreparedProgramAbi<'a> {
     id: PortId,
@@ -9,21 +124,8 @@ pub struct PreparedProgramAbi<'a> {
     vertex_name: &'a str,
     pixel_name: &'a str,
     abi: PassProgramAbi,
-    programs: PreparedShaderPrograms,
+    program: Box<dyn PreparedShaderProgram>,
 }
-
-pub enum PreparedShaderPrograms {
-    Sm3 {
-        vertex: Sm3ProgramIr,
-        pixel: Sm3ProgramIr,
-    },
-    Dxbc {
-        vertex: Box<dxbc_sm5::wgsl::Shader>,
-        pixel: Box<dxbc_sm5::wgsl::Shader>,
-        lowering: dxbc_sm5::wgsl::PassAbi,
-    },
-}
-
 impl<'a> PreparedProgramAbi<'a> {
     pub fn id(&self) -> PortId {
         self.id
@@ -34,8 +136,8 @@ impl<'a> PreparedProgramAbi<'a> {
     pub fn names(&self) -> (&'a str, &'a str) {
         (self.vertex_name, self.pixel_name)
     }
-    pub fn into_programs(self) -> (PassProgramAbi, PreparedShaderPrograms) {
-        (self.abi, self.programs)
+    pub fn into_programs(self) -> (PassProgramAbi, Box<dyn PreparedShaderProgram>) {
+        (self.abi, self.program)
     }
 }
 
@@ -59,9 +161,12 @@ pub enum ProgramAbiRefusal {
         cause: Sm3IrError,
     },
     Abi(PassAbiRefusal),
-    DxbcStageMismatch {
-        expected: dxbc_sm5::ProgramKind,
-        actual: dxbc_sm5::ProgramKind,
+    MissingMaterialAdapter {
+        family: asset_core::FamilyId,
+    },
+    Adapter {
+        family: asset_core::FamilyId,
+        reason: String,
     },
 }
 
@@ -96,81 +201,34 @@ pub fn prepare_program_abi<'a>(
     let pair = pass
         .shader_pair
         .ok_or(ProgramAbiRefusal::PassShaderPairMissing)?;
-    let vertex_source = exact_stage_source(catalog, pair, RuntimeShaderStage::Vertex)?;
-    let pixel_source = exact_stage_source(catalog, pair, RuntimeShaderStage::Pixel)?;
-    let decl = || {
-        catalog.vertex_decl(pair.vertex_decl_slot).ok_or(
-            ProgramAbiRefusal::MissingVertexDeclaration {
-                pointer_identity: pair.vertex_decl_slot,
-            },
-        )
-    };
-    let (abi, programs) = if crate::dxbc_abi::is_dxbc_program(&vertex_source.program) {
-        let parse = |source: &RuntimeShaderProgram| {
-            dxbc_sm5::wgsl::Shader::parse(&source.program)
-                .map_err(|_| ProgramAbiRefusal::Abi(PassAbiRefusal::DxbcProgram))
-        };
-        let (vertex, pixel) = (parse(vertex_source)?, parse(pixel_source)?);
-        for (shader, expected) in [
-            (&vertex, dxbc_sm5::ProgramKind::Vertex),
-            (&pixel, dxbc_sm5::ProgramKind::Pixel),
-        ] {
-            if shader.kind != expected {
-                return Err(ProgramAbiRefusal::DxbcStageMismatch {
-                    expected,
-                    actual: shader.kind,
-                });
-            }
-        }
-        let (abi, lowering) = crate::dxbc_abi::build_dxbc_pass_abi(
-            &vertex,
-            &pixel,
-            decl()?,
-            vertex_type,
-            &pass.arguments,
-            pass.t5_custom_sampler_flags | pass.custom_sampler_flags,
-        )
-        .map_err(ProgramAbiRefusal::Abi)?;
-        (
-            abi,
-            PreparedShaderPrograms::Dxbc {
-                vertex: Box::new(vertex),
-                pixel: Box::new(pixel),
-                lowering,
-            },
-        )
-    } else {
-        let decode = |source: &RuntimeShaderProgram, stage| {
-            crate::decode_sm3_program(&source.program, stage)
-                .map_err(|cause| ProgramAbiRefusal::Decode { stage, cause })
-        };
-        let (vertex, pixel) = (
-            decode(vertex_source, RuntimeShaderStage::Vertex)?,
-            decode(pixel_source, RuntimeShaderStage::Pixel)?,
-        );
-        let abi = crate::sm3_abi::build_pass_abi(
-            &vertex,
-            &pixel,
-            decl()?,
-            vertex_type,
-            &pass.arguments,
-            pass.custom_sampler_flags,
-            pass.t5_custom_sampler_flags,
-            pass.hardware_shadow_compare,
-            pass.depth_to_colour,
-        )
-        .map_err(ProgramAbiRefusal::Abi)?;
-        (abi, PreparedShaderPrograms::Sm3 { vertex, pixel })
-    };
+    let vertex = exact_stage_source(catalog, pair, RuntimeShaderStage::Vertex)?;
+    let pixel = exact_stage_source(catalog, pair, RuntimeShaderStage::Pixel)?;
+    let declaration = catalog.vertex_decl(pair.vertex_decl_slot).ok_or(
+        ProgramAbiRefusal::MissingVertexDeclaration {
+            pointer_identity: pair.vertex_decl_slot,
+        },
+    )?;
+    let family = declaration.layout.owner;
+    let adapter = ADAPTERS
+        .get()
+        .and_then(|adapters| adapters.0.get(&family))
+        .ok_or(ProgramAbiRefusal::MissingMaterialAdapter { family })?;
+    let prepared = adapter.prepare(ProgramPreparation {
+        pass,
+        declaration,
+        vertex_type,
+        vertex,
+        pixel,
+    })?;
     let id =
         PortId::from_pass(pass, vertex_type).ok_or(ProgramAbiRefusal::PassShaderPairMissing)?;
     Ok(PreparedProgramAbi {
         id,
         pair,
-        vertex_name: &vertex_source.name,
-        pixel_name: &pixel_source.name,
-        abi,
-        programs,
+        vertex_name: &vertex.name,
+        pixel_name: &pixel.name,
+        abi: prepared.abi,
+        program: prepared.program,
     })
 }
 

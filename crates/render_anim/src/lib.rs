@@ -1,24 +1,21 @@
 pub mod anim;
 pub mod draw;
 mod draw_build;
-pub mod gaps;
 pub mod geometry;
 pub mod lighting;
 pub mod occupancy;
 mod plugin;
 
 pub use anim::dobj_pose::{
-    HostDObjPoseFrame, HostDObjPoseRefuse, PosedPlayer, PosedPlayerFrame, PosedPlayerHead,
-    ScriptModelBoltDemand, ScriptModelDObjFrame,
+    HostDObjPoseFrame, PosedPlayer, PosedPlayerFrame, PosedPlayerHead, ScriptModelBoltDemand,
+    ScriptModelDObjFrame,
 };
 pub use anim::fpv_host::{
-    FpvBoltTargets, FpvGenerateArgs, FpvHeldLife, FpvHeldSettled, FpvPoseKind, FpvPoseProduct,
-    FpvPoseRefuse, FpvPosedFrame, FpvPresentCursor, PendingFpvNotetracks, PendingFpvSpawn,
-    PendingFpvSpawnRequest, generate_fpv_pose,
+    FpvBoltTargets, FpvHeldLife, FpvHeldSettled, FpvPoseGenerator, FpvPoseKind, FpvPoseProduct,
+    FpvPosedFrame, FpvPresentCursor, PendingFpvNotetracks, PendingFpvSpawn, PendingFpvSpawnRequest,
 };
 pub use anim::fpv_prepared::{
-    FpvPreparationCensus, FpvRigSet, FpvWeaponSlot, FpvWeaponTable, FpvWeaponView, PreparedFpv,
-    prepare_fpv_compositions,
+    FpvRigSet, FpvWeaponSlot, FpvWeaponTable, FpvWeaponView, PreparedFpv, prepare_fpv_compositions,
 };
 pub use anim::model_materials::{PreparedModelMaterials, prepare_model_materials};
 pub use anim::viewmodel_controller::{

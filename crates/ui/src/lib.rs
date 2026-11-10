@@ -1,3 +1,4 @@
+pub const FONT_LICENSE: &str = include_str!("../assets/OFL-Oxanium.txt");
 pub mod barracks;
 pub mod classes;
 mod community_servers;
@@ -14,15 +15,13 @@ mod plugin;
 mod screen;
 
 pub use classes::equip_txn::{
-    EquipTxnWatch, apply_pending_class_equip, resolve_class_equip_transaction,
-    sync_class_change_allowed,
+    apply_pending_class_equip, sync_class_change_allowed, sync_class_equip_state,
 };
 pub use classes::icons::{ClassSelectIconCache, UiAssetRoot};
 pub use classes::select::{
-    ClassChangeAllowed, ClassChangeBlockReason, ClassEquipRefusal, ClassEquipRequest,
-    ClassSelectHighlight, ClassSelectOverlayOpen, ClassSelectPhase, ClassSelectStatus,
-    PendingClassEquip, accept_class_equip, class_index_by_name, commit_class_equip,
-    reject_class_equip,
+    ClassChangeAllowed, ClassChangeBlockReason, ClassSelectHighlight, ClassSelectOverlayOpen,
+    ClassSelectPhase, ClassSelectStatus, PendingClassEquip, accept_class_equip,
+    class_index_by_name, commit_class_equip, reject_class_equip,
 };
 pub use classes::setup::{ClassEditRow, ClassLoadoutCatalog, ClassPickerFolder, ClassSlotState};
 pub use classes::store::SessionClassStore;

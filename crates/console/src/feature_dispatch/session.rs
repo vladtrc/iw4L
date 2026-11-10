@@ -4,19 +4,85 @@ use crate::{ConsoleCommand, ConsoleDispatch};
 
 use super::echo::ConsoleEcho;
 
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct SessionCommandTarget<'w> {
+    scope: Res<'w, State<frame::MatchScope>>,
+    identity: Res<'w, frame::LaunchIdentity>,
+    role: Res<'w, frame::RuntimeRole>,
+    merged: Option<Res<'w, assets::MergedMap>>,
+    playback: Option<Res<'w, ::replay::ReplayPlayback>>,
+    bridge: Option<Res<'w, net::MasterBridge>>,
+    manifest: Option<Res<'w, ::session::SessionContentManifest>>,
+}
+
+impl SessionCommandTarget<'_> {
+    fn restart_zone(&self) -> Option<String> {
+        if *self.scope.get() == frame::MatchScope::Live
+            && let Some(merged) = &self.merged
+        {
+            return Some(merged.recording_name().into());
+        }
+        self.manifest
+            .as_ref()
+            .and_then(|manifest| match &manifest.map {
+                ::session::ManifestFact::Known(map)
+                    if (*self.scope.get() == frame::MatchScope::Live) =>
+                {
+                    Some(format!("{}:{}", map.namespace.as_str(), map.name))
+                }
+                _ => None,
+            })
+    }
+
+    fn can_leave(&self, transition: &::session::SessionSwapRequest) -> bool {
+        (*self.scope.get() == frame::MatchScope::Live)
+            || self.playback.is_some()
+            || transition.is_pending()
+            || self.bridge.is_some()
+    }
+}
+
 pub(crate) fn route_session_commands(
     mut events: MessageReader<ConsoleCommand>,
     mut echo: ConsoleEcho,
     mut transition: ResMut<::session::SessionSwapRequest>,
-    has_world: Res<State<frame::MatchScope>>,
-    playback: Option<Res<::replay::ReplayPlayback>>,
-    bridge: Option<Res<net::MasterBridge>>,
-    manifest: Option<Res<::session::SessionContentManifest>>,
+    target: SessionCommandTarget,
     mut dispatch: ResMut<ConsoleDispatch>,
     mut authority: Option<ResMut<net::AuthorityWorld>>,
 ) {
     for cmd in events.read() {
         match cmd.name.as_str() {
+            "checkpoint_load" => {
+                let result = if !cmd.args.is_empty() {
+                    Err("usage: checkpoint_load".into())
+                } else if *target.role != frame::RuntimeRole::Listen
+                    || target
+                        .bridge
+                        .as_ref()
+                        .is_some_and(|bridge| bridge.state().in_match())
+                {
+                    Err("checkpoint load requires a local campaign session".into())
+                } else if let (Some(zone), Some(authority)) =
+                    (target.restart_zone(), authority.as_ref())
+                {
+                    authority
+                        .0
+                        .prepare_campaign_checkpoint_load()
+                        .and_then(|checkpoint| {
+                            transition.request_campaign_checkpoint(zone, checkpoint)
+                        })
+                } else {
+                    Err("checkpoint load needs the active campaign host".into())
+                };
+                match result {
+                    Ok(()) => echo
+                        .write("checkpoint_load: loading the last committed campaign checkpoint"),
+                    Err(error) => {
+                        dispatch.release();
+                        echo.write(format!("checkpoint_load: {error}"));
+                    }
+                }
+            }
             "round_restart" => {
                 let result = if !cmd.args.is_empty() {
                     Err("usage: round_restart".into())
@@ -31,14 +97,7 @@ pub(crate) fn route_session_commands(
                 }
             }
             "map_restart" => {
-                let zone = manifest.as_ref().and_then(|manifest| match &manifest.map {
-                    ::session::ManifestFact::Known(map)
-                        if (*has_world.get() == frame::MatchScope::Live) =>
-                    {
-                        Some(format!("{}:{}", map.namespace.as_str(), map.name))
-                    }
-                    _ => None,
-                });
+                let zone = target.restart_zone();
                 match (cmd.args.is_empty(), zone) {
                     (false, _) => {
                         dispatch.release();
@@ -49,9 +108,7 @@ pub(crate) fn route_session_commands(
                         echo.write("map_restart: no map to restart");
                     }
                     (true, Some(zone)) => match transition.request_zone(zone.clone()) {
-                        Ok(id) => {
-                            echo.write(format!("map_restart: requested `{zone}` (swap #{id})"))
-                        }
+                        Ok(()) => echo.write(format!("map_restart: requested `{zone}`")),
                         Err(error) => {
                             dispatch.release();
                             echo.write(format!("map_restart: {error}"));
@@ -60,8 +117,14 @@ pub(crate) fn route_session_commands(
                 }
             }
             "map" => match cmd.args.as_slice() {
-                [zone] => match transition.request_zone(zone.clone()) {
-                    Ok(id) => echo.write(format!("map: requested `{zone}` (swap #{id})")),
+                [zone] => match (if target.role.runs_authority() {
+                    assets::MergedMap::select_name(&target.identity.artifacts, zone)
+                } else {
+                    Ok(zone.clone())
+                })
+                .and_then(|zone| transition.request_zone(zone))
+                {
+                    Ok(()) => echo.write(format!("map: requested `{zone}`")),
                     Err(error) => {
                         dispatch.release();
                         echo.write(format!("map: {error}"));
@@ -73,10 +136,7 @@ pub(crate) fn route_session_commands(
                 }
             },
             "disconnect" => {
-                let in_session = (*has_world.get() == frame::MatchScope::Live)
-                    || playback.is_some()
-                    || transition.dump_id().is_some()
-                    || bridge.is_some();
+                let in_session = target.can_leave(&transition);
                 if !cmd.args.is_empty() {
                     dispatch.release();
                     echo.write("usage: disconnect");
@@ -85,14 +145,9 @@ pub(crate) fn route_session_commands(
                     echo.write("disconnect: no session to leave");
                 } else {
                     match transition.request_leave() {
-                        Ok(id) => {
-                            diag::lifecycle_boundary(
-                                "disconnect_requested",
-                                &format!(" swap={id}"),
-                            );
-                            echo.write(format!(
-                                "disconnect: waiting for session teardown (swap #{id})"
-                            ))
+                        Ok(()) => {
+                            diag::lifecycle_boundary("disconnect_requested", "");
+                            echo.write("disconnect: waiting for session teardown")
                         }
                         Err(error) => {
                             dispatch.release();

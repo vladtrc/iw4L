@@ -6,6 +6,7 @@ license.workspace = true
 description = "Shared frame schedules, session identity and state-scoped ownership."
 
 [dependencies]
+asset_core.workspace = true
 bevy.workspace = true
 master_protocol.workspace = true
 

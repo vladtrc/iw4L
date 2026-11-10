@@ -39,7 +39,9 @@ pub use accelerate::accelerate;
 pub use ads_frac::{AdsFracContext, update_ads_frac};
 pub use ads_intent::{AdsIntentContext, AdsIntentResult, BUTTON_ADS, update_ads_intent};
 pub use air::{AirMoveContext, air_move};
-pub use check_prone::{PRONE_CHECK_HEIGHT, PRONE_FEET_DIST, check_prone, player_prone_allowed};
+pub use check_prone::{
+    PRONE_CHECK_HEIGHT, PRONE_FEET_DIST, ProneBody, ProneGround, player_prone_allowed,
+};
 pub use cmdscale::{CmdScaleWalkContext, cmd_scale_walk};
 pub use collision::CollisionBackend;
 pub use correct_solid::{CorrectSolidOutcome, correct_solid};

@@ -7,9 +7,9 @@ player connect/spawn/damage/killed, the in-game menus, and the sounds they play.
 
 ## Sources and installation
 
-Matches support IW4 modes only (dm, war, dom, sd, sab, ctf, koth, dd).
-T5 and IW5 maps supply entities and map declarations; their gameplay/UI scripts
-are excluded. Menu/HUD layout and match flow stay IW4, with weapon and team icons
+Multiplayer matches support IW4 modes (dm, war, dom, sd, sab, ctf, koth, dd).
+Installed map-script policies supply native entities and declarations and
+select packaged or projected host-rule sources. Menu/HUD layout and match flow stay IW4, with weapon and team icons
 from the corresponding game. Objective models, materials, shaders and effects
 come from the map's game, including the plant/defuse weapon viewmodels and animations.
 `ObjectiveVisuals` binds IW4 names to those assets at
@@ -28,7 +28,11 @@ entities, tables). The install transaction installs the program, runs
 entities, sets the `mapname` and `g_gametype` dvars and schedules the `Iw4Startup`
 entries before authority ticks: the gametype `main`, the map `main` (if present), then
 `_callbacksetup`'s `codecallback_startgametype`. Missing dependencies, unsupported
-syntax, unresolved names and unbound natives fail the transaction.
+syntax and unresolved names fail the transaction. Multiplayer also rejects unbound
+natives before installation. Campaign logs the full missing-native inventory and
+keeps unavailable slots in the program: executing one terminates the runtime with
+its source location and script call stack. Uncalled declarations do not prevent
+campaign startup; missing calls never return a fabricated script value.
 
 Map entities: `worldspawn` is kept as level settings (`getnorthyaw`),
 `script_struct` blocks become plain objects appended to `level.struct`, and every other
@@ -44,6 +48,78 @@ and module/function/native/entry counts once the world is published, `gsc: refus
 stage=compile|install|entry fault="…"` when the load stopped at the script.
 `crates/approved_tests` records and asserts both.
 
+`Catalog::iw4_campaign()` supplies the separate single-player builtin namespace.
+IW4 maps with single-player world metadata select `common.ff`,
+`code_post_gfx.ff`, `patch.ff` and optional localized companions. The common cache
+key includes this profile; campaign content uses SP penetration data and excludes
+MP donor catalogs, callbacks, rank tables and account preparation.
+
+Campaign installation supplies local client0 through `LevelData`, finishes the
+authored `info_player_start` points, creates the player and allied sentient, then
+starts `maps/<mission>::main`. Local input waits for presentation admission.
+Engine startup loads species animation hooks, authored actor types and traversal
+scripts from path nodes, verifies required labels, and runs type precaches and
+spawn hooks in entity context. Unimplemented natives remain explicit execution
+faults when reached; compiling the mission does not establish complete support.
+
+Actor slots, sentients, spawners, path nodes and animation controllers have typed
+owners in the simulation. Actor and sentient allocation is bounded; failure
+retires partially allocated ownership. Physical actors have collision bounds
+independent of a visual model. Model, body, thermal and hero-lighting state reach
+presentation through snapshots. Entity deletion retires these owners and their
+references; round restart rebuilds them from retained level data.
+
+Path-node native fields are read-only; script fields remain writable. Node objects
+remain rooted across heap collection. ConnectPaths/DisconnectPaths maintain
+per-brush blocker references, so deleting one blocker preserves other authored
+and dynamic disconnections. The route planner, nearest-node selection and
+moving-blocker refresh remain incomplete.
+
+Actors own separate script and active goals, volume/entity/node references,
+contact checks, stance constraints and typed orientation/physics controllers.
+AnimScripted enters scripted state and runs the species hook; AnimCustom starts
+its supplied script callback and retains the optional end callback. Replacement,
+stop, death and natural completion retire the corresponding controllers.
+Unlinked placement, body yaw, look angles, floor contact, sliding, stepping and
+player push-away have consumers. Full AI transitions, navigation, perception,
+linked placement, death planting and automatic base-state resume remain incomplete.
+Suppression owns its meter, timed line entries and danger/overlap markings;
+unimplemented nearest-node branches fail explicitly.
+
+Campaign preflight retains ATR trees selected by IR animation references and
+binds every retained leaf from the asset catalog, including startup clips.
+Per-entity clocks drive DObj poses, collision and notetracks. Sync groups share
+weighted normalized clocks; notifications subdivide a frame so script handlers
+can replace or seek playback before its remaining time advances. Restart fades
+retain old instances without changing script indices. Translation and planar/full
+rotation delta channels are decoded with the clip. Delta queries and unlinked
+scripted motion consume those channels; malformed channels fail decoding.
+
+Configured keyboard/mouse controls publish `LocalKeyBindings` at startup, match
+installation and remapping. GetCommandFromKey/GetKeyBinding use script key
+identities and return at most two localized bindings. Command notifications use a
+bounded registration table and reliable named input actions. Controller binding
+queries and some locale-specific labels remain incomplete. Stance permissions
+travel in player state and affect both authority and prediction.
+
+SP audio supports ambient rates, master/slave ducking, room processing and
+per-channel EQ. Reliable commands drive room priorities, sample-clock fades and
+two tracks of three biquads. Entity EQ bypass identities travel in snapshots.
+Tracked sound completion returns from the owning client to the VM. Room processing
+uses IW4L's procedural stereo convolution. Waveform parity remains unverified.
+
+Script-selected hands and map weapons are prepared from authored assets.
+SetLookAtText publishes a per-viewer locational selection and localized HUD text.
+Hero lights and character grid tweaks affect dynamic lighting; thermal state
+selects actor materials when thermal vision is active. Full overlay, lighting,
+attachment and animation visual parity remains unaccepted.
+
+Trainer's range can progress through hip fire, crouched ADS and plywood
+penetration to grenade pickup. Brush rendering uses live snapshot identity and
+pose in camera admission and shader matrices. The full mission, Pit and all
+assets/animations still require interactive acceptance; startup vehicle and
+saved-dvar gaps remain.
+
 Natives are linked against a `Catalog` of the game's builtins (generated into
 `script/profile/iw4_catalog.rs`, split into function and method namespaces), not against the
 registry. An unqualified call resolves to a function in the same file, then a builtin
@@ -51,8 +127,8 @@ in the call's namespace, then a unique include. Qualified names and `thread` cal
 never resolve to builtins. A developer builtin used as a statement compiles to nothing
 (arguments are not evaluated); using its value or referencing it fails the load.
 `prof_begin`/`prof_end` statements compile to nothing. SHA-256 covers decompressed source bytes
-after terminator removal. Fingerprints hash IR version 5 and each module's
-`(site, realm, origin)`; server modules of the IW4 and T5 realms are instantiated. Calls, `::f` references (script
+after terminator removal. Fingerprints hash IR version 6 and each module's
+`(site, realm, origin)`; server modules of installed script families are instantiated. Calls, `::f` references (script
 `Function` or native `Builtin`), locals (per-function slots) and field names (symbol ids)
 are resolved at load, and `install` binds native slots once.
 UTF-8 and single-byte sources are supported; developer blocks are excluded.
@@ -70,6 +146,10 @@ string-conversion rules are:
 - Only ints and floats have truth.
 - Floats print with MSVC `%g`.
 - Overlong int literals wrap.
+
+File-scope constants support scalar and vector literals, including numeric
+expressions in vector components. Vector components require integers or floats,
+with the same conversion as runtime vector expressions.
 
 
 Ordinary strings retain their original bytes. UTF-8 strings and legacy byte
@@ -95,6 +175,11 @@ Scheduling uses time buckets:
   Calls and thread calls share a limit of 31 frames across the running thread and the
   spawners suspended under it. An endon that fires on a suspended spawner unwinds it
   when control returns to it.
+- `childthread f()` schedules like `thread` and copies the caller's existing
+  `endon` handlers, including those in enclosing function calls. The copies end
+  the entire child and remain armed after the caller returns. Later handlers in
+  the caller are not inherited. Receiver, qualified and indirect calls support
+  both thread modes; neither mode resolves a native as a script function.
 
 Events use one waiter list per program:
 - Notify walks the waiters oldest-registration first and never runs script.
@@ -146,13 +231,13 @@ modules, and `Parser` stays in the parent.
 
 `SoundExists(alias)` checks the composed match sound-alias catalog, installed
 before script entry points run even when audio output is disabled. Host aliases
-resolve case-insensitively; imported aliases use an explicit `t5:` or `iw5:`
+resolve case-insensitively; imported aliases use an explicit installed-family token
 prefix. A missing catalog reports an unavailable native error. Arguments use the usual
 script string conversion.
 
 `Objective_Team(index, player)` is an extension: given a player instead of a team
 name, the objective shows to that player alone, in team and free-for-all modes
-(T6 sensor grenade pings, `iw4l_t6/equipment`). The compass draws objectives in
+(for example, a family-owned sensor grenade script). The compass draws objectives in
 free-for-all only when they are addressed this way.
 
 `AmbientPlay(alias, [fadeSeconds])`, `AmbientStop([fadeSeconds])` and
@@ -174,12 +259,42 @@ local weapon notetracks. Vibration preferences, focus, pad selection and player
 lifecycle still govern controller output. Missing definitions or graphs are
 diagnosed by the client.
 
-`PlaySound(alias)` and `PlaySoundAsMaster(alias)` emit the same spatial sound
-event in the MP runtime. They take one alias argument and require a live entity;
-a valid alias is sent before an extra notify argument produces an error. Missing aliases, looping aliases, unavailable
-looping flags, and a full sound-alias configstring table produce errors without
-emitting an event. Use
-`PlayLoopSound` for looping aliases.
+`PlaySound(alias)` requires a live entity and emits a sound event carrying that
+entity's number. Campaign `PlaySound(alias, notifyName, [replaceAllowed])` sends
+reliable tracked playback, retaining one pending notify/alias on the entity.
+The command carries its alias name because reliable audio can precede the
+snapshot's alias table. Only the designated campaign audio client can acknowledge
+completion. The client follows the actual primary voice, including failure and
+stop; secondary layers do not delay that acknowledgement. A full action queue
+retains completion until it can be sent. Playback acknowledgements remain separate
+from movement input and input locks. The server marks matching entity/alias
+completion, then releases the GSC wait during entity processing before thinking.
+`IsWaitingOnSound` reads the pending wait until that phase. Replacing a pending
+wait first sends new playback and raises the previous notify, then requires both
+replacement flags; refusal retains the old wait and those partial effects.
+Entity deletion discards its wait. Notify names retain GSC byte-string identity.
+This transport uses the 255-entry runtime alias table.
+
+Missing/looping aliases, unknown looping flags and a full alias table error
+before playback. Invalid argument counts do not emit a sound. Use `PlayLoopSound`
+for looping aliases. Tracked playback currently requires the campaign audio owner;
+co-op expansion, restore/resync and complete native timing parity remain open.
+`PlaySoundAsMaster` now uses the same entity/wait contract with a distinct master
+mode. Its one-argument form emits native entity event4; the frontend carries the
+forced-master property into actual playback, including secondary layers. Normal
+aliases flagged master also participate. IW4 alias capture retains the authored
+slave percentage; only non-master slave voices receive the native gain formula.
+Concurrent masters contribute the maximum percentage among aliases flagged
+master; a forced ordinary alias activates ducking without adding its percentage.
+`snd_slaveFadeTime` defaults to500ms, accepts0..5000 and ramps both the phase and
+maximum percentage; zero switches immediately. The existing presentation dvar
+path carries script changes to the callback. Missing/nonfinite percentages for
+flagged aliases produce a typed audio failure. Other families retain unknown
+master/slave policy rather than interpreting their flag words as IW4. Menu audio
+is isolated, and match/timeline effect reset clears the mixer phase. PCM tests
+verify actual output gains and completion for both GSC entry points. Full scene/
+speech/lip acceptance, virtual-voice admission and exact native update timing
+remain open.
 
 Sounds the scripts play (`playLocalSound`, `playSoundToPlayer`, `playSoundToTeam`)
 reach the client. Effects, rumble and earthquakes validate their receiver and are
@@ -238,6 +353,9 @@ is linear over real time: its phase is recovered from the integrated game clock
 so snapshots and late joins share the same transition. Bevy frame quantization
 and its time clamp still apply. Raw input timing and connection clocks use real
 time. Removing the match's time policy restores normal speed.
+Killcam snapshots retain the current server time policy while replaying the
+archived world. Their slow-motion transition stays on the live server clock,
+so recorded final killcams preserve the script's pacing during playback.
 
 `PhysicsExplosionSphere(origin, outerRadius, innerRadius, magnitude)` applies an
 outward impulse with an upward bias, full strength inside the inner radius and
@@ -280,14 +398,11 @@ part of `game` (and `pers` when asked to persist).
 Disconnect requests from transport are queued for an authority frame. The player
 callback runs before Rust removes the player state and metadata; it can still read
 the name, score and team while the scripts remove the player from their lists.
-Scripts run and are checked only on authority frames (`try_step`/`step` with
-`StepReason::AuthorityFrame`); prediction of new and replayed commands steps a
-script-less world. Per-client script control constraints travel in snapshots and are
+Scripts run only in the authority world (`try_step`/`step`); the client predicts
+without a world. Per-client script control constraints travel in snapshots and are
 restored before prediction and command replay. Button-query natives sample raw commands
 from the current authority frame, including presses between its first and last commands.
-Clones preserve program, heap, threads and waits. Shutdown resets them. Restoring
-snapshots into an installed authority VM rejects absent script state. Persistent
-replay pinning/restoration and client-role lifecycle evidence are still missing.
+Clones preserve program, heap, threads and waits. Shutdown resets them.
 Only terminal faults (exhausted identifiers, inconsistent IR) are sticky; they end the
 match and return the host to the lobby. Earlier
 writes are not rolled back.
@@ -317,7 +432,16 @@ fail. The setter requires an integer and stores its low byte, including values
 outside 0–100. Get needs at least one argument and set at least two; extra
 arguments are ignored. Other players return undefined before validating arguments.
 These fields are separate from `Get/SetPlayerData` and survive script resets and
-simulation copies. New local profiles start at zero.
+simulation copies. New completion fields start at zero. The signed integer
+`takeCoverWarnings` starts at -1 and preserves all 32 bits through the same
+script/profile-file lifecycle.
+
+`GetPlayerSetting("gameskill")` reads the current per-player difficulty dvar and
+returns its decimal string. Its PC prefix comparison ignores case and accepts
+suffixes after the nine-character name. `g_gameskill_player_1/2` start at1 with
+domain0..3; script writes become current on level restart, while internal writes
+apply immediately. Unknown settings fail. `scr_dof_enable` is registered true
+with save eligibility, so the existing art/DOF script path can read and change it.
 
 Listen hosts load the local profile before scripts run and save changes at the
 end of each application frame, before normal console exit. Map replacement
@@ -361,8 +485,7 @@ records source delivery, not a signature or platform identity. Full connection
 state parity, schema migration and platform identity remain incomplete.
 Remote profiles bind a signing key to member, connection, session, epoch and
 a fresh host challenge. Duplicate owners and stale contexts refuse admission.
-This protocol uses game-wire version 106; installed multiplayer validation remains
-required.
+The current game-wire version is141; peers must use matching builds.
 Host bots bind distinct temporary accounts before their join actions are queued.
 Their 8,188-byte buffers start at zero and use the first installed player schema
 without human profile defaults. Script writes and map restarts retain these
@@ -381,3 +504,150 @@ actions are connected but still need multiplayer validation. Display mode/resolu
 bloom are bound to runtime settings and persisted locally. Surround output, voice/chat
 settings, third-person camera and spectator restrictions remain incomplete. A true
 dedicated server still runs on the listen runtime.
+
+
+Campaign map vehicles with spawnflags bit2 have an owned vehicle-spawner kind.
+`IsSpawner` reads that kind or actor spawner state, returning0 for other values.
+`Vehicle_GetSpawnerArray` selects live vehicle spawners and rejects arguments.
+Collision-map templates retain their separate code_classname and do not appear
+in script_vehicle queries. Absent campaign entity spawnflags expose integer0.
+Active SP vehicle spawning/physics remains incomplete; this classification does
+not claim vehicle motion or authored animation readiness.
+
+
+Campaign map walks capture their Weapon/Vehicle definitions and related world,
+projectile and tracer models. LoadedWorld carries them to final match assembly;
+map rows replace matching common rows in place and retain their native script
+aliases. Source-zone effect pointers are resolved before merging; final linking
+uses owned names and leaves missing authored edges unresolved.
+
+`GetPlayerIntelIsFound(number)` and `SetPlayerIntelFound(number)` operate on64
+persistent local-profile bits numbered1..64. Invalid numbers read0 and do not
+change state. Profile files retain the unsigned bitset; legacy files start empty.
+`IsThrowingGrenade` reads primary weapon states OffhandInit through OffhandEnd.
+It does not infer throwing from a button or the secondary weapon state.
+
+
+Campaign first-person hands are prepared from literal script `SetViewModel`
+declarations that resolve to loaded, posed models with the required weapon tags.
+They own the published mesh catalog independently of multiplayer body kits. Each
+hand variant retains strict mount/skeleton/clip ownership checks. The native
+stores the selected name in per-client snapshot metadata, and FPV
+selection changes rebuild the composition even when the weapon stays the same.
+Inventory admission permits the authored GiveWeapon-before-SetViewModel order
+when a valid composition exists; presentation still requires the selected model.
+Dynamic undeclared model names fail explicitly.
+
+Threat group creation/lookup and sentient assignment use16 slots including the
+unnamed default. Names match exactly; duplicates do not consume slots and excess
+creation is ignored. SetThreatBiasGroup selects a known name with one argument,
+otherwise resets to default; unknown names and non-sentients fail. Threat bias
+matrix and AI target evaluation remain incomplete.
+
+`hasEverPlayed_SP` is an owned boolean profile field, initiallyfalse.
+`UpdateGamerProfile`/`UpdateGamerProfileAll` request persistence of the owned local
+profile through a save generation observed by the existing application writer.
+Successful writes acknowledge that generation; explicit requests can save an
+unchanged profile. The generation itself is not serialized. Normal Trainer now
+persists the first-play flag. This does not supply platform/account profiles.
+
+
+Campaign map weapon classes are installed as real item entities before map main.
+Suspended placements retain their authored transforms; floor placement remains
+unsupported. Captured weapon-item ammo bounds seed primary and alternate slots;
+ItemWeaponSetAmmo clamps clips and validates before changing an item. Authored
+items remain outside the dropped-weapon eviction pool. Acquisition uses the real
+use/trigger path. Reserve transfer currently covers ordinary single-weapon caps;
+shared-cap, clip-only and multiple compatible-weapon rules remain incomplete.
+
+WeaponHasThermalScope reads the captured weapon property independently of combat
+admission and rejects unknown/sentinel weapons. Campaign EnableAimAssist and
+DisableAimAssist set/clear the native script-mover flag and replicate it even on
+hidden stationary helpers. Controller selection of these helpers remains pending.
+Script-selected first-person viewmodels use their own prepared clip-track tables
+for every rig variant, alongside their own assemblies and hands.
+
+
+Campaign SetBlur broadcasts through the existing client view-effect snapshots and
+film renderer. Both campaign blur entry points require blur and duration, validate
+nonnegative finite values, and truncate seconds to milliseconds. Script-only
+transitions preserve interpolation continuity; full native priority arbitration
+with other blur producers remains incomplete. In-game script menus select the
+match-owned campaign catalog; frontend menus retain their shell catalog. HUD text
+directives read actual command bindings for the selected input device.
+
+
+Campaign snapshots publish the active shared script-dvar namespace separately
+from server-info variables. Menu and presentation queries retain
+targeted-client precedence. MP does not publish this campaign field. Campaign
+player sync delivers queued menu answers to the existing script player, then
+returns before multiplayer connection/death callbacks; a popup response can resume
+waittill and restore the script's controls and blur.
+
+
+Campaign ammo fractions query actual weapon ownership and ammunition. Start uses
+reserve/start ammo; Max uses reserve/max ammo, or the right clip/clip size for
+captured clip-only weapons. Unowned weapons and nonpositive denominators return1;
+nonpositive ammo returns0, and positive fractions can exceed1. Invalid/sentinel
+weapon names fail. Campaign IsMeleeing reads primary melee phases only; IsFiring
+reads firing/rechambering/melee phases in either hand.
+
+Campaign SaveGameNoCommit queues a checkpoint for the completed simulation frame;
+CommitWouldBeValid and CommitSave validate its ID and publish the captured image.
+SaveGame queues an immediate memory commit. IsSaveSuccessful reports capture
+failure state, and IsSaveRecentlyLoaded covers the first two seconds after a
+restore. The image owns VM threads, arrays, entity/kernel payloads, simulation
+RNG, animation/collision state and mechanics. Restoring rebuilds ECS payload
+indexes, restores registered savegame dvars, and retains live account/preferences
+and unsaved dvars. Checkpoints are restricted to the same map session.
+
+SimWorld exposes in-process capture, committed-checkpoint access and restore;
+restore returns the saved authority tick. Direct restore requires a caller to
+coordinate its clock, client histories, input and presentation; it refuses an
+active input-program timeline. `checkpoint_load` performs that coordination for
+a local campaign through session teardown and fresh map installation. It validates
+program/content and authored level data before applying the image, preserves live
+profile/account/key bindings and unsaved dvars, installs the saved clock before
+releasing load hold, and retains the committed checkpoint for repeated loads.
+An old input program retires with its match. Active script menus are rebuilt from
+VM state; answered menus are not reopened from old command delivery history.
+Active tracked audio and reliable-only EQ/reverb commands are not reconstructed
+by this load path. A checkpoint captured while a script awaits sound completion
+can therefore retain an unresolved wait after presentation teardown. Such loads
+remain incomplete until audio state has a durable restore representation.
+
+Campaign death emits the SP death notification (attacker, cause, optional weapon)
+without invoking MP killed callbacks. After the native strict1700ms level-time
+deadline, it requests a real-time reload countdown using registered g_deathDelay
+(default3000ms). MissionFailed requests that countdown immediately. The host uses
+Time<Real>, so the countdown continues during the native slow-motion ramp; it
+loads the committed checkpoint or restarts the map when no memory save exists.
+Restore clears the engine's reload latch while retaining saved gameplay dvars.
+
+Campaign player hits use SP damage processing rather than the MP damage callback.
+Bullet, melee and radius scaling use the registered SP dvars; client damageMultiplier,
+criticalBulletDamageDist and deathInvulnerableTime are native player fields. Health
+shield activation/expiry and death shield state survive checkpoints. EnableHealthShield,
+EnableDeathShield and Enable/DisableInvulnerability control their native state.
+Damage and deathshield notifications carry the PC ten-argument form, and their
+waiters run before the engine tests health for death. Knockback precedes debug god
+mode; blood feedback accumulates and publishes once per frame. SP player hits skip
+the MP hit-location multiplier and last-stand processing.
+
+Native death-screen/blur/audio fade effects, retail continue commands and disk
+persistence (including PC CommitSave's device-write attempt) remain incomplete.
+Damage still needs actor attacker identity/target selection, flagged friendly-grenade
+protection and attachment/part hit metadata. The state dump reports saves and capture
+failures under entity_lifetimes.campaign_save.
+
+Campaign presentation selects the SP fullscreen blood pass `splatter_alt_sp` and
+its `blood_defocus_color_sp`/`blood_defocus_mask_sp` images from SP common. MP
+retains `splatter_alt` and its own images. Both paths validate the captured texture,
+sampler and state contract and execute the admitted material shader. A scoped
+MatchRuntimeProfile carries this choice to HUD and renderer during map installation.
+
+SP PainVisionOn/Off mutate player-state other_flags bit0x800. Campaign pain vision
+fades from that script flag, using registered painVisionLerpInRate/OutRate defaults
+10/0.3 (range0..30); it does not infer activation from health. The authored damage
+blur pulse remains separate. Strong hurt-frame highlights still need native
+post-processing comparison; full damage-visual parity is unproven.

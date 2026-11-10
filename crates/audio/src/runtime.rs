@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -9,18 +8,17 @@ use bevy::prelude::Resource;
 
 use crate::admission::{AdmissionFailure, AdmissionPolicy, Occupant};
 use crate::clip_store::MediaService;
-use crate::cue::{CueFailure, CueHandle, CueRequest, CueResolver};
+use crate::control::{AudioInbox, CueCommand};
+use crate::cue::{CueFailure, CueHandle, CueResolver, CueSubmission};
 use crate::cue_execution::{
-    CueCancellation, CueIntent, CueLease, CueMix, CueStep, CueTrigger, CueWork,
+    CancelKind, CueCancellation, CueIntent, CueLease, CueMix, CueStep, CueTrigger, CueWork,
 };
 use crate::media::RenderMedia;
 use crate::render_core::{
     Assignment, AudioScope, InstanceState, InstanceStatus, PHYSICAL_VOICES, QUANTUM, RenderShared,
     RenderVoiceId, SAMPLE_RATE,
 };
-use crate::sources::{
-    DesiredSource, SourceCue, SourceInbox, SourceKey, SourcePublisher, SourceScene,
-};
+use crate::sources::{DesiredSource, SourceActivity, SourceCue, SourceId, SourceKey, SourceScene};
 use crate::spatial::{ListenerSnapshot, ListenerState, SpatialSource};
 use std::collections::VecDeque;
 
@@ -58,8 +56,7 @@ struct StartRequest {
 
 #[derive(Clone, Copy)]
 struct SourceBinding {
-    key: SourceKey,
-    version: u64,
+    id: SourceId,
     gain: f32,
     rate: f32,
     group: Option<crate::sources::SourceRenderGroup>,
@@ -78,16 +75,15 @@ struct LogicalInstance {
 #[derive(Resource)]
 pub struct AudioRuntime {
     shared: Arc<RenderShared>,
-    cue_tx: SyncSender<CueRequest>,
+    inbox: Arc<AudioInbox>,
     media: Mutex<Option<MediaService>>,
     cue_mix: Mutex<Option<CueMix>>,
     cue_cancellation: CueCancellation,
     cue_budget: crate::pending::PendingBudget,
-    sources: Arc<SourceInbox>,
+    sources: Arc<SourceActivity>,
     listener: Arc<ListenerState>,
     event_context: Arc<crate::event::EventContextState>,
-    fire_verdicts: Arc<Mutex<net::FireVerdictState>>,
-    source_publisher: Mutex<SourcePublisher>,
+
     rejections: Arc<[AtomicU64; 7]>,
     shutdown: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
@@ -106,43 +102,37 @@ impl AudioRuntime {
             .device_required
             .store(device_enabled, Ordering::Relaxed);
         let shutdown = Arc::new(AtomicBool::new(false));
-        let (cue_tx, cue_rx) = sync_channel(LOGICAL_INSTANCES);
+        let inbox = Arc::new(AudioInbox::new());
         let thread_shared = shared.clone();
         let thread_shutdown = shutdown.clone();
-        let sources = Arc::new(SourceInbox::new());
+        let sources = Arc::new(SourceActivity::new());
         let control_sources = sources.clone();
         let listener = Arc::new(ListenerState::default());
         let control_listener = listener.clone();
         let event_context = Arc::new(crate::event::EventContextState::default());
         let control_event_context = event_context.clone();
-        let fire_verdicts = Arc::new(Mutex::new(net::FireVerdictState::default()));
-        let control_fire_verdicts = fire_verdicts.clone();
+
         let control_ids = Arc::new(AtomicU64::new(1));
         let rejections = Arc::new(std::array::from_fn(|_| AtomicU64::new(0)));
         let control_rejections = rejections.clone();
         let cue_budget = crate::pending::PendingBudget::default();
         let control_budget = cue_budget.clone();
-        let worker = std::thread::Builder::new()
-            .name("audio-control".into())
-            .spawn(move || {
-                control(
-                    thread_shared,
-                    thread_shutdown,
-                    cue_rx,
-                    device_enabled,
-                    control_sources,
-                    control_listener,
-                    control_event_context,
-                    control_fire_verdicts,
-                    control_ids,
-                    control_rejections,
-                    control_budget,
-                )
-            })
-            .expect("cannot start audio control thread");
+        let worker = AudioControl {
+            shared: thread_shared,
+            shutdown: thread_shutdown,
+            inbox: inbox.clone(),
+            device_enabled,
+            sources: control_sources,
+            listener: control_listener,
+            event_context: control_event_context,
+            next_id: control_ids,
+            rejections: control_rejections,
+            cue_budget: control_budget,
+        }
+        .spawn();
         Self {
             shared,
-            cue_tx,
+            inbox,
             media: Mutex::new(None),
             cue_mix: Mutex::new(None),
             cue_cancellation: CueCancellation::default(),
@@ -150,21 +140,10 @@ impl AudioRuntime {
             sources,
             listener,
             event_context,
-            fire_verdicts,
-            source_publisher: Mutex::new(SourcePublisher::new()),
+
             rejections,
             shutdown,
             worker: Some(worker),
-        }
-    }
-
-    pub fn set_fire_verdicts(&self, verdicts: net::FireVerdictState) {
-        *self
-            .fire_verdicts
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner()) = verdicts;
-        if let Some(worker) = &self.worker {
-            worker.thread().unpark();
         }
     }
 
@@ -189,6 +168,55 @@ impl AudioRuntime {
         }
     }
 
+    /// Take the mix off the device for an offline capture. The device plays
+    /// silence from here on, and the mix advances only as far as
+    /// [`advance_capture`](Self::advance_capture) allows, so a capturer that
+    /// runs slower than real time still gets every sample in step with its
+    /// frames.
+    pub fn begin_capture(&self) {
+        let tap = &self.shared.capture;
+        tap.samples
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clear();
+        tap.target
+            .store(self.shared.frame.load(Ordering::Acquire), Ordering::Release);
+        tap.armed.store(true, Ordering::Release);
+    }
+
+    pub fn advance_capture(&self, frames: u64) {
+        self.shared
+            .capture
+            .target
+            .fetch_add(frames, Ordering::AcqRel);
+        if let Some(worker) = &self.worker {
+            worker.thread().unpark();
+        }
+    }
+
+    /// Whether the mix has not yet reached what the capture allowed. Blocks
+    /// are whole quanta, so the last partial one is never owed.
+    pub fn capture_behind(&self) -> bool {
+        self.shared.frame.load(Ordering::Acquire) + QUANTUM as u64
+            <= self.shared.capture.target.load(Ordering::Acquire)
+    }
+
+    pub fn take_captured(&self) -> Vec<[f32; 2]> {
+        std::mem::take(
+            &mut *self
+                .shared
+                .capture
+                .samples
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner()),
+        )
+    }
+
+    /// Give the mix back to the device.
+    pub fn end_capture(&self) {
+        self.shared.capture.armed.store(false, Ordering::Release);
+    }
+
     pub fn rejection_count(&self, reason: AdmissionFailure) -> u64 {
         self.rejections[reason as usize - 1].load(Ordering::Relaxed)
     }
@@ -198,14 +226,36 @@ impl AudioRuntime {
         self.shared.master.store(gain.to_bits(), Ordering::Release);
     }
 
-    pub fn set_presentation_epoch(&self, epoch: u64) {
-        self.shared
-            .presentation_epoch
-            .store(epoch, Ordering::Release);
-        self.source_publisher
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .retain_epoch(epoch);
+    pub(crate) fn stop_source(&self, key: SourceKey) {
+        self.inbox.stop_source(key);
+        if let Some(worker) = &self.worker {
+            worker.thread().unpark();
+        }
+    }
+
+    pub(crate) fn set_slave_fade_time(&self, milliseconds: u32) {
+        self.shared.slaves.set_fade_ms(milliseconds);
+    }
+
+    pub(crate) fn set_eq(&self, target: &crate::eq::EqTarget) {
+        self.shared.eq.publish(target);
+    }
+
+    pub(crate) fn set_room_mix(&self, target: crate::room_mix::RoomTarget) {
+        self.shared.room.publish(target);
+    }
+
+    pub(crate) fn reset_match_effects(&self) {
+        self.shared.slaves.reset();
+        self.shared.room.reset();
+        self.shared.eq.reset();
+    }
+
+    pub(crate) fn stop_scope(&self, scope: AudioScope) {
+        self.inbox.stop_scope(scope, &self.cue_cancellation);
+        if let Some(worker) = &self.worker {
+            worker.thread().unpark();
+        }
     }
 
     pub fn cancel_all(&self) {
@@ -213,24 +263,17 @@ impl AudioRuntime {
         if let Some(worker) = &self.worker {
             worker.thread().unpark();
         }
-        self.source_publisher
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .cancel();
+        self.inbox.cancel_sources();
     }
 
     pub(crate) fn set_sources(&mut self, sources: Vec<DesiredSource>) {
-        let (scene, rejected) = self
-            .source_publisher
-            .get_mut()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .reconcile(
-                sources,
-                self.shared.presentation_epoch.load(Ordering::Acquire),
-                self.shared.cancelled.load(Ordering::Acquire),
-            );
+        let rejected = self
+            .inbox
+            .set_sources(sources, self.shared.cancelled.load(Ordering::Acquire));
         self.sources.dropped.fetch_add(rejected, Ordering::Relaxed);
-        self.sources.publish(scene);
+        if let Some(worker) = &self.worker {
+            worker.thread().unpark();
+        }
     }
 
     pub(crate) fn source_cue(
@@ -243,19 +286,18 @@ impl AudioRuntime {
             alias,
             emitter,
             scope,
-            epoch,
             group,
         } = request;
         let lease = self
             .cue_cancellation
-            .lease(namespace, &alias, emitter, scope, epoch)?;
+            .lease(namespace, &alias, emitter, scope)?;
         let media = self.media_for_bank(&bank)?;
         let mix = self
             .cue_mix
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .as_ref()
-            .filter(|mix| scope == AudioScope::Match && mix.epoch == epoch)
+            .filter(|_| scope != AudioScope::Menu)
             .cloned();
         Some(Arc::new(SourceCue {
             bank,
@@ -318,6 +360,7 @@ impl AudioRuntime {
 
     fn trigger_with_fade(&self, request: CueTrigger, fade: Option<u64>) -> CueHandle {
         let CueTrigger {
+            force_master,
             event,
             bank,
             namespace,
@@ -326,7 +369,6 @@ impl AudioRuntime {
             origin_inches,
             emitter,
             class,
-            epoch,
             pitch_scale,
             volume_scale,
             fallbacks,
@@ -337,9 +379,9 @@ impl AudioRuntime {
         let Some(ticket) = self.cue_budget.reserve() else {
             return refused_cue(namespace, &alias, event, CueFailure::PendingBudget);
         };
-        let Some(lease) =
-            self.cue_cancellation
-                .lease(namespace, &alias, emitter, class.scope(), epoch)
+        let Some(lease) = self
+            .cue_cancellation
+            .lease(namespace, &alias, emitter, class.scope())
         else {
             return refused_cue(namespace, &alias, event, CueFailure::PendingBudget);
         };
@@ -348,14 +390,14 @@ impl AudioRuntime {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .as_ref()
-            .filter(|mix| class.scope() == AudioScope::Match && mix.epoch == epoch)
+            .filter(|_| class.scope() != AudioScope::Menu)
             .cloned();
         let media = self.media_for_bank(&bank);
         let state = crate::cue::CueState::new();
         if let Some(frames) = fade {
             state.release.fade_in(self.audio_frame(), frames);
         }
-        self.enqueue_cue(CueRequest {
+        self.enqueue_cue(CueSubmission {
             state,
             bank,
             media,
@@ -363,10 +405,10 @@ impl AudioRuntime {
             alias,
             bound,
             scope: class.scope(),
-            epoch,
             pitch_scale,
             volume_scale,
             execution: CueIntent {
+                force_master,
                 event,
                 origin_inches,
                 emitter,
@@ -383,30 +425,33 @@ impl AudioRuntime {
 
     pub(crate) fn stop_cue(
         &self,
-        namespace: asset_core::AssetNamespace,
+        namespace: asset_core::FamilyId,
         alias: &str,
         emitter: Option<u32>,
-        epoch: u64,
     ) {
         self.cue_cancellation
-            .cancel(Some(namespace), Some(alias), Some(emitter), epoch);
+            .cancel(Some(namespace), Some(alias), Some(emitter), CancelKind::All);
     }
 
-    pub(crate) fn stop_emitter_cues(&self, emitter: u32, epoch: u64) {
+    pub(crate) fn stop_emitter_cues(&self, emitter: u32) {
         self.cue_cancellation
-            .cancel(None, None, Some(Some(emitter)), epoch);
+            .cancel(None, None, Some(Some(emitter)), CancelKind::All);
     }
 
-    fn enqueue_cue(&self, request: CueRequest) -> CueHandle {
+    pub(crate) fn stop_emitter_loops(&self, emitter: u32) {
+        self.cue_cancellation
+            .cancel(None, None, Some(Some(emitter)), CancelKind::Loops);
+    }
+
+    fn enqueue_cue(&self, request: CueSubmission) -> CueHandle {
         let handle = CueHandle(request.state.clone());
         if self.shared.cancelled.load(Ordering::Acquire) {
             request.reject(CueFailure::Cancelled);
-        } else if let Err(error) = self.cue_tx.try_send(request) {
-            let (std::sync::mpsc::TrySendError::Full(request)
-            | std::sync::mpsc::TrySendError::Disconnected(request)) = error;
-            request.reject(CueFailure::QueueFull);
-        } else if let Some(worker) = &self.worker {
-            worker.thread().unpark();
+        } else {
+            self.inbox.start(request);
+            if let Some(worker) = &self.worker {
+                worker.thread().unpark();
+            }
         }
         handle
     }
@@ -422,671 +467,747 @@ impl Drop for AudioRuntime {
     }
 }
 
-fn control(
+struct AudioControl {
     shared: Arc<RenderShared>,
     shutdown: Arc<AtomicBool>,
-    cue_rx: Receiver<CueRequest>,
+    inbox: Arc<AudioInbox>,
     device_enabled: bool,
-    sources: Arc<SourceInbox>,
+    sources: Arc<SourceActivity>,
     listener: Arc<ListenerState>,
     event_context: Arc<crate::event::EventContextState>,
-    fire_verdicts: Arc<Mutex<net::FireVerdictState>>,
     next_id: Arc<AtomicU64>,
     rejections: Arc<[AtomicU64; 7]>,
     cue_budget: crate::pending::PendingBudget,
-) {
-    assets::session_load::use_process_cpus();
-    crate::diagnostics::thread("audio-control");
-    let diag_anchor = Instant::now();
-    let mut diag_last = Instant::now();
-    let mut diag_max_pass = Duration::ZERO;
-    let mut diag_previous_pass = Instant::now();
-    let mut diag_max_gap = Duration::ZERO;
-    let mut resolver = CueResolver::new();
-    let mut events = crate::event::EventJournal::new();
-    let mut pending_cues = VecDeque::<CueWork>::with_capacity(LOGICAL_INSTANCES);
-    let device = device_enabled.then(|| {
-        let shared = shared.clone();
-        let shutdown = shutdown.clone();
+}
+
+impl AudioControl {
+    fn spawn(self) -> JoinHandle<()> {
         std::thread::Builder::new()
-            .name("audio-device".into())
-            .spawn(move || crate::device::supervise(shared, shutdown))
-            .expect("cannot start audio device thread")
-    });
-    let mut device_was_active = false;
-    let mut null_anchor = Instant::now();
-    let mut null_frame = 0;
-    let mut instances: Vec<LogicalInstance> = Vec::with_capacity(LOGICAL_INSTANCES);
-    let mut next_voice = 1;
-    let mut desired = SourceScene {
-        revision: 0,
-        sources: Vec::new(),
-        asserted: Vec::new(),
-    };
-    let mut present_sources = HashSet::with_capacity(LOGICAL_INSTANCES);
-    let mut source_cues = HashMap::<(SourceKey, u64), Arc<crate::cue::CueState>>::with_capacity(
-        crate::sources::SOURCE_HISTORY,
-    );
-    let mut silence = [[0.0; 2]; QUANTUM];
-    while !shutdown.load(Ordering::Acquire) {
-        let diag_pass = Instant::now();
-        diag_max_gap = diag_max_gap.max(diag_pass.duration_since(diag_previous_pass));
-        diag_previous_pass = diag_pass;
-        let listener = listener.get();
-        events.advance(event_context.get());
-        let diag_stage = crate::diagnostics::slow_stage("context", diag_pass);
-        for logical in &mut instances {
-            let first_us = logical
-                .request
-                .instance
-                .first_device_us
-                .load(Ordering::Acquire);
-            if crate::diagnostics::enabled()
-                && !logical.first_device_reported
-                && first_us != u64::MAX
-            {
-                crate::diagnostics::emit(format!(
-                    "audio diag: first_device instance={} request_to_device_us={} audio_frame={}",
-                    logical.request.instance.id,
-                    first_us,
-                    logical
-                        .request
-                        .instance
-                        .first_device_frame
-                        .load(Ordering::Relaxed)
-                ));
-                logical.first_device_reported = true;
-            }
-            if device_enabled
-                && logical
-                    .request
-                    .start_deadline
-                    .is_some_and(|deadline| Instant::now() >= deadline)
-                && (!shared.device_active.load(Ordering::Acquire)
-                    || !logical
-                        .request
-                        .instance
-                        .has_reached(InstanceStatus::Started))
-            {
-                reject(
-                    &logical.request.instance,
-                    &rejections,
-                    AdmissionFailure::OutputUnavailable,
-                );
-            }
-            if logical
-                .request
-                .cancellation
-                .as_ref()
-                .is_some_and(CueLease::cancelled)
-                || !events.current(logical.request.event)
-                || (!logical
-                    .request
-                    .instance
-                    .has_reached(InstanceStatus::Started)
-                    && crate::event::EventJournal::fire_refused(
-                        logical.request.event,
-                        &fire_verdicts
-                            .lock()
-                            .unwrap_or_else(|poison| poison.into_inner()),
-                    ))
-            {
-                logical
-                    .request
-                    .instance
-                    .stopped
-                    .store(true, Ordering::Release);
-            }
-            if logical.source.is_none() {
-                update_spatial(&logical.request, listener);
-            }
-        }
-        if let Some(scene) = sources.take()
-            && scene.revision > desired.revision
-        {
-            desired = scene;
-        }
-        let epoch = shared.presentation_epoch.load(Ordering::Acquire);
-        desired.sources.retain(|source| {
-            !shared.cancelled.load(Ordering::Acquire)
-                && (source.key.scope != AudioScope::Match || source.key.epoch == epoch)
+            .name("audio-control".into())
+            .spawn(move || self.run())
+            .expect("cannot start audio control thread")
+    }
+
+    fn run(self) {
+        let Self {
+            shared,
+            shutdown,
+            inbox,
+            device_enabled,
+            sources,
+            listener,
+            event_context,
+            next_id,
+            rejections,
+            cue_budget,
+        } = self;
+        assets::session_load::use_process_cpus();
+        crate::diagnostics::thread("audio-control");
+        let diag_anchor = Instant::now();
+        let mut diag_last = Instant::now();
+        let mut diag_max_pass = Duration::ZERO;
+        let mut diag_previous_pass = Instant::now();
+        let mut diag_max_gap = Duration::ZERO;
+        let mut resolver = CueResolver::new();
+        let mut events = crate::event::EventJournal::new();
+        let mut pending_cues = VecDeque::<CueWork>::with_capacity(LOGICAL_INSTANCES);
+        let device = device_enabled.then(|| {
+            let shared = shared.clone();
+            let shutdown = shutdown.clone();
+            std::thread::Builder::new()
+                .name("audio-device".into())
+                .spawn(move || crate::device::supervise(shared, shutdown))
+                .expect("cannot start audio device thread")
         });
-        desired.asserted.retain(|source| {
-            !shared.cancelled.load(Ordering::Acquire)
-                && (source.key.scope != AudioScope::Match || source.key.epoch == epoch)
-        });
-        source_cues.retain(|(key, version), state| {
-            let current = desired
-                .asserted
-                .binary_search_by_key(key, |source| source.key)
-                .ok()
-                .is_some_and(|index| desired.asserted[index].version == *version);
-            if !current {
-                state
-                    .release
-                    .release(shared.frame.load(Ordering::Acquire), 0);
-            }
-            current
-        });
-        for logical in &mut instances {
-            let Some(binding) = logical.source else {
-                continue;
-            };
-            let source = desired
-                .asserted
-                .binary_search_by_key(&binding.key, |source| source.key)
-                .ok()
-                .map(|index| &desired.asserted[index]);
-            if let Some(source) = source.filter(|source| source.version == binding.version) {
-                let executable = executable_source(&desired, binding.key, binding.version);
-                set_parameters(
-                    &logical.request.instance,
-                    source.gain * binding.gain,
-                    source.rate * binding.rate,
-                    if binding.group.is_some() {
-                        logical.request.instance.audible.load(Ordering::Acquire)
-                    } else {
-                        source.audible && executable
-                    },
-                );
-                if let (Some(origin), Some(spatial)) =
-                    (source.origin_inches, &mut logical.request.spatial)
-                {
-                    spatial.origin_inches = origin;
-                }
-                update_spatial(&logical.request, listener);
-                let eligible = source.audible
-                    && executable
-                    && logical.request.spatial.as_ref().is_none_or(|spatial| {
-                        listener
-                            .is_some_and(|listener| spatial.evaluate(listener).gains != [0.0; 2])
-                    });
-                logical.source.as_mut().expect("source binding").eligible = eligible;
-                if binding.group.is_none() {
-                    logical
-                        .request
-                        .instance
-                        .audible
-                        .store(eligible, Ordering::Release);
-                }
-            } else {
-                logical
-                    .request
-                    .instance
-                    .stopped
-                    .store(true, Ordering::Release);
-            }
-        }
-        apply_source_render_budget(&instances);
-        let diag_stage = crate::diagnostics::slow_stage("source_parameters", diag_stage);
-        let device_active = shared.device_active.load(Ordering::Acquire);
-        if device_was_active && !device_active {
-            null_anchor = Instant::now();
-            null_frame = shared.frame.load(Ordering::Acquire);
-        }
-        device_was_active = device_active;
-        if !device_active {
-            let elapsed = (null_anchor.elapsed().as_secs_f64() * f64::from(SAMPLE_RATE)) as u64;
-            let target = null_frame.saturating_add(elapsed);
-            for _ in 0..CONTROL_BATCH {
-                if shared.frame.load(Ordering::Acquire) + QUANTUM as u64 > target {
-                    break;
-                }
-                shared.render_for(&mut silence, Some(false));
-            }
-        }
-        for index in 0..PHYSICAL_VOICES {
-            // This thread is the sole publisher/reclaimer, even in null transport.
-            if let Some(assignment) = unsafe { shared.reclaim(index) } {
-                if crate::diagnostics::enabled() {
-                    retire_diagnostic(&assignment.instance, shared.frame.load(Ordering::Acquire));
-                }
-                if assignment.instance.status() == InstanceStatus::Virtual {
-                    if let Some(logical) = instances
-                        .iter_mut()
-                        .find(|logical| logical.request.instance.id == assignment.instance.id)
-                    {
-                        logical.slot = None;
-                        logical.cursor =
-                            f64::from_bits(assignment.instance.cursor.load(Ordering::Acquire));
-                        logical.advanced_at =
-                            assignment.instance.rendered_at.load(Ordering::Acquire);
+        let mut device_was_active = false;
+        let mut was_capturing = false;
+        let mut null_anchor = Instant::now();
+        let mut null_frame = 0;
+        let mut instances: Vec<LogicalInstance> = Vec::with_capacity(LOGICAL_INSTANCES);
+        let mut next_voice = 1;
+        let mut desired = SourceScene {
+            revision: 0,
+            sources: Vec::new(),
+            asserted: Vec::new(),
+        };
+        let mut present_sources = HashSet::with_capacity(LOGICAL_INSTANCES);
+        let mut source_cues = HashMap::<SourceId, Arc<crate::cue::CueState>>::with_capacity(
+            crate::sources::SOURCE_HISTORY,
+        );
+        let mut silence = [[0.0; 2]; QUANTUM];
+        let mut captured = [[0.0; 2]; QUANTUM];
+        while !shutdown.load(Ordering::Acquire) {
+            let diag_pass = Instant::now();
+            diag_max_gap = diag_max_gap.max(diag_pass.duration_since(diag_previous_pass));
+            diag_previous_pass = diag_pass;
+            let listener_snapshot = listener.get();
+            let listener = listener_snapshot.as_ref();
+            events.advance(event_context.get());
+            let diag_stage = crate::diagnostics::slow_stage("context", diag_pass);
+            let (commands, scene) = inbox.take(CONTROL_BATCH);
+            for command in commands {
+                let request = match command {
+                    CueCommand::Start(request) => *request,
+                    CueCommand::StopScope(scope) => {
+                        for logical in &instances {
+                            if logical.request.instance.scope == scope {
+                                logical
+                                    .request
+                                    .instance
+                                    .stopped
+                                    .store(true, Ordering::Release);
+                            }
+                        }
+                        shared.synchronize();
+                        for logical in &mut instances {
+                            if logical.request.instance.scope != scope {
+                                continue;
+                            }
+                            let first = logical
+                                .request
+                                .instance
+                                .first_device_us
+                                .load(Ordering::Acquire);
+                            if !logical.first_device_reported && first != u64::MAX {
+                                perf::instant!("audio_instance_started", "iw4l.sim", |ctx| {
+                                    ctx.arg("instance", logical.request.instance.id as i64);
+                                    ctx.arg("scope", scope as i64);
+                                });
+                                logical.first_device_reported = true;
+                            }
+                            perf::instant!("audio_scope_cancel", "iw4l.sim", |ctx| {
+                                ctx.arg("instance", logical.request.instance.id as i64);
+                                ctx.arg("scope", scope as i64);
+                            });
+                        }
+                        let queued = std::mem::take(&mut pending_cues);
+                        let mut cancelled = 0;
+                        for work in queued {
+                            if work.request.scope == scope {
+                                cancelled += 1;
+                                work.complete(crate::StartOutcome::Failed(
+                                    crate::StartFailure::CueRefused(CueFailure::Cancelled),
+                                ));
+                            } else {
+                                pending_cues.push_back(work);
+                            }
+                        }
+                        source_cues.retain(|id, state| {
+                            if id.key.scope != scope {
+                                return true;
+                            }
+                            state
+                                .release
+                                .release(shared.frame.load(Ordering::Acquire), 0);
+                            false
+                        });
+                        resolver.stop_scope(scope);
+                        events = crate::event::EventJournal::new();
+                        perf::instant!("audio_scope_stop", "iw4l.sim", |ctx| {
+                            ctx.arg("scope", scope as i64);
+                            ctx.arg("pending_cancelled", cancelled);
+                        });
+                        continue;
                     }
+                };
+                // Publication can race a control pass already processing source layers.
+                // Validate a newly received cue against the latest published clocks.
+                events.advance(event_context.get());
+                if let Err(reason) = events.accept(request.execution.event) {
+                    if crate::diagnostics::enabled() {
+                        crate::diagnostics::emit(format!(
+                            "audio diag: event_rejected reason={reason:?} event={:?} context={:?}",
+                            request.execution.event,
+                            event_context.get()
+                        ));
+                    }
+                    request.reject(reason);
+                } else if pending_cues.len() == LOGICAL_INSTANCES {
+                    request.reject(CueFailure::PendingBudget);
                 } else {
-                    assignment.instance.retire();
+                    pending_cues.push_back(CueWork::new(request));
                 }
             }
-        }
-        instances.retain(|logical| {
-            if logical.request.instance.status() == InstanceStatus::Retired {
-                if logical.slot.is_none() {
-                    retire_diagnostic(
+            if let Some(scene) = scene {
+                desired = scene;
+            }
+            for logical in &mut instances {
+                let first_us = logical
+                    .request
+                    .instance
+                    .first_device_us
+                    .load(Ordering::Acquire);
+                if !logical.first_device_reported && first_us != u64::MAX {
+                    perf::instant!("audio_instance_started", "iw4l.sim", |ctx| {
+                        ctx.arg("instance", logical.request.instance.id as i64);
+                        ctx.arg("scope", logical.request.instance.scope as i64);
+                    });
+                    if crate::diagnostics::enabled() {
+                        crate::diagnostics::emit(format!(
+                            "audio diag: first_device instance={} request_to_device_us={} audio_frame={}",
+                            logical.request.instance.id,
+                            first_us,
+                            logical
+                                .request
+                                .instance
+                                .first_device_frame
+                                .load(Ordering::Relaxed)
+                        ));
+                    }
+                    logical.first_device_reported = true;
+                }
+                if device_enabled
+                    && logical
+                        .request
+                        .start_deadline
+                        .is_some_and(|deadline| Instant::now() >= deadline)
+                    && (!shared.device_active.load(Ordering::Acquire)
+                        || !logical
+                            .request
+                            .instance
+                            .has_reached(InstanceStatus::Started))
+                {
+                    reject(
                         &logical.request.instance,
-                        shared.frame.load(Ordering::Acquire),
+                        &rejections,
+                        AdmissionFailure::OutputUnavailable,
                     );
                 }
-                false
-            } else {
-                true
-            }
-        });
-
-        let diag_stage = crate::diagnostics::slow_stage("null_and_reclaim", diag_stage);
-        resolver.retain_epoch(shared.presentation_epoch.load(Ordering::Acquire));
-        for _ in 0..CONTROL_BATCH {
-            let Ok(request) = cue_rx.try_recv() else {
-                break;
-            };
-            // Publication can race a control pass already processing source layers.
-            // Validate a newly received cue against the latest published clocks.
-            events.advance(event_context.get());
-            if request.scope == AudioScope::Match
-                && request.epoch != shared.presentation_epoch.load(Ordering::Acquire)
-            {
-                request.reject(CueFailure::StaleScope);
-            } else if crate::event::EventJournal::fire_refused(
-                request.execution.event,
-                &fire_verdicts
-                    .lock()
-                    .unwrap_or_else(|poison| poison.into_inner()),
-            ) {
-                request.reject(CueFailure::FireRefused);
-            } else if let Err(reason) = events.accept(request.execution.event) {
-                if crate::diagnostics::enabled() {
-                    crate::diagnostics::emit(format!(
-                        "audio diag: event_rejected reason={reason:?} event={:?} context={:?}",
-                        request.execution.event,
-                        event_context.get()
-                    ));
+                if logical
+                    .request
+                    .cancellation
+                    .as_ref()
+                    .is_some_and(CueLease::cancelled)
+                    || !events.current(logical.request.event)
+                {
+                    logical
+                        .request
+                        .instance
+                        .stopped
+                        .store(true, Ordering::Release);
                 }
-                request.reject(reason);
-            } else if pending_cues.len() == LOGICAL_INSTANCES {
-                request.reject(CueFailure::PendingBudget);
-            } else {
-                pending_cues.push_back(CueWork::new(request));
+                if logical.source.is_none() {
+                    update_spatial(&logical.request, listener);
+                }
             }
-        }
-        let waiting = pending_cues.len().min(CONTROL_BATCH);
-        for _ in 0..waiting {
-            let mut work = pending_cues.pop_front().expect("pending cue");
-            if shared.cancelled.load(Ordering::Acquire)
-                || (work.request.scope == AudioScope::Match
-                    && work.request.epoch != shared.presentation_epoch.load(Ordering::Acquire))
-            {
-                work.complete(crate::StartOutcome::Failed(
-                    crate::StartFailure::CueRefused(if shared.cancelled.load(Ordering::Acquire) {
-                        CueFailure::Cancelled
-                    } else {
-                        CueFailure::StaleScope
-                    }),
-                ));
-                continue;
-            }
-            if crate::event::EventJournal::fire_refused(
-                work.request.execution.event,
-                &fire_verdicts
-                    .lock()
-                    .unwrap_or_else(|poison| poison.into_inner()),
-            ) {
-                work.complete(crate::StartOutcome::Failed(
-                    crate::StartFailure::CueRefused(CueFailure::FireRefused),
-                ));
-                continue;
-            }
-            if !events.current(work.request.execution.event) {
-                work.complete(crate::StartOutcome::Failed(
-                    crate::StartFailure::CueRefused(CueFailure::StaleEvent),
-                ));
-                continue;
-            }
-            match events.claim_fire(
-                work.request.execution.event,
-                &work.request.state,
-                work.request.execution.depth,
-            ) {
-                Ok(true) => {}
-                Ok(false) => {
-                    if std::time::Instant::now() >= work.request.execution.deadline {
-                        work.complete(crate::StartOutcome::Failed(crate::StartFailure::Expired));
-                    } else {
-                        pending_cues.push_back(work);
+            desired.retain_current(shared.cancelled.load(Ordering::Acquire));
+            source_cues.retain(|id, state| {
+                let current = desired.current(*id).is_some();
+                if !current {
+                    state
+                        .release
+                        .release(shared.frame.load(Ordering::Acquire), 0);
+                }
+                current
+            });
+            for logical in &mut instances {
+                let Some(binding) = logical.source else {
+                    continue;
+                };
+                if let Some(source) = desired.current(binding.id) {
+                    let executable = desired.executable(binding.id).is_some();
+                    set_parameters(
+                        &logical.request.instance,
+                        source.gain * binding.gain,
+                        source.rate * binding.rate,
+                        if binding.group.is_some() {
+                            logical.request.instance.audible.load(Ordering::Acquire)
+                        } else {
+                            source.audible && executable
+                        },
+                    );
+                    if let (Some(origin), Some(spatial)) =
+                        (source.origin_inches, &mut logical.request.spatial)
+                    {
+                        spatial.origin_inches = origin;
                     }
-                    continue;
-                }
-                Err(reason) => {
-                    work.complete(crate::StartOutcome::Failed(
-                        crate::StartFailure::CueRefused(reason),
-                    ));
-                    continue;
+                    update_spatial(&logical.request, listener);
+                    let eligible = source.audible
+                        && executable
+                        && logical.request.spatial.as_ref().is_none_or(|spatial| {
+                            listener.is_some_and(|listener| {
+                                spatial.evaluate(listener).gains != [0.0; 2]
+                            })
+                        });
+                    logical.source.as_mut().expect("source binding").eligible = eligible;
+                    if binding.group.is_none() {
+                        logical
+                            .request
+                            .instance
+                            .audible
+                            .store(eligible, Ordering::Release);
+                    }
+                } else {
+                    logical
+                        .request
+                        .instance
+                        .stopped
+                        .store(true, Ordering::Release);
                 }
             }
-            if let Some((key, version)) = work.source {
-                let current = desired
-                    .asserted
-                    .binary_search_by_key(&key, |source| source.key)
-                    .ok()
-                    .map(|index| &desired.asserted[index])
-                    .filter(|source| source.version == version);
-                let Some(source) = current else {
+            apply_source_render_budget(&instances);
+            let diag_stage = crate::diagnostics::slow_stage("source_parameters", diag_stage);
+            let capturing = shared.capture.armed.load(Ordering::Acquire);
+            let device_active = shared.device_active.load(Ordering::Acquire) && !capturing;
+            if (device_was_active && !device_active) || (was_capturing && !capturing) {
+                null_anchor = Instant::now();
+                null_frame = shared.frame.load(Ordering::Acquire);
+            }
+            device_was_active = device_active;
+            was_capturing = capturing;
+            if capturing {
+                let target = shared.capture.target.load(Ordering::Acquire);
+                for _ in 0..CONTROL_BATCH {
+                    if shared.frame.load(Ordering::Acquire) + QUANTUM as u64 > target
+                        || !shared.render_for(&mut captured, None)
+                    {
+                        break;
+                    }
+                    shared
+                        .capture
+                        .samples
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .extend_from_slice(&captured);
+                }
+            } else if !device_active {
+                let elapsed = (null_anchor.elapsed().as_secs_f64() * f64::from(SAMPLE_RATE)) as u64;
+                let target = null_frame.saturating_add(elapsed);
+                for _ in 0..CONTROL_BATCH {
+                    if shared.frame.load(Ordering::Acquire) + QUANTUM as u64 > target {
+                        break;
+                    }
+                    shared.render_for(&mut silence, Some(false));
+                }
+            }
+            for index in 0..PHYSICAL_VOICES {
+                // This thread is the sole publisher/reclaimer, even in null transport.
+                if let Some(assignment) = unsafe { shared.reclaim(index) } {
+                    if crate::diagnostics::enabled() {
+                        retire_diagnostic(
+                            &assignment.instance,
+                            shared.frame.load(Ordering::Acquire),
+                        );
+                    }
+                    if assignment.instance.status() == InstanceStatus::Virtual {
+                        if let Some(logical) = instances
+                            .iter_mut()
+                            .find(|logical| logical.request.instance.id == assignment.instance.id)
+                        {
+                            logical.slot = None;
+                            logical.cursor =
+                                f64::from_bits(assignment.instance.cursor.load(Ordering::Acquire));
+                            logical.advanced_at =
+                                assignment.instance.rendered_at.load(Ordering::Acquire);
+                        }
+                    } else {
+                        assignment.instance.retire();
+                    }
+                }
+            }
+            instances.retain(|logical| {
+                if logical.request.instance.status() == InstanceStatus::Retired {
+                    if logical.slot.is_none() {
+                        retire_diagnostic(
+                            &logical.request.instance,
+                            shared.frame.load(Ordering::Acquire),
+                        );
+                    }
+                    false
+                } else {
+                    true
+                }
+            });
+
+            let diag_stage = crate::diagnostics::slow_stage("null_and_reclaim", diag_stage);
+            let waiting = pending_cues.len().min(CONTROL_BATCH);
+            for _ in 0..waiting {
+                let mut work = pending_cues.pop_front().expect("pending cue");
+                if shared.cancelled.load(Ordering::Acquire) {
                     work.complete(crate::StartOutcome::Failed(
                         crate::StartFailure::CueRefused(CueFailure::Cancelled),
                     ));
                     continue;
-                };
-                if (!executable_source(&desired, key, version)
-                    || instances.len() == LOGICAL_INSTANCES)
-                    && !work.request.execution.lease.cancelled()
-                    && !work.request.state.release.requested()
-                {
-                    pending_cues.push_back(work);
-                    continue;
                 }
-                work.request.execution.origin_inches = source.origin_inches;
-            }
-            let mut children = Vec::new();
-            let step = work.step(
-                &mut resolver,
-                listener,
-                &mut children,
-                !device_enabled || shared.device_active.load(Ordering::Acquire),
-            );
-            match step {
-                CueStep::Waiting => pending_cues.push_back(work),
-                CueStep::Finished => {}
-                CueStep::Start(start) => {
-                    let start_delay_ms = work
-                        .resolved
-                        .as_ref()
-                        .map_or(0, |cue| u64::from(cue.policy.composition.start_delay_ms));
-                    let start_delay = Duration::from_millis(start_delay_ms);
-                    let instance = make_instance(
-                        next_id.fetch_add(1, Ordering::Relaxed),
-                        work.request.scope,
-                        work.request.epoch,
-                        &start.admission,
-                        work.request
-                            .execution
-                            .deadline
-                            .checked_sub(work.request.execution.class.start_wait())
-                            .filter(|_| work.source.is_none())
-                            .unwrap_or_else(Instant::now),
-                    );
-                    let source = work.source.and_then(|(key, version)| {
-                        desired
-                            .sources
-                            .binary_search_by_key(&key, |source| source.key)
-                            .ok()
-                            .map(|index| &desired.sources[index])
-                            .filter(|source| source.version == version)
-                    });
-                    set_parameters(
-                        &instance,
-                        start.gain * source.map_or(1.0, |source| source.gain),
-                        start.rate * source.map_or(1.0, |source| source.rate),
-                        source.is_none_or(|source| source.audible),
-                    );
-                    admit(
-                        StartRequest {
-                            event: work.request.execution.event,
-                            start_deadline: (work.source.is_none() && !start.looping)
-                                .then_some(work.request.execution.deadline + start_delay),
-                            protect_attack: work.source.is_none()
-                                && !start.looping
-                                && work.request.execution.class == crate::SoundClass::Weapon,
-                            cancellation: Some(start.lease),
-                            spatial: start.spatial,
-                            admission: start.admission,
-                            media: start.media,
-                            instance: instance.clone(),
-                            looping: start.looping,
-                            frame: source
-                                .map_or_else(
-                                    || shared.frame.load(Ordering::Acquire),
-                                    |source| source.start_frame,
-                                )
-                                .saturating_add(
-                                    start_delay_ms * u64::from(crate::render_core::SAMPLE_RATE)
-                                        / 1000,
-                                ),
-                        },
-                        &shared,
-                        &mut instances,
-                        listener,
-                        &rejections,
-                        work.source.map(|(key, version)| SourceBinding {
-                            key,
-                            version,
-                            gain: start.gain,
-                            rate: start.rate,
-                            group: source.and_then(|source| source.cue.group),
-                            eligible: source.is_none_or(|source| source.audible),
-                        }),
-                    );
-                    let _ = work.request.state.playback.set(instance.clone());
-                    work.complete(instance.rejection().map_or(
-                        crate::StartOutcome::Submitted,
-                        |reason| {
-                            crate::StartOutcome::Failed(crate::StartFailure::AdmissionRefused(
-                                reason,
-                            ))
-                        },
-                    ));
-                }
-            }
-            for child in children {
-                if pending_cues.len() == LOGICAL_INSTANCES {
-                    child.complete(crate::StartOutcome::Failed(
-                        crate::StartFailure::CueRefused(CueFailure::PendingBudget),
-                    ));
-                } else {
-                    pending_cues.push_back(child);
-                }
-            }
-        }
-        let diag_stage = crate::diagnostics::slow_stage("cue_steps", diag_stage);
-        apply_source_render_budget(&instances);
-        instances.sort_by_key(|logical| logical.source.is_some());
-        let now = shared.frame.load(Ordering::Acquire);
-        let epoch = shared.presentation_epoch.load(Ordering::Acquire);
 
-        instances.retain_mut(|logical| {
-            let instance = &logical.request.instance;
-            if instance.status() == InstanceStatus::Retired {
-                return false;
+                if !events.current(work.request.execution.event) {
+                    work.complete(crate::StartOutcome::Failed(
+                        crate::StartFailure::CueRefused(CueFailure::StaleEvent),
+                    ));
+                    continue;
+                }
+
+                if let Some(id) = work.source {
+                    let current = desired.current(id);
+                    let Some(source) = current else {
+                        work.complete(crate::StartOutcome::Failed(
+                            crate::StartFailure::CueRefused(CueFailure::Cancelled),
+                        ));
+                        continue;
+                    };
+                    if (desired.executable(id).is_none() || instances.len() == LOGICAL_INSTANCES)
+                        && !work.request.execution.lease.cancelled()
+                        && !work.request.state.release.requested()
+                    {
+                        pending_cues.push_back(work);
+                        continue;
+                    }
+                    work.request.execution.origin_inches = source.origin_inches;
+                }
+                let mut children = Vec::new();
+                let step = work.step(
+                    &mut resolver,
+                    listener,
+                    &mut children,
+                    !device_enabled || shared.device_active.load(Ordering::Acquire),
+                );
+                match step {
+                    CueStep::Waiting => pending_cues.push_back(work),
+                    CueStep::Finished => {}
+                    CueStep::Start(start) => {
+                        let start_delay_ms = work
+                            .resolved
+                            .as_ref()
+                            .map_or(0, |cue| u64::from(cue.policy.composition.start_delay_ms));
+                        let start_delay = Duration::from_millis(start_delay_ms);
+                        let instance = make_instance(
+                            next_id.fetch_add(1, Ordering::Relaxed),
+                            work.request.scope,
+                            &start.admission,
+                            work.request
+                                .execution
+                                .deadline
+                                .checked_sub(work.request.execution.class.start_wait())
+                                .filter(|_| work.source.is_none())
+                                .unwrap_or_else(Instant::now),
+                        );
+                        let source = work.source.and_then(|id| desired.executable(id));
+                        set_parameters(
+                            &instance,
+                            start.gain * source.map_or(1.0, |source| source.gain),
+                            start.rate * source.map_or(1.0, |source| source.rate),
+                            source.is_none_or(|source| source.audible),
+                        );
+                        admit(
+                            StartRequest {
+                                event: work.request.execution.event,
+                                start_deadline: (work.source.is_none() && !start.looping)
+                                    .then_some(work.request.execution.deadline + start_delay),
+                                protect_attack: work.source.is_none()
+                                    && !start.looping
+                                    && work.request.execution.class == crate::SoundClass::Weapon,
+                                cancellation: Some(start.lease),
+                                spatial: start.spatial,
+                                admission: start.admission,
+                                media: start.media,
+                                instance: instance.clone(),
+                                looping: start.looping,
+                                frame: source
+                                    .map_or_else(
+                                        || shared.frame.load(Ordering::Acquire),
+                                        |source| source.start_frame,
+                                    )
+                                    .saturating_add(
+                                        start_delay_ms * u64::from(crate::render_core::SAMPLE_RATE)
+                                            / 1000,
+                                    ),
+                            },
+                            &shared,
+                            &mut instances,
+                            listener,
+                            &rejections,
+                            work.source.map(|id| SourceBinding {
+                                id,
+                                gain: start.gain,
+                                rate: start.rate,
+                                group: source.and_then(|source| source.cue.group),
+                                eligible: source.is_none_or(|source| source.audible),
+                            }),
+                        );
+                        let _ = work.request.state.playback.set(instance.clone());
+                        work.complete(instance.rejection().map_or(
+                            crate::StartOutcome::Submitted,
+                            |reason| {
+                                crate::StartOutcome::Failed(crate::StartFailure::AdmissionRefused(
+                                    reason,
+                                ))
+                            },
+                        ));
+                    }
+                }
+                for child in children {
+                    if pending_cues.len() == LOGICAL_INSTANCES {
+                        child.complete(crate::StartOutcome::Failed(
+                            crate::StartFailure::CueRefused(CueFailure::PendingBudget),
+                        ));
+                    } else {
+                        pending_cues.push_back(child);
+                    }
+                }
             }
-            if logical.slot.is_some() {
-                return true;
+            let diag_stage = crate::diagnostics::slow_stage("cue_steps", diag_stage);
+            apply_source_render_budget(&instances);
+            instances.sort_by_key(|logical| logical.source.is_some());
+            let now = shared.frame.load(Ordering::Acquire);
+
+            let mut channel_voices = HashMap::new();
+            for logical in &instances {
+                if logical.slot.is_some()
+                    && live(&logical.request.instance)
+                    && let Some(channel) = logical.request.admission.channel
+                {
+                    *channel_voices
+                        .entry((
+                            logical.request.instance.scope,
+                            logical.request.admission.bank_revision,
+                            channel.key,
+                        ))
+                        .or_insert(0usize) += 1;
+                }
             }
-            if shared.cancelled.load(Ordering::Acquire)
-                || instance.stopped.load(Ordering::Acquire)
-                || logical
-                    .request
-                    .media
-                    .release
-                    .as_ref()
-                    .is_some_and(|release| release.expired(now))
-                || (instance.scope == AudioScope::Match && instance.epoch != epoch)
-            {
-                instance.retire();
-                retire_diagnostic(instance, shared.frame.load(Ordering::Acquire));
-                return false;
-            }
-            if logical.source.is_none()
-                && !instance.has_reached(InstanceStatus::Started)
-                && instance.audible.load(Ordering::Acquire)
-            {
+            instances.retain_mut(|logical| {
+                let instance = &logical.request.instance;
+                if instance.status() == InstanceStatus::Retired {
+                    return false;
+                }
+                if logical.slot.is_some() {
+                    return true;
+                }
+                if shared.cancelled.load(Ordering::Acquire)
+                    || instance.stopped.load(Ordering::Acquire)
+                    || logical
+                        .request
+                        .media
+                        .release
+                        .as_ref()
+                        .is_some_and(|release| release.expired(now))
+                {
+                    instance.retire();
+                    retire_diagnostic(instance, shared.frame.load(Ordering::Acquire));
+                    return false;
+                }
+                if logical.source.is_none()
+                    && !instance.has_reached(InstanceStatus::Started)
+                    && instance.audible.load(Ordering::Acquire)
+                {
+                    logical.advanced_at = now;
+                }
+                logical.advanced_at = logical.advanced_at.max(logical.request.frame);
+                if !instance.paused.load(Ordering::Relaxed) {
+                    let rate = f32::from_bits(instance.rate.load(Ordering::Relaxed));
+                    logical.cursor += now.saturating_sub(logical.advanced_at) as f64
+                        * f64::from(logical.request.media.rate())
+                        / f64::from(SAMPLE_RATE)
+                        * f64::from(rate);
+                }
                 logical.advanced_at = now;
-            }
-            logical.advanced_at = logical.advanced_at.max(logical.request.frame);
-            if !instance.paused.load(Ordering::Relaxed) {
-                let rate = f32::from_bits(instance.rate.load(Ordering::Relaxed));
-                logical.cursor += now.saturating_sub(logical.advanced_at) as f64
-                    * f64::from(logical.request.media.rate())
-                    / f64::from(SAMPLE_RATE)
-                    * f64::from(rate);
-            }
-            logical.advanced_at = now;
-            let frames = logical.request.media.frames() as f64;
-            if logical.request.looping {
-                logical.cursor %= frames;
-            } else if logical.cursor >= frames {
-                instance.retire();
-                retire_diagnostic(instance, shared.frame.load(Ordering::Acquire));
-                return false;
-            }
-            instance
-                .cursor
-                .store(logical.cursor.to_bits(), Ordering::Release);
-            instance.rendered_at.store(now, Ordering::Release);
-            if !instance.audible.load(Ordering::Acquire) {
-                instance.set_status(InstanceStatus::Virtual);
-                return true;
-            }
-            let assignment = Assignment {
-                voice: RenderVoiceId(next_voice),
-                media: logical.request.media.clone(),
-                instance: instance.clone(),
-                start_frame: now.max(logical.request.frame),
-                start_cursor: logical.cursor,
-                looping: logical.request.looping,
-            };
-            next_voice += 1;
-            instance.set_status(InstanceStatus::Scheduled);
-            // Only this thread may publish a new slot payload.
-            match unsafe { shared.publish(assignment) } {
-                Ok(slot) => logical.slot = Some(slot),
-                Err(_) if logical.request.looping => instance.set_status(InstanceStatus::Virtual),
-                Err(_) if instance.has_reached(InstanceStatus::Started) => {
-                    instance.set_status(InstanceStatus::Virtual)
+                let frames = logical.request.media.frames() as f64;
+                if logical.request.looping {
+                    logical.cursor %= frames;
+                } else if logical.cursor >= frames {
+                    instance.retire();
+                    retire_diagnostic(instance, shared.frame.load(Ordering::Acquire));
+                    return false;
                 }
-                Err(_) => {}
-            }
-            true
-        });
-        let diag_stage = crate::diagnostics::slow_stage("voice_scheduling", diag_stage);
-        if !shared.cancelled.load(Ordering::Acquire) {
-            present_sources.clear();
-            present_sources.extend(instances.iter().filter_map(|logical| {
-                logical.source.map(|binding| (binding.key, binding.version))
-            }));
-            let mut source_intakes = 0;
-            for source in &desired.sources {
-                if (source.key.scope == AudioScope::Match && source.key.epoch != epoch)
-                    || present_sources.contains(&(source.key, source.version))
-                    || instances.len() == LOGICAL_INSTANCES
-                {
-                    continue;
+                instance
+                    .cursor
+                    .store(logical.cursor.to_bits(), Ordering::Release);
+                instance.rendered_at.store(now, Ordering::Release);
+                if !instance.audible.load(Ordering::Acquire) {
+                    instance.set_status(InstanceStatus::Virtual);
+                    return true;
                 }
-                let cue = &source.cue;
-                if source_intakes == CONTROL_BATCH
-                    || source_cues.contains_key(&(source.key, source.version))
-                    || pending_cues.len() == LOGICAL_INSTANCES
-                {
-                    continue;
-                }
-                let Some(ticket) = cue_budget.reserve() else {
-                    continue;
-                };
-                let state = crate::cue::CueState::new();
-                let mut work = CueWork::new(CueRequest {
-                    state: state.clone(),
-                    bank: cue.bank.clone(),
-                    media: Some(cue.media.clone()),
-                    namespace: cue.namespace,
-                    alias: cue.alias.clone(),
-                    bound: None,
-                    scope: source.key.scope,
-                    epoch: source.key.epoch,
-                    pitch_scale: 1.0,
-                    volume_scale: 1.0,
-                    execution: CueIntent {
-                        event: None,
-                        origin_inches: source.origin_inches,
-                        emitter: cue.emitter,
-                        class: crate::SoundClass::Ambience,
-                        deadline: Instant::now(),
-                        depth: 0,
-                        fallbacks: Vec::new(),
-                        mix: cue.mix.clone(),
-                        lease: cue.lease.clone(),
-                        ticket,
-                    },
+                let channel = logical.request.admission.channel.map(|channel| {
+                    (
+                        (
+                            instance.scope,
+                            logical.request.admission.bank_revision,
+                            channel.key,
+                        ),
+                        channel.maximum,
+                    )
                 });
-                work.source = Some((source.key, source.version));
-                source_intakes += 1;
-                source_cues.insert((source.key, source.version), state);
-                pending_cues.push_back(work);
+                if channel.is_some_and(|(key, maximum)| {
+                    maximum <= 0
+                        || channel_voices.get(&key).copied().unwrap_or(0) >= maximum as usize
+                }) {
+                    instance.set_status(InstanceStatus::Virtual);
+                    return true;
+                }
+                let mut media = logical.request.media.clone();
+                media.eq_entity = logical.request.admission.emitter;
+                let assignment = Assignment {
+                    voice: RenderVoiceId(next_voice),
+                    media,
+                    instance: instance.clone(),
+                    start_frame: now.max(logical.request.frame),
+                    start_cursor: logical.cursor,
+                    looping: logical.request.looping,
+                };
+                next_voice += 1;
+                instance.set_status(InstanceStatus::Scheduled);
+                // Only this thread may publish a new slot payload.
+                match unsafe { shared.publish(assignment) } {
+                    Ok(slot) => {
+                        logical.slot = Some(slot);
+                        if let Some((key, _)) = channel {
+                            *channel_voices.entry(key).or_insert(0) += 1;
+                        }
+                    }
+                    Err(_) if logical.request.looping => {
+                        instance.set_status(InstanceStatus::Virtual)
+                    }
+                    Err(_) if instance.has_reached(InstanceStatus::Started) => {
+                        instance.set_status(InstanceStatus::Virtual)
+                    }
+                    Err(_) => {}
+                }
+                true
+            });
+            let diag_stage = crate::diagnostics::slow_stage("voice_scheduling", diag_stage);
+            if !shared.cancelled.load(Ordering::Acquire) {
+                present_sources.clear();
+                present_sources.extend(
+                    instances
+                        .iter()
+                        .filter_map(|logical| logical.source.map(|binding| binding.id)),
+                );
+                let mut source_intakes = 0;
+                for publication in &desired.sources {
+                    let source = &publication.desired;
+                    let id = publication.id;
+                    if publication.validity.cancelled()
+                        || present_sources.contains(&id)
+                        || instances.len() == LOGICAL_INSTANCES
+                    {
+                        continue;
+                    }
+                    let cue = &source.cue;
+                    if source_intakes == CONTROL_BATCH
+                        || source_cues.contains_key(&id)
+                        || pending_cues.len() == LOGICAL_INSTANCES
+                    {
+                        continue;
+                    }
+                    let Some(ticket) = cue_budget.reserve() else {
+                        continue;
+                    };
+                    let state = crate::cue::CueState::new();
+                    let mut work = CueWork::new(CueSubmission {
+                        state: state.clone(),
+                        bank: cue.bank.clone(),
+                        media: Some(cue.media.clone()),
+                        namespace: cue.namespace,
+                        alias: cue.alias.clone(),
+                        bound: None,
+                        scope: source.key.scope,
+                        pitch_scale: 1.0,
+                        volume_scale: 1.0,
+                        execution: CueIntent {
+                            force_master: false,
+                            event: None,
+                            origin_inches: source.origin_inches,
+                            emitter: cue.emitter,
+                            class: crate::SoundClass::Ambience,
+                            deadline: Instant::now(),
+                            depth: 0,
+                            fallbacks: Vec::new(),
+                            mix: cue.mix.clone(),
+                            lease: cue.lease.with_source(publication.validity.clone()),
+                            ticket,
+                        },
+                    });
+                    work.source = Some(id);
+                    source_intakes += 1;
+                    source_cues.insert(id, state);
+                    perf::instant!("audio_source_intake", "iw4l.sim", "object" => source.key.object,
+                        "slot" => source.key.slot as u64, "scope" => source.key.scope as u64,
+                        "version" => source.version, "alias" => cue.alias.as_str());
+                    pending_cues.push_back(work);
+                }
+            }
+            let mut active = 0;
+            let mut rendered = 0;
+            let mut virtualized = 0;
+            for logical in instances.iter().filter(|logical| logical.source.is_some()) {
+                active += 1;
+                match logical.request.instance.status() {
+                    InstanceStatus::Started => rendered += 1,
+                    InstanceStatus::Virtual => virtualized += 1,
+                    _ => {}
+                }
+            }
+            sources.pending_layers.store(
+                pending_cues
+                    .iter()
+                    .filter(|work| work.source.is_some())
+                    .count(),
+                Ordering::Relaxed,
+            );
+            sources.active.store(active, Ordering::Relaxed);
+            perf::counter!(
+                "match_loop_sources",
+                "iw4l.sim",
+                instances
+                    .iter()
+                    .filter(|logical| logical
+                        .source
+                        .is_some_and(|source| source.id.key.scope == AudioScope::Match))
+                    .count() as f64
+            );
+            sources.rendered.store(rendered, Ordering::Relaxed);
+            sources.virtualized.store(virtualized, Ordering::Relaxed);
+            sources.revision.store(desired.revision, Ordering::Release);
+            let _ = crate::diagnostics::slow_stage("source_intake", diag_stage);
+            if crate::diagnostics::enabled() {
+                diag_max_pass = diag_max_pass.max(diag_pass.elapsed());
+                if diag_last.elapsed() >= Duration::from_secs(1) {
+                    crate::diagnostics::emit(format!(
+                        "audio diag: transport elapsed_ms={:.3} audio_frame={} active={} device_blocks={} null_blocks={} underruns={} logical={} pending={} max_control_ms={:.3} max_control_gap_ms={:.3}",
+                        diag_anchor.elapsed().as_secs_f64() * 1000.0,
+                        shared.frame.load(Ordering::Acquire),
+                        shared.device_active.load(Ordering::Acquire),
+                        shared.device_blocks.load(Ordering::Relaxed),
+                        shared.null_blocks.load(Ordering::Relaxed),
+                        shared.device_underruns.load(Ordering::Relaxed),
+                        instances.len(),
+                        pending_cues.len(),
+                        diag_max_pass.as_secs_f64() * 1000.0,
+                        diag_max_gap.as_secs_f64() * 1000.0
+                    ));
+                    diag_last = Instant::now();
+                    diag_max_pass = Duration::ZERO;
+                    diag_max_gap = Duration::ZERO;
+                }
+            }
+            std::thread::park_timeout(Duration::from_millis(2));
+        }
+        for work in pending_cues {
+            work.complete(crate::StartOutcome::Failed(
+                crate::StartFailure::CueRefused(CueFailure::Cancelled),
+            ));
+        }
+        for command in inbox.take(usize::MAX).0 {
+            if let CueCommand::Start(request) = command {
+                request.reject(CueFailure::Cancelled);
             }
         }
-        let mut active = 0;
-        let mut rendered = 0;
-        let mut virtualized = 0;
-        for logical in instances.iter().filter(|logical| logical.source.is_some()) {
-            active += 1;
-            match logical.request.instance.status() {
-                InstanceStatus::Started => rendered += 1,
-                InstanceStatus::Virtual => virtualized += 1,
-                _ => {}
-            }
+        // Join/destroy the device before the last owner can free render payloads.
+        if let Some(device) = device {
+            let _ = device.join();
         }
-        sources.pending_layers.store(
-            pending_cues
-                .iter()
-                .filter(|work| work.source.is_some())
-                .count(),
-            Ordering::Relaxed,
+        for logical in instances {
+            logical.request.instance.retire();
+        }
+        diag::info!(
+            Audio,
+            "audio: control stopped frames={} device_blocks={} null_blocks={} busy_blocks={}",
+            shared.frame.load(Ordering::Acquire),
+            shared.device_blocks.load(Ordering::Relaxed),
+            shared.null_blocks.load(Ordering::Relaxed),
+            shared.busy_blocks.load(Ordering::Relaxed)
         );
-        sources.active.store(active, Ordering::Relaxed);
-        sources.rendered.store(rendered, Ordering::Relaxed);
-        sources.virtualized.store(virtualized, Ordering::Relaxed);
-        sources.revision.store(desired.revision, Ordering::Release);
-        let _ = crate::diagnostics::slow_stage("source_intake", diag_stage);
-        if crate::diagnostics::enabled() {
-            diag_max_pass = diag_max_pass.max(diag_pass.elapsed());
-            if diag_last.elapsed() >= Duration::from_secs(1) {
-                crate::diagnostics::emit(format!(
-                    "audio diag: transport elapsed_ms={:.3} audio_frame={} active={} device_blocks={} null_blocks={} underruns={} logical={} pending={} max_control_ms={:.3} max_control_gap_ms={:.3}",
-                    diag_anchor.elapsed().as_secs_f64() * 1000.0,
-                    shared.frame.load(Ordering::Acquire),
-                    shared.device_active.load(Ordering::Acquire),
-                    shared.device_blocks.load(Ordering::Relaxed),
-                    shared.null_blocks.load(Ordering::Relaxed),
-                    shared.device_underruns.load(Ordering::Relaxed),
-                    instances.len(),
-                    pending_cues.len(),
-                    diag_max_pass.as_secs_f64() * 1000.0,
-                    diag_max_gap.as_secs_f64() * 1000.0
-                ));
-                diag_last = Instant::now();
-                diag_max_pass = Duration::ZERO;
-                diag_max_gap = Duration::ZERO;
-            }
-        }
-        std::thread::park_timeout(Duration::from_millis(2));
     }
-    for work in pending_cues {
-        work.complete(crate::StartOutcome::Failed(
-            crate::StartFailure::CueRefused(CueFailure::Cancelled),
-        ));
-    }
-    while let Ok(request) = cue_rx.try_recv() {
-        request.reject(CueFailure::Cancelled);
-    }
-    // Join/destroy the device before the last owner can free render payloads.
-    if let Some(device) = device {
-        let _ = device.join();
-    }
-    for logical in instances {
-        logical.request.instance.retire();
-    }
-    diag::info!(
-        Audio,
-        "audio: control stopped frames={} device_blocks={} null_blocks={} busy_blocks={}",
-        shared.frame.load(Ordering::Acquire),
-        shared.device_blocks.load(Ordering::Relaxed),
-        shared.null_blocks.load(Ordering::Relaxed),
-        shared.busy_blocks.load(Ordering::Relaxed)
-    );
 }
 
 fn apply_source_render_budget(instances: &[LogicalInstance]) {
@@ -1136,15 +1257,7 @@ fn apply_source_render_budget(instances: &[LogicalInstance]) {
     }
 }
 
-fn executable_source(scene: &SourceScene, key: SourceKey, version: u64) -> bool {
-    scene
-        .sources
-        .binary_search_by_key(&key, |source| source.key)
-        .ok()
-        .is_some_and(|index| scene.sources[index].version == version)
-}
-
-fn update_spatial(request: &StartRequest, listener: Option<ListenerSnapshot>) {
+fn update_spatial(request: &StartRequest, listener: Option<&ListenerSnapshot>) {
     if let (Some(spatial), Some(listener)) = (&request.spatial, listener) {
         let parameters = spatial.evaluate(listener);
         if let Some(pan) = &request.media.pan {
@@ -1221,7 +1334,7 @@ fn reject(instance: &InstanceState, counts: &[AtomicU64; 7], reason: AdmissionFa
 }
 
 fn refused_cue(
-    namespace: asset_core::AssetNamespace,
+    namespace: asset_core::FamilyId,
     alias: &str,
     event: Option<crate::AudioEvent>,
     reason: CueFailure,
@@ -1244,14 +1357,12 @@ fn refused_cue(
 fn make_instance(
     id: u64,
     scope: AudioScope,
-    epoch: u64,
     policy: &AdmissionPolicy,
     requested_at: Instant,
 ) -> Arc<InstanceState> {
     Arc::new(InstanceState {
         id,
         scope,
-        epoch,
         stopped: AtomicBool::new(false),
         finish_attack: AtomicBool::new(false),
         paused: AtomicBool::new(false),
@@ -1276,7 +1387,7 @@ fn admit(
     request: StartRequest,
     shared: &RenderShared,
     instances: &mut Vec<LogicalInstance>,
-    listener: Option<ListenerSnapshot>,
+    listener: Option<&ListenerSnapshot>,
     rejections: &[AtomicU64; 7],
     source: Option<SourceBinding>,
 ) {
@@ -1284,10 +1395,6 @@ fn admit(
         || request.instance.stopped.load(Ordering::Acquire)
     {
         Some(AdmissionFailure::Cancelled)
-    } else if request.instance.scope == AudioScope::Match
-        && request.instance.epoch != shared.presentation_epoch.load(Ordering::Acquire)
-    {
-        Some(AdmissionFailure::StaleScope)
     } else if instances.len() == LOGICAL_INSTANCES {
         Some(AdmissionFailure::LogicalBudget)
     } else {
@@ -1305,16 +1412,17 @@ fn admit(
         .filter(|logical| {
             live(&logical.request.instance)
                 && logical.request.instance.scope == request.instance.scope
-                && (request.instance.scope != AudioScope::Match
-                    || logical.request.instance.epoch == request.instance.epoch)
         })
         .map(|logical| Occupant {
             id: logical.request.instance.id,
             policy: logical.request.admission,
             priority: f32::from_bits(logical.request.instance.priority.load(Ordering::Acquire)),
+            channel_voice: logical.slot.is_some()
+                || (logical.source.is_none()
+                    && logical.request.instance.audible.load(Ordering::Acquire)),
         })
         .collect();
-    let victims = match crate::admission::plan(&policy, &occupants) {
+    let victims = match crate::admission::plan(&policy, &occupants, source.is_none()) {
         Ok(victims) => victims,
         Err(reason) => {
             reject(&request.instance, rejections, reason);
@@ -1362,6 +1470,15 @@ fn admit(
         }
     }
     request.instance.set_status(InstanceStatus::Accepted);
+    perf::instant!("audio_instance_created", "iw4l.sim", |ctx| {
+        ctx.arg("instance", request.instance.id as i64);
+        ctx.arg("scope", request.instance.scope as i64);
+        ctx.arg("source_object", source.map(|source| source.id.key.object));
+        ctx.arg(
+            "source_slot",
+            source.map(|source| source.id.key.slot as u64),
+        );
+    });
     let frame = request.frame;
     instances.push(LogicalInstance {
         request,

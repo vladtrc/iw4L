@@ -128,6 +128,13 @@ pub const GFX_PORTAL: usize = 60;
 pub const GFX_PORTAL_HULL_AXIS: usize = 0x24;
 pub const GFX_LIGHTMAP_ARRAY: usize = 8;
 pub const GFX_BRUSH_MODEL: usize = 60;
+pub mod gfx_brush_model {
+    pub const BOUNDS_MID: usize = 24;
+    pub const BOUNDS_HALF: usize = 36;
+    pub const SURFACE_COUNT: usize = 52;
+    pub const START_SURF: usize = 54;
+    pub const SURFACE_COUNT_NO_DECAL: usize = 56;
+}
 pub const MATERIAL_MEMORY: usize = 8;
 pub const GFX_SHADOW_GEOMETRY: usize = 12;
 pub const GFX_LIGHT_REGION: usize = 8;
@@ -135,6 +142,13 @@ pub const GFX_LIGHT_REGION_HULL: usize = 80;
 
 pub const GFX_LIGHT_REGION_AXIS: usize = 20;
 pub const GFX_SURFACE: usize = 24;
+pub mod gfx_surface {
+    pub const FIRST_VERTEX: usize = 4;
+    pub const VERTEX_COUNT: usize = 8;
+    pub const TRI_COUNT: usize = 10;
+    pub const BASE_INDEX: usize = 12;
+    pub const MATERIAL: usize = 16;
+}
 
 pub const GFX_SURFACE_BOUNDS: usize = 24;
 pub const GFX_STATIC_MODEL_DRAW_INST: usize = 76;

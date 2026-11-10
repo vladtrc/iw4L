@@ -105,18 +105,12 @@ pub struct GfxGlassMeshPlan {
 #[derive(Resource, Clone, Debug)]
 pub struct GlassTable {
     pub rows: Vec<ClientGlassPiece>,
-    pub last_msec: i32,
-    pub generation: u32,
-    pub map_round_epoch: u32,
 }
 
 impl Default for GlassTable {
     fn default() -> Self {
         Self {
             rows: vec![ClientGlassPiece::default(); CG_GLASS_PIECE_LIMIT],
-            last_msec: 0,
-            generation: 0,
-            map_round_epoch: 0,
         }
     }
 }
@@ -124,8 +118,6 @@ impl Default for GlassTable {
 impl GlassTable {
     pub fn reset(&mut self) {
         self.rows.fill(ClientGlassPiece::default());
-        self.last_msec = 0;
-        self.generation = self.generation.wrapping_add(1);
     }
 
     pub fn applied_pairs(&self) -> Vec<(u32, u8)> {
@@ -224,6 +216,178 @@ impl GfxGlassMeshPlan {
         self.lighting_handle_sample = glass.lighting_handles.get(78).copied();
         self.lighting_handle_max = glass.lighting_handles.iter().copied().max();
         let mut last_why = None;
+        let mut emit_piece = |piece: usize,
+                              place: &[u8; fx_iw4::FX_GLASS_PIECE_PLACE],
+                              state: &[u8; fx_iw4::FX_GLASS_PIECE_STATE],
+                              geo: &[[u8; fx_iw4::FX_GLASS_GEOMETRY_DATA]],
+                              drop_snapshot_shatter: bool,
+                              half_thickness: f32,
+                              fade: f32| {
+            let last_why = &mut last_why;
+            if self.draws.len() >= GFX_GLASS_SURF_LIMIT {
+                self.skipped_cap = self.skipped_cap.saturating_add(1);
+                *last_why = Some("surf_limit");
+                return;
+            }
+            let applied_state = applied_glass_state(applied, piece as u32);
+            if drop_snapshot_shatter && applied_state >= 2 {
+                self.skipped_shatter = self.skipped_shatter.saturating_add(1);
+                *last_why = Some("shattered");
+                return;
+            }
+            let vert_n = glass_state_vert_count(state);
+            if vert_n < 3 {
+                self.skipped_vert = self.skipped_vert.saturating_add(1);
+                *last_why = Some("vert_count");
+                return;
+            }
+            let def_i = usize::from(glass_state_def_index(state));
+            let Some(def) = glass.defs.get(def_i) else {
+                self.skipped_def = self.skipped_def.saturating_add(1);
+                *last_why = Some("missing_def");
+                return;
+            };
+            let flags = glass_state_flags(state);
+            let use_shattered = (drop_snapshot_shatter && applied_state == 1)
+                || flags & FX_GLASS_STATE_FLAG_DAMAGED != 0;
+            let Some(edge) = glass.material_edge(def_i, use_shattered) else {
+                self.skipped_name = self.skipped_name.saturating_add(1);
+                *last_why = Some("missing_material_edge");
+                return;
+            };
+            let Some(asset_id) = edge.bound() else {
+                self.skipped_name = self.skipped_name.saturating_add(1);
+                *last_why = Some(edge.edge_kind());
+                return;
+            };
+            let Some(ordinal) = catalog.ordinal_for_asset_id(asset_id) else {
+                self.skipped_ordinal = self.skipped_ordinal.saturating_add(1);
+                *last_why = Some("no_ordinal");
+                return;
+            };
+            let sort_key = catalog
+                .derived(asset_id)
+                .and_then(|m| m.baked_draw_surf)
+                .map(|packed| dpvs_iw4::unpack(dpvs_iw4::GfxDrawSurf { packed }).primary_sort_key)
+                .unwrap_or(0);
+            let color = colors.get(&asset_id.order()).cloned();
+            let mut draw_state = *state;
+            if use_shattered {
+                fx_iw4::glass_state_set_flags(&mut draw_state, flags | FX_GLASS_STATE_FLAG_DAMAGED);
+            }
+            // A shard is concave and may carry holes, so the mesh follows the piece's own
+            // stored geometry: every border vertex, and the triangulation that spans them.
+            let Some(pgeo) = glass_decode_geo(&draw_state, geo) else {
+                self.skipped_vert = self.skipped_vert.saturating_add(1);
+                *last_why = Some("geo_trunc");
+                return;
+            };
+            let mut cpu = vec![
+                fx_iw4::FxGlassIntactVert {
+                    xyz: [0.0; 3],
+                    uv: [0.0; 2],
+                };
+                FX_GLASS_SHARD_VERT_MAX
+            ];
+            let Some(wrote) = glass_piece_verts(place, &draw_state, def, &pgeo, &mut cpu) else {
+                self.skipped_vert = self.skipped_vert.saturating_add(1);
+                *last_why = Some("geo_trunc");
+                return;
+            };
+            cpu.truncate(wrote);
+            let (need_v, need_i) = glass_slab_counts(&pgeo, half_thickness);
+            if need_v == 0
+                || self.vertices.len() + need_v > GFX_GLASS_MESH_VERT_LIMIT
+                || self.indices.len() + need_i > GFX_GLASS_MESH_INDEX_LIMIT
+            {
+                self.skipped_cap = self.skipped_cap.saturating_add(1);
+                *last_why = Some("mesh_limit");
+                return;
+            }
+            let axis = unit_quat_to_axis(glass_place_quat(place));
+            let mut slab_v = vec![
+                fx_iw4::FxGlassSlabVert {
+                    xyz: [0.0; 3],
+                    uv: [0.0; 2],
+                    normal: [0.0; 3],
+                    tangent: [0.0; 3],
+                    binormal_sign: -1.0,
+                };
+                need_v
+            ];
+            let mut slab_i = vec![0u16; need_i];
+            let Some((nv, ni)) = glass_emit_slab(
+                &cpu,
+                &pgeo,
+                axis[2],
+                axis[0],
+                half_thickness,
+                &mut slab_v,
+                &mut slab_i,
+            ) else {
+                self.skipped_vert = self.skipped_vert.saturating_add(1);
+                *last_why = Some("slab");
+                return;
+            };
+            let color_rgba = glass_scale_color_alpha(glass_def_color_rgba(def), fade);
+            let origin = glass_place_origin(place);
+            let radius = slab_v
+                .iter()
+                .take(nv)
+                .map(|v| {
+                    let d = [
+                        v.xyz[0] - origin[0],
+                        v.xyz[1] - origin[1],
+                        v.xyz[2] - origin[2],
+                    ];
+                    (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+                })
+                .fold(0.0f32, f32::max);
+            let base = self.vertices.len() as u32;
+            for v in slab_v.iter().take(nv) {
+                self.verts_mut().push(pack_code_mesh_vertex_signed(
+                    v.xyz,
+                    color_rgba,
+                    trail_pack_texcoord(v.uv[0], v.uv[1]),
+                    trail_pack_normal(v.normal),
+                    trail_pack_normal(v.tangent),
+                    v.binormal_sign,
+                ));
+            }
+            let index_start = self.indices.len() as u32;
+            for &idx in slab_i.iter().take(ni) {
+                self.inds_mut().push(base.saturating_add(u32::from(idx)));
+            }
+            let material = self.materials.len() as u32;
+            self.materials.push(FxPassMaterial {
+                color,
+                sort_key,
+                material_sorted_index: Some(ordinal.get()),
+            });
+            let init_index = glass_state_init_index(state);
+            self.draws.push(GfxGlassMeshDraw {
+                material,
+                index_start,
+                index_count: ni as u32,
+                lighting_handle: u32::from(
+                    glass
+                        .lighting_handles
+                        .get(usize::from(init_index))
+                        .copied()
+                        .unwrap_or(0),
+                ),
+                lighting_prev: 0,
+                pending_lighting: None,
+                init_index,
+                piece: piece as u16,
+                origin,
+                radius,
+                reflection_probe_index: 0,
+            });
+            if applied_state == 1 {
+                self.weaken_n = self.weaken_n.saturating_add(1);
+            }
+        };
         if let Some(host) = host.filter(|h| h.piece_limit > 0) {
             for piece in 0..host.piece_limit as usize {
                 if !host.is_in_use(piece as u32) {
@@ -235,19 +399,14 @@ impl GfxGlassMeshPlan {
                 let Some(state) = host.piece_states.get(piece) else {
                     continue;
                 };
-                self.emit_glass_piece(
+                emit_piece(
                     piece,
                     &place,
                     state,
                     &host.geo_data,
-                    glass,
-                    catalog,
-                    colors,
-                    applied,
                     false,
                     host.half_thickness.get(piece).copied().unwrap_or(0.0),
                     host.piece_fade(piece),
-                    &mut last_why,
                 );
             }
         } else {
@@ -257,15 +416,11 @@ impl GfxGlassMeshPlan {
                 .zip(glass.piece_states.iter())
                 .enumerate()
             {
-                self.emit_glass_piece(
+                emit_piece(
                     piece,
                     place,
                     state,
                     &glass.geo_data,
-                    glass,
-                    catalog,
-                    colors,
-                    applied,
                     true,
                     glass
                         .half_thickness
@@ -274,7 +429,6 @@ impl GfxGlassMeshPlan {
                         .flatten()
                         .unwrap_or(0.0),
                     1.0,
-                    &mut last_why,
                 );
             }
         }
@@ -283,186 +437,6 @@ impl GfxGlassMeshPlan {
         }
         self.bump();
         self.publish_share();
-    }
-
-    fn emit_glass_piece(
-        &mut self,
-        piece: usize,
-        place: &[u8; fx_iw4::FX_GLASS_PIECE_PLACE],
-        state: &[u8; fx_iw4::FX_GLASS_PIECE_STATE],
-        geo: &[[u8; fx_iw4::FX_GLASS_GEOMETRY_DATA]],
-        glass: &asset_world::FxGlassReset,
-        catalog: &RuntimeMaterialCatalog,
-        colors: &std::collections::HashMap<usize, Handle<Image>>,
-        applied: &[(u32, u8)],
-        drop_snapshot_shatter: bool,
-        half_thickness: f32,
-        fade: f32,
-        last_why: &mut Option<&'static str>,
-    ) {
-        if self.draws.len() >= GFX_GLASS_SURF_LIMIT {
-            self.skipped_cap = self.skipped_cap.saturating_add(1);
-            *last_why = Some("surf_limit");
-            return;
-        }
-        let applied_state = applied_glass_state(applied, piece as u32);
-        if drop_snapshot_shatter && applied_state >= 2 {
-            self.skipped_shatter = self.skipped_shatter.saturating_add(1);
-            *last_why = Some("shattered");
-            return;
-        }
-        let vert_n = glass_state_vert_count(state);
-        if vert_n < 3 {
-            self.skipped_vert = self.skipped_vert.saturating_add(1);
-            *last_why = Some("vert_count");
-            return;
-        }
-        let def_i = usize::from(glass_state_def_index(state));
-        let Some(def) = glass.defs.get(def_i) else {
-            self.skipped_def = self.skipped_def.saturating_add(1);
-            *last_why = Some("missing_def");
-            return;
-        };
-        let flags = glass_state_flags(state);
-        let use_shattered = (drop_snapshot_shatter && applied_state == 1)
-            || flags & FX_GLASS_STATE_FLAG_DAMAGED != 0;
-        let Some(edge) = glass.material_edge(def_i, use_shattered) else {
-            self.skipped_name = self.skipped_name.saturating_add(1);
-            *last_why = Some("missing_material_edge");
-            return;
-        };
-        let Some(asset_id) = edge.bound() else {
-            self.skipped_name = self.skipped_name.saturating_add(1);
-            *last_why = Some(edge.edge_kind());
-            return;
-        };
-        let Some(ordinal) = catalog.ordinal_for_asset_id(asset_id) else {
-            self.skipped_ordinal = self.skipped_ordinal.saturating_add(1);
-            *last_why = Some("no_ordinal");
-            return;
-        };
-        let sort_key = catalog
-            .derived(asset_id)
-            .and_then(|m| m.baked_draw_surf)
-            .map(|packed| dpvs_iw4::unpack(dpvs_iw4::GfxDrawSurf { packed }).primary_sort_key)
-            .unwrap_or(0);
-        let color = colors.get(&asset_id.order()).cloned();
-        let mut draw_state = *state;
-        if use_shattered {
-            fx_iw4::glass_state_set_flags(&mut draw_state, flags | FX_GLASS_STATE_FLAG_DAMAGED);
-        }
-        // A shard is concave and may carry holes, so the mesh follows the piece's own
-        // stored geometry: every border vertex, and the triangulation that spans them.
-        let Some(pgeo) = glass_decode_geo(&draw_state, geo) else {
-            self.skipped_vert = self.skipped_vert.saturating_add(1);
-            *last_why = Some("geo_trunc");
-            return;
-        };
-        let mut cpu = vec![
-            fx_iw4::FxGlassIntactVert {
-                xyz: [0.0; 3],
-                uv: [0.0; 2],
-            };
-            FX_GLASS_SHARD_VERT_MAX
-        ];
-        let Some(wrote) = glass_piece_verts(place, &draw_state, def, &pgeo, &mut cpu) else {
-            self.skipped_vert = self.skipped_vert.saturating_add(1);
-            *last_why = Some("geo_trunc");
-            return;
-        };
-        cpu.truncate(wrote);
-        let (need_v, need_i) = glass_slab_counts(&pgeo, half_thickness);
-        if need_v == 0
-            || self.vertices.len() + need_v > GFX_GLASS_MESH_VERT_LIMIT
-            || self.indices.len() + need_i > GFX_GLASS_MESH_INDEX_LIMIT
-        {
-            self.skipped_cap = self.skipped_cap.saturating_add(1);
-            *last_why = Some("mesh_limit");
-            return;
-        }
-        let axis = unit_quat_to_axis(glass_place_quat(place));
-        let mut slab_v = vec![
-            fx_iw4::FxGlassSlabVert {
-                xyz: [0.0; 3],
-                uv: [0.0; 2],
-                normal: [0.0; 3],
-                tangent: [0.0; 3],
-                binormal_sign: -1.0,
-            };
-            need_v
-        ];
-        let mut slab_i = vec![0u16; need_i];
-        let Some((nv, ni)) = glass_emit_slab(
-            &cpu,
-            &pgeo,
-            axis[2],
-            axis[0],
-            half_thickness,
-            &mut slab_v,
-            &mut slab_i,
-        ) else {
-            self.skipped_vert = self.skipped_vert.saturating_add(1);
-            *last_why = Some("slab");
-            return;
-        };
-        let color_rgba = glass_scale_color_alpha(glass_def_color_rgba(def), fade);
-        let origin = glass_place_origin(place);
-        let radius = slab_v
-            .iter()
-            .take(nv)
-            .map(|v| {
-                let d = [
-                    v.xyz[0] - origin[0],
-                    v.xyz[1] - origin[1],
-                    v.xyz[2] - origin[2],
-                ];
-                (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
-            })
-            .fold(0.0f32, f32::max);
-        let base = self.vertices.len() as u32;
-        for v in slab_v.iter().take(nv) {
-            self.verts_mut().push(pack_code_mesh_vertex_signed(
-                v.xyz,
-                color_rgba,
-                trail_pack_texcoord(v.uv[0], v.uv[1]),
-                trail_pack_normal(v.normal),
-                trail_pack_normal(v.tangent),
-                v.binormal_sign,
-            ));
-        }
-        let index_start = self.indices.len() as u32;
-        for &idx in slab_i.iter().take(ni) {
-            self.inds_mut().push(base.saturating_add(u32::from(idx)));
-        }
-        let material = self.materials.len() as u32;
-        self.materials.push(FxPassMaterial {
-            color,
-            sort_key,
-            material_sorted_index: Some(ordinal.get()),
-        });
-        let init_index = glass_state_init_index(state);
-        self.draws.push(GfxGlassMeshDraw {
-            material,
-            index_start,
-            index_count: ni as u32,
-            lighting_handle: u32::from(
-                glass
-                    .lighting_handles
-                    .get(usize::from(init_index))
-                    .copied()
-                    .unwrap_or(0),
-            ),
-            lighting_prev: 0,
-            pending_lighting: None,
-            init_index,
-            piece: piece as u16,
-            origin,
-            radius,
-            reflection_probe_index: 0,
-        });
-        if applied_state == 1 {
-            self.weaken_n = self.weaken_n.saturating_add(1);
-        }
     }
 }
 
@@ -510,7 +484,7 @@ fn presented_world_objects<'a>(
 
 fn glass_snapshot_rows(snap: Option<&sim::Snapshot>) -> Vec<GlassSnapRow> {
     snap.map(|snap| rows_from_world_objects(&snap.meta.world_objects))
-        .unwrap_or_default()
+        .unwrap_or(Vec::new())
 }
 
 fn glass_viewer_is_archived(snap: Option<&sim::Snapshot>, local: Option<sim::ClientId>) -> bool {
@@ -530,19 +504,7 @@ fn glass_shatter_play_oneshot(late: bool, rebuilt: bool) -> bool {
     !late && !rebuilt
 }
 
-fn glass_epoch_changed(seen: u32, incoming: u32) -> bool {
-    seen != 0 && seen != incoming
-}
-
-fn glass_needs_rebuild(
-    now: i32,
-    last_msec: i32,
-    rows: &[GlassSnapRow],
-    table: &GlassTable,
-) -> bool {
-    if now < last_msec {
-        return true;
-    }
+fn glass_needs_rebuild(rows: &[GlassSnapRow], table: &GlassTable) -> bool {
     table.rows.iter().enumerate().any(|(i, row)| {
         if row.applied == 0 {
             return false;
@@ -574,16 +536,12 @@ pub(crate) fn apply_glass_host(
     let rows = glass_snapshot_rows(snap);
     let msec_now = fx_host.as_ref().map(|h| h.0.msec_now).unwrap_or(0);
     let as_of_ms = snap.map(|s| s.meta.world_objects.as_of_ms).unwrap_or(0);
-    let epoch = snap
-        .map(|s| s.meta.world_objects.map_round_epoch)
-        .unwrap_or(0);
     let now = glass_presentation_now(
         msec_now,
         as_of_ms,
         glass_viewer_is_archived(snap, local.map(|c| c.0)),
     );
-    let rebuilt = glass_epoch_changed(table.map_round_epoch, epoch)
-        || glass_needs_rebuild(now, table.last_msec, &rows, &table);
+    let rebuilt = glass_needs_rebuild(&rows, &table);
     if rebuilt {
         table.reset();
         if let Some(host) = fx_host.as_mut() {
@@ -597,8 +555,6 @@ pub(crate) fn apply_glass_host(
             host.0.glass.moved = true;
         }
     }
-    table.last_msec = now;
-    table.map_round_epoch = epoch;
     for snap in &rows {
         let Some(row) = table.rows.get_mut(snap.id as usize) else {
             continue;
@@ -648,11 +604,15 @@ pub(crate) fn apply_glass_host(
                     }
                     host.0.glass.shatter_caused(
                         i as u32,
-                        hit,
-                        dir,
+                        fx::GlassImpact {
+                            position: hit,
+                            direction: dir,
+                        },
                         seed,
-                        !late,
-                        play_oneshot,
+                        fx::GlassBreakPresentation {
+                            launch_airborne: !late,
+                            play_oneshot,
+                        },
                         cause,
                         revision,
                     );
@@ -777,6 +737,7 @@ pub(crate) fn enqueue_glass_model_lighting(
             owner,
             origin: draw.origin,
             lookup_fallback,
+            hero_lighting: false,
         }));
     }
 }

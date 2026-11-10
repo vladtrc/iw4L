@@ -13,11 +13,11 @@ pub enum Site {
     Client,
 }
 
-pub use asset_core::FamilyId as Realm;
+pub use asset_core::FamilyId;
 #[derive(Clone, Debug)]
 pub struct ModuleIdentity {
     pub site: Site,
-    pub realm: Realm,
+    pub realm: FamilyId,
     pub module: String,
     pub sha256: [u8; 32],
     pub origin: SourceOrigin,
@@ -31,7 +31,7 @@ pub struct Program {
     pub(crate) symbols: Vec<Arc<str>>,
     pub(crate) symbol_ids: BTreeMap<Arc<str>, u32>,
     pub(crate) natives: Vec<Builtin>,
-    pub(crate) rules: Realm,
+    pub(crate) rules: FamilyId,
     pub(crate) impure_scripts: bool,
 }
 impl Program {
@@ -48,7 +48,7 @@ impl Program {
     pub fn has_impure_scripts(&self) -> bool {
         self.impure_scripts
     }
-    pub fn rules(&self) -> Realm {
+    pub fn rules(&self) -> FamilyId {
         self.rules
     }
     pub fn function_count(&self) -> usize {
@@ -57,12 +57,35 @@ impl Program {
     pub fn native_count(&self) -> usize {
         self.natives.len()
     }
+    pub fn animation_references(&self) -> BTreeMap<String, std::collections::BTreeSet<String>> {
+        let mut trees = BTreeMap::<String, std::collections::BTreeSet<String>>::new();
+        for function in &self.functions {
+            for (_, op) in &function.code {
+                match op {
+                    super::ir::Op::Constant(super::Value::Animation { tree, name }) => {
+                        trees
+                            .entry(tree.to_string())
+                            .or_default()
+                            .insert(name.to_string());
+                    }
+                    super::ir::Op::Constant(super::Value::AnimationTree(tree)) => {
+                        trees.entry(tree.to_string()).or_default();
+                    }
+                    _ => {}
+                }
+            }
+        }
+        trees
+    }
+
     pub fn fingerprint(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         let mut digest = Sha256::new();
         digest.update(IR_VERSION.to_le_bytes());
         for module in &self.modules {
-            digest.update([module.site as u8, module.realm as u8]);
+            digest.update([module.site as u8]);
+            digest.update((module.realm.as_str().len() as u64).to_le_bytes());
+            digest.update(module.realm.as_str().as_bytes());
             digest.update([module.origin as u8]);
             digest.update((module.module.len() as u64).to_le_bytes());
             digest.update(module.module.as_bytes());

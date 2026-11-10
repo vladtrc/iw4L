@@ -1,5 +1,9 @@
 use crate::adjust_mover::ET_SCRIPTMOVER;
 
+pub const SP_SCRIPT_MODEL_AIM_ASSIST: u32 = 0x2000;
+
+pub const SP_HERO_ONLY_LIGHTING: u32 = 0x100;
+
 pub const CG_SCRIPT_MOVER_NODRAW: u32 = 0x20;
 
 pub const SCRIPT_MOVER_BMODEL_SOLID: u32 = 0xffffff;

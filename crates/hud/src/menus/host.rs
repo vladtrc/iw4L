@@ -68,7 +68,7 @@ impl MenuHost<'_> {
                         data.table_lookup("mp/ranktable.csv", 0, &rank, 14)
                     }
                 })
-                .unwrap_or_default()
+                .unwrap_or("")
                 .to_owned(),
             "cl_ingame" => flag(self.world.in_game),
             "gamemode" => "mp".to_owned(),
@@ -78,7 +78,7 @@ impl MenuHost<'_> {
                 .world
                 .kind
                 .map(|kind| kind.token().to_owned())
-                .unwrap_or_default(),
+                .unwrap_or(String::new()),
             "g_teamicon_allies" => self.team_key(|t| t.allies.as_ref()),
             "g_teamicon_axis" => self.team_key(|t| t.axis.as_ref()),
             "g_teamname_allies" => self.team_key(|t| t.allies_name.as_ref()),
@@ -92,7 +92,7 @@ impl MenuHost<'_> {
             .teams
             .and_then(pick)
             .map(|key| key.logical_name().to_owned())
-            .unwrap_or_default()
+            .unwrap_or(String::new())
     }
 
     fn gametype_text(&self, col: i32) -> Result<Operand, ExprError> {
@@ -121,7 +121,11 @@ impl MenuHost<'_> {
             return Err(ExprError::Host("custom class index"));
         }
         let slot = self.world.classes.and_then(|c| c.slots.get(index));
-        let field = |at: usize| path.get(at).map(hud_iw4::source_str).unwrap_or_default();
+        let field = |at: usize| {
+            path.get(at)
+                .map(hud_iw4::source_str)
+                .unwrap_or(String::new())
+        };
         let int = |at: usize| path.get(at).map_or(-1, hud_iw4::source_int);
         let field_name = field(2).to_ascii_lowercase();
         if field_name == "inuse" {
@@ -138,7 +142,7 @@ impl MenuHost<'_> {
         };
         let reference = |key: &str| -> String {
             if asset_core::AssetKey::parse(key)
-                .is_ok_and(|key| key.namespace != asset_core::AssetNamespace::Iw4)
+                .is_ok_and(|key| key.namespace != asset_core::FamilyId::IW4)
             {
                 return key.to_owned();
             }
@@ -389,7 +393,10 @@ impl ExprHost for MenuHost<'_> {
         self.gametype_text(2)
     }
     fn player_data(&self, path: &[Operand]) -> Result<Operand, ExprError> {
-        let root = path.first().map(hud_iw4::source_str).unwrap_or_default();
+        let root = path
+            .first()
+            .map(hud_iw4::source_str)
+            .unwrap_or(String::new());
         if root.eq_ignore_ascii_case("customClasses") {
             self.custom_class(path)
         } else {
@@ -453,7 +460,7 @@ impl ExprHost for MenuHost<'_> {
         Ok(Operand::Str(
             t.lookup_row_in_col(col0, key)
                 .map(|row| t.cell(row, result_col).to_owned())
-                .unwrap_or_default(),
+                .unwrap_or(String::new()),
         ))
     }
     fn table_lookup_by_row(&self, table: &str, row: i32, col: i32) -> Result<Operand, ExprError> {

@@ -9,7 +9,6 @@ pub mod dom;
 pub mod end_game;
 pub mod ffa;
 pub mod gamelogic;
-pub mod gaps;
 pub mod globallogic;
 pub mod kind;
 pub mod load;
@@ -34,7 +33,6 @@ pub use animated_models::{
 pub use damage_feedback::{DAMAGE_FEEDBACK_SHADER, HIT_ALERT_ALIAS};
 pub use ffa::{GAMETYPE_DIALOG_LINE, ffa_highest_scoring_index, ffa_player_is_better};
 pub use gamelogic::{GAME_STATE_PLAYING, USE_START_SPAWNS_AT_START};
-pub use gaps::{ScriptGap, ScriptGapCause};
 pub use globallogic::{OBJECTIVE_BASED, POST_ROUND_TIME_MS};
 
 pub use kind::GameModeKind;
@@ -43,7 +41,8 @@ pub use parse_scores::{PARSE_SCORES_CAP, ParsedScores, parse_scores};
 pub use perks::copycat_weapnext_bind_active;
 pub use phase::Team;
 pub use playerlogic::{
-    HUD_STATUS_DEAD, MP_CONNECTED, MP_GLOBAL_INTERMISSION, is_last_round, time_until_spawn,
+    HUD_STATUS_DEAD, MP_CONNECTED, MP_GLOBAL_INTERMISSION, RespawnRules, RespawnStatus,
+    is_last_round, time_until_spawn,
 };
 pub use prematch::{
     DEFAULT_ALLIES_CHARSET, DEFAULT_AXIS_CHARSET, FACTION_ICON_COL, FACTION_TABLE,

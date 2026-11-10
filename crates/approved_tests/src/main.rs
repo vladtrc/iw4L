@@ -6,6 +6,7 @@ mod scenario;
 mod scenarios {
     pub mod heavy_gameplay_lifecycle;
     pub mod master_duo_chaos;
+    mod master_fixture;
 }
 
 use std::path::{Path, PathBuf};
@@ -28,9 +29,12 @@ struct Args {
     replay: Option<PathBuf>,
     cache: CacheMode,
     bin: PathBuf,
+    master_bin: PathBuf,
+    scene: Option<PathBuf>,
 }
 
 fn main() {
+    bootstrap::initialize_runtime();
     let root = repo_root();
     let args = match parse_args(&root) {
         Ok(args) => args,
@@ -38,7 +42,7 @@ fn main() {
             eprintln!("{message}");
             eprintln!(
                 "usage: approved_tests <heavy_gameplay_lifecycle|master_duo_chaos> [--seed N | --replay run.json] \
-                 [--cache cold|shared] [--bin path]"
+                 [--cache cold|shared] [--bin path] [--master-bin path] [--scene path]"
             );
             std::process::exit(2);
         }
@@ -51,20 +55,31 @@ fn main() {
             std::process::exit(2);
         }
 
-        std::process::exit(match scenarios::master_duo_chaos::run(&root, &args.bin) {
-            Ok(true) => 0,
-            Ok(false) => 1,
-            Err(error) => {
-                eprintln!("approved_tests: {error}");
-                1
-            }
-        });
+        std::process::exit(
+            match scenarios::master_duo_chaos::run(
+                &root,
+                &args.bin,
+                &args.master_bin,
+                args.scene.as_deref(),
+            ) {
+                Ok(true) => 0,
+                Ok(false) => 1,
+                Err(error) => {
+                    eprintln!("approved_tests: {error}");
+                    1
+                }
+            },
+        );
     }
     if args.scenario != SCENARIO.name {
         eprintln!(
             "approved scenarios: {}, master_duo_chaos (asked for {:?})",
             SCENARIO.name, args.scenario
         );
+        std::process::exit(2);
+    }
+    if args.scene.is_some() {
+        eprintln!("--scene belongs to master_duo_chaos");
         std::process::exit(2);
     }
     std::process::exit(match run(&root, &args) {
@@ -95,6 +110,11 @@ fn parse_args(root: &Path) -> Result<Args, String> {
         replay: None,
         cache: CacheMode::Cold,
         bin: root.join(format!("target/play/iw4l{}", std::env::consts::EXE_SUFFIX)),
+        master_bin: root.join(format!(
+            "target/play/iw4l-master{}",
+            std::env::consts::EXE_SUFFIX
+        )),
+        scene: None,
     };
     while let Some(flag) = it.next() {
         let mut value = || it.next().ok_or(format!("{flag} needs a value"));
@@ -115,6 +135,8 @@ fn parse_args(root: &Path) -> Result<Args, String> {
                 }
             }
             "--bin" => args.bin = PathBuf::from(value()?),
+            "--master-bin" => args.master_bin = PathBuf::from(value()?),
+            "--scene" => args.scene = Some(PathBuf::from(value()?)),
             other => return Err(format!("unknown flag {other}")),
         }
     }
@@ -213,7 +235,7 @@ fn resolve_scenes(
 }
 
 fn run(root: &Path, args: &Args) -> Result<bool, String> {
-    asset_transport::load_dotenv();
+    desktop::load_dotenv();
     let replay = args.replay.as_deref().map(read_replay).transpose()?;
     let seed = replay
         .as_ref()
@@ -228,7 +250,7 @@ fn run(root: &Path, args: &Args) -> Result<bool, String> {
         ));
     }
 
-    let games = asset_transport::games_root_from_env()?;
+    let games = asset_transport::games_root()?;
     let installed = asset_transport::list_mp_maps(&games);
     let (map_b, map_b_rule, candidates): (Option<String>, String, Vec<String>) =
         match (&replay, &SCENARIO.map_b) {
@@ -306,7 +328,13 @@ fn run(root: &Path, args: &Args) -> Result<bool, String> {
     let scenes_b = resolve_scenes("b", &map_b, 1, seed, replay.as_ref());
     let phases = hgl::phases(&map_b, &scenes_a, &scenes_b);
     let script = scenario::script(&phases);
-    let child_args = vec!["menu".to_owned(), "--cmds".to_owned(), script.clone()];
+    let child_args = vec![
+        "--gametype".to_owned(),
+        SCENARIO.gametype.to_owned(),
+        "menu".to_owned(),
+        "--cmds".to_owned(),
+        script.clone(),
+    ];
 
     if let Some(replay) = &replay {
         let source = replay
@@ -366,7 +394,6 @@ fn run(root: &Path, args: &Args) -> Result<bool, String> {
         env: vec![
             ("IW4L_PERF", "1".into()),
             ("IW4L_PRESENT_MODE", "AutoNoVsync".into()),
-            ("IW4L_GAMETYPE", SCENARIO.gametype.into()),
             (
                 "IW4L_SETTINGS_PATH",
                 run_dir.join("settings.cfg").display().to_string(),

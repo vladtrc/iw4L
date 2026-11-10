@@ -97,6 +97,59 @@ impl WeaponBuild {
         }
     }
 
+    pub fn resolve_script_viewmodels(
+        &mut self,
+        fpv: &Arc<crate::FpvMeshCatalog>,
+        xanims: &crate::XAnimCatalog,
+        names: &std::collections::BTreeSet<String>,
+    ) -> FpvAssemblyCensus {
+        let mut seed = self.clone();
+        seed.registry.script_viewmodels = None;
+        let mut variants = std::collections::BTreeMap::new();
+        let mut total = FpvAssemblyCensus::default();
+        let Some(family) = fpv.map_namespace else {
+            return total;
+        };
+        for name in names {
+            if !fpv.contains(family, name) {
+                continue;
+            }
+            let hands = crate::FpvHandsPresentation::from_viewmodel(fpv, family, name);
+            let mut build = seed.clone();
+            for row in &mut build.registry.rows {
+                let choice = hands.clone().and_then(|hands| {
+                    if row.secondary_gun_xmodel.is_some() && !hands.supports_secondary() {
+                        Err("viewmodel requires tag_weapon1 for a secondary gun".into())
+                    } else {
+                        Ok(hands)
+                    }
+                });
+                row.fpv_soldiers = std::array::from_fn(|_| Some(choice.clone()));
+            }
+            let census = build.resolve_fpv_assemblies(fpv, xanims);
+            total.built += census.built;
+            total.linked += census.linked;
+            total.refused += census.refused;
+            total.clip_tables += census.clip_tables;
+            variants.insert(
+                name.clone(),
+                ScriptViewmodel {
+                    hands,
+                    assemblies: build
+                        .registry
+                        .rows
+                        .into_iter()
+                        .map(|row| row.fpv_assemblies)
+                        .collect(),
+                    alternates: build.registry.alternate_fpv,
+                    tracks: build.registry.fpv_clip_tracks,
+                },
+            );
+        }
+        self.registry.script_viewmodels = Some(variants);
+        total
+    }
+
     pub fn resolve_fpv_soldiers(
         &mut self,
         fpv: &crate::FpvMeshCatalog,
@@ -251,14 +304,16 @@ impl WeaponBuild {
                         census.built += 1;
                         crate::FpvAssembly::build(
                             fpv,
-                            hands,
-                            mounts,
-                            rocket,
-                            knife,
-                            ads,
-                            &assembly_hide_tags,
-                            hide_mode,
-                            jammed,
+                            crate::FpvAssemblyInput {
+                                hands,
+                                mounts,
+                                rocket,
+                                knife,
+                                ads,
+                                hide_tags: &assembly_hide_tags,
+                                hide_mode,
+                                jammed,
+                            },
                             &mut skeletons,
                         )
                         .map(Arc::new)

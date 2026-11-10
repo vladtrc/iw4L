@@ -1,8 +1,10 @@
+pub const FONT_LICENSE: &str = include_str!("../assets/OFL-FiraMono.txt");
 mod barracks_menu;
 pub mod binds;
 mod chat;
 mod class_dispatch;
 mod class_menu;
+mod client_actions;
 mod command;
 mod community_servers;
 mod debug_cg_gun;
@@ -30,6 +32,7 @@ mod game_folders;
 mod gamepad;
 pub mod input;
 mod local_account;
+mod local_input;
 mod local_profile;
 pub mod plugin;
 pub mod registry;

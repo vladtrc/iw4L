@@ -4,7 +4,8 @@ use render_frontend::{
     prepare::scene::{view_parms::PreparedSceneView, world::WorldScene},
 };
 
-use crate::{ConsoleCommand, ConsoleLine, ConsoleRegistry, ConsoleSettings, ConsoleState};
+use crate::feature_dispatch::ConsoleEcho;
+use crate::{ConsoleCommand, ConsoleRegistry};
 
 pub(crate) fn register(registry: &mut ConsoleRegistry) {
     registry.register(
@@ -17,7 +18,6 @@ pub(crate) fn register(registry: &mut ConsoleRegistry) {
     );
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn route(
     mut commands: MessageReader<ConsoleCommand>,
     scene: Res<WorldScene>,
@@ -25,9 +25,7 @@ pub(crate) fn route(
     clock: Res<net::FrameClock>,
     glow: Res<GlowDvars>,
     mut film: ResMut<FilmVisionView>,
-    mut console: ResMut<ConsoleState>,
-    settings: Res<ConsoleSettings>,
-    mut line: ResMut<ConsoleLine>,
+    mut echo: ConsoleEcho,
 ) {
     for cmd in commands.read() {
         let reset = match cmd.name.as_str() {
@@ -88,8 +86,6 @@ pub(crate) fn route(
             ))
         })();
         let msg = result.unwrap_or_else(|error| error);
-        diag::info!(Console, "{msg}");
-        line.0 = msg.clone();
-        console.echo(msg, settings.log_capacity);
+        echo.write(msg);
     }
 }

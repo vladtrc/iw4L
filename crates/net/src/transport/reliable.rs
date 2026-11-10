@@ -1,51 +1,16 @@
-use sim::{ActionRequestId, SimEvent};
+use sim::SimEvent;
 
 use crate::transport::meta_wire::{decode_event, encode_event};
 use crate::transport::wire::{WireError, WireReader, WireWriter};
 
 pub const MAX_PENDING_RELIABLE: usize = 64;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ActionVerdict {
-    Applied,
-
-    Accepted,
-
-    Refused,
-
-    PayloadMismatch,
-
-    Expired,
-}
-
-impl ActionVerdict {
-    const fn tag(self) -> u8 {
-        match self {
-            Self::Applied => 0,
-            Self::Accepted => 4,
-            Self::Refused => 1,
-            Self::PayloadMismatch => 2,
-            Self::Expired => 3,
-        }
-    }
-
-    const fn from_tag(tag: u8) -> Option<Self> {
-        match tag {
-            0 => Some(Self::Applied),
-            4 => Some(Self::Accepted),
-            1 => Some(Self::Refused),
-            2 => Some(Self::PayloadMismatch),
-            3 => Some(Self::Expired),
-            _ => None,
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub enum ReliableRow {
     Failure(String),
     Sound(crate::SvcSound),
     ScriptAudio(sim::ScriptAudioCommand),
+    Objective(sim::ObjectiveUpdate),
     Card(crate::SvcCardSlot),
     Menu(crate::SvcOpenMenu),
     Splash(crate::SvcHudSplash),
@@ -53,26 +18,33 @@ pub enum ReliableRow {
     Scores(String),
 
     Event(SimEvent),
-    FireCommands(Vec<sim::FireCommandResult>),
-
-    ActionOutcome {
-        request_id: ActionRequestId,
-        verdict: ActionVerdict,
-    },
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct ReliableEventQueue {
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReliableQueue<T> {
     next_seq: u16,
 
     ack_through: u16,
 
-    pending: Vec<(u16, ReliableRow)>,
+    pending: Vec<(u16, T)>,
 
     pub dropped_oldest: u32,
 }
 
-impl ReliableEventQueue {
+impl<T> Default for ReliableQueue<T> {
+    fn default() -> Self {
+        Self {
+            next_seq: 1,
+            ack_through: 0,
+            pending: Vec::new(),
+            dropped_oldest: 0,
+        }
+    }
+}
+
+pub type ReliableEventQueue = ReliableQueue<ReliableRow>;
+
+impl<T> ReliableQueue<T> {
     pub fn new() -> Self {
         Self {
             next_seq: 1,
@@ -80,7 +52,7 @@ impl ReliableEventQueue {
         }
     }
 
-    pub fn push(&mut self, row: ReliableRow) -> u16 {
+    pub fn push(&mut self, row: T) -> u16 {
         if self.pending.len() >= MAX_PENDING_RELIABLE {
             self.dropped_oldest = self.dropped_oldest.saturating_add(1);
             return 0;
@@ -92,17 +64,6 @@ impl ReliableEventQueue {
         self.next_seq = self.next_seq.wrapping_add(1);
         self.pending.push((seq, row));
         seq
-    }
-
-    pub fn push_event(&mut self, event: SimEvent) -> u16 {
-        self.push(ReliableRow::Event(event))
-    }
-
-    pub fn push_outcome(&mut self, request_id: ActionRequestId, verdict: ActionVerdict) -> u16 {
-        self.push(ReliableRow::ActionOutcome {
-            request_id,
-            verdict,
-        })
     }
 
     pub fn ack(&mut self, through: u16) {
@@ -124,8 +85,14 @@ impl ReliableEventQueue {
         self.pending.len()
     }
 
-    pub fn pending(&self) -> &[(u16, ReliableRow)] {
+    pub fn pending(&self) -> &[(u16, T)] {
         &self.pending
+    }
+}
+
+impl ReliableEventQueue {
+    pub fn push_event(&mut self, event: SimEvent) -> u16 {
+        self.push(ReliableRow::Event(event))
     }
 
     pub fn payload(&self) -> ReliablePayload {
@@ -159,7 +126,6 @@ impl ReliablePayload {
 }
 
 const ROW_TAG_EVENT: u8 = 0;
-const ROW_TAG_OUTCOME: u8 = 1;
 
 pub fn encode_reliable_payload(
     out: &mut WireWriter,
@@ -173,9 +139,11 @@ pub fn encode_reliable_payload(
     for (seq, row) in rows {
         out.put_u16(*seq);
         match row {
-            ReliableRow::FireCommands(results) => {
+            ReliableRow::Objective(value) => {
                 out.put_u8(10);
-                super::fire_result::encode_fire_results(out, results);
+                out.put_u8(value.state as u8);
+                out.put_u16(value.text.len() as u16);
+                out.put_bytes(value.text.as_bytes());
             }
             ReliableRow::ScriptAudio(value) => {
                 out.put_u8(9);
@@ -213,14 +181,6 @@ pub fn encode_reliable_payload(
                 out.put_u8(ROW_TAG_EVENT);
                 encode_event(out, event);
             }
-            ReliableRow::ActionOutcome {
-                request_id,
-                verdict,
-            } => {
-                out.put_u8(ROW_TAG_OUTCOME);
-                out.put_u32(*request_id);
-                out.put_u8(verdict.tag());
-            }
         }
     }
     out.put_u32(dropped_oldest);
@@ -236,17 +196,29 @@ pub fn decode_reliable_payload(input: &mut WireReader<'_>) -> Result<ReliablePay
     for _ in 0..count {
         let seq = input.get_u16()?;
         let row = match input.get_u8()? {
-            10 => ReliableRow::FireCommands(super::fire_result::decode_fire_results(input)?),
-            ROW_TAG_EVENT => ReliableRow::Event(decode_event(input)?),
-            ROW_TAG_OUTCOME => {
-                let request_id = input.get_u32()?;
-                let verdict = ActionVerdict::from_tag(input.get_u8()?)
-                    .ok_or(WireError::Malformed("unknown ActionVerdict tag"))?;
-                ReliableRow::ActionOutcome {
-                    request_id,
-                    verdict,
+            10 => {
+                let state = sim::ObjectiveState::from_u8(input.get_u8()?)
+                    .filter(|s| {
+                        matches!(
+                            s,
+                            sim::ObjectiveState::Active
+                                | sim::ObjectiveState::Current
+                                | sim::ObjectiveState::Done
+                                | sim::ObjectiveState::Failed
+                        )
+                    })
+                    .ok_or(WireError::Malformed("objective update state"))?;
+                let len = input.get_u16()? as usize;
+                if len > 1023 {
+                    return Err(WireError::Malformed("objective update length"));
                 }
+                let mut bytes = vec![0; len];
+                input.get_bytes(&mut bytes)?;
+                let text = String::from_utf8(bytes)
+                    .map_err(|_| WireError::Malformed("objective update text"))?;
+                ReliableRow::Objective(sim::ObjectiveUpdate { state, text })
             }
+            ROW_TAG_EVENT => ReliableRow::Event(decode_event(input)?),
             9 => ReliableRow::ScriptAudio(crate::svc_script_audio::decode_script_audio(input)?),
             2 => {
                 let mut values = crate::svc_sound::decode_svc_sounds(input)?;
@@ -314,31 +286,11 @@ impl ReliableEventHub {
     }
 
     pub fn queue_mut(&mut self, client: sim::ClientId) -> &mut ReliableEventQueue {
-        self.queues
-            .entry(client)
-            .or_insert_with(ReliableEventQueue::new)
+        self.queues.entry(client).or_default()
     }
 
     pub fn push_event(&mut self, client: sim::ClientId, event: SimEvent) -> u16 {
         self.queue_mut(client).push_event(event)
-    }
-
-    pub fn push_outcome(
-        &mut self,
-        client: sim::ClientId,
-        request_id: ActionRequestId,
-        verdict: ActionVerdict,
-    ) -> u16 {
-        let queue = self.queue_mut(client);
-        if let Some((seq, _)) = queue.pending().iter().find(|(_, row)| {
-            *row == ReliableRow::ActionOutcome {
-                request_id,
-                verdict,
-            }
-        }) {
-            return *seq;
-        }
-        queue.push_outcome(request_id, verdict)
     }
 
     pub fn payload(&self, client: sim::ClientId) -> ReliablePayload {

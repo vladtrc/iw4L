@@ -4,11 +4,9 @@ use asset_game::MenuCatalog;
 use bevy::prelude::*;
 use frame::ScopeApp;
 use hud_iw4::*;
-use net::{CEntity, CEntityRuntime, FrameClock, LocalPresentClient, PresentedSnapshot};
+use net::{CEntity, CEntityRuntime, FrameClock};
 
 use std::collections::HashMap;
-
-use crate::gaps::{GapCause, HudGap, HudPresentationGaps};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum OverheadPosedHead {
@@ -16,20 +14,10 @@ pub enum OverheadPosedHead {
     NoDObjOrHead,
 }
 
-#[derive(Resource, Debug, Default)]
-pub struct OverheadPosedPlayerFrame {
-    by_ent: HashMap<u16, OverheadPosedHead>,
-}
-
-impl OverheadPosedPlayerFrame {
-    pub fn replace(&mut self, rows: impl IntoIterator<Item = (u16, OverheadPosedHead)>) {
-        self.by_ent.clear();
-        self.by_ent.extend(rows);
-    }
-
-    fn get(&self, entnum: u16) -> Option<OverheadPosedHead> {
-        self.by_ent.get(&entnum).copied()
-    }
+#[derive(Component, Debug, Default)]
+pub struct OverheadNameState {
+    pub head: Option<OverheadPosedHead>,
+    seen: Option<(i32, i32, bool)>,
 }
 
 #[derive(Resource, Debug, Default)]
@@ -48,12 +36,6 @@ pub struct OverheadPosedPlayerFramePublished;
 
 #[derive(Component)]
 pub(crate) struct OverheadNamesRaster;
-
-#[derive(Default)]
-pub(crate) struct NameMemory {
-    last_time: Option<i32>,
-    seen: HashMap<u16, (i32, i32, bool)>,
-}
 
 #[derive(Clone, Copy, Debug)]
 struct TargetBoxSettings {
@@ -101,7 +83,7 @@ impl TargetBoxSettings {
 
 pub(crate) fn register(app: &mut App) {
     app.scoped::<OverheadPosedModelFrame>(frame::MatchScope::Live)
-        .scoped::<OverheadPosedPlayerFrame>(frame::MatchScope::Live)
+        .add_observer(install_entity_hud)
         .add_systems(
             Update,
             update_overhead_names
@@ -110,7 +92,6 @@ pub(crate) fn register(app: &mut App) {
                 .after(frame::ScreenEffectsPublished)
                 .after(crate::surface::update_hud_surface)
                 .before(crate::plugin::flush_overhead_names_tess)
-                .before(crate::gaps::report_hud_gaps)
                 .in_set(frame::LifeFrontPublished),
         );
 }
@@ -165,329 +146,410 @@ fn aimed_distance(eye: Vec3, forward: Vec3, origin: Vec3, head: Vec3) -> Option<
     (near <= far).then_some(near)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn update_overhead_names(
-    presented: Res<PresentedSnapshot>,
-    local: Res<LocalPresentClient>,
-    posed: Res<OverheadPosedPlayerFrame>,
-    posed_models: Res<OverheadPosedModelFrame>,
-    players: Query<(&CEntity, &CEntityRuntime)>,
-    cg_clock: Res<FrameClock>,
-    surface: Res<crate::surface::Hud2dSurface>,
-    catalog: Option<Res<MenuCatalog>>,
-    cameras: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
-    prediction: Option<Res<net::ClientPredictionState>>,
-    view: Res<frame::ViewSubject>,
-    effects: Res<frame::ScreenEffectsView>,
-    mut pass: ResMut<HudTessPass>,
-    mut memory: Local<NameMemory>,
-    mut target_settings: Local<TargetBoxSettings>,
-    mut gaps: ResMut<HudPresentationGaps>,
-) {
-    pass.overhead_names = TessJob::Hide;
-    gaps.clear(HudGap::OverheadNames);
-    let now = cg_clock.time();
-    if memory.last_time.is_some_and(|last| now < last) {
-        memory.seen.clear();
-    }
-    memory.last_time = Some(now);
-    let Some(snapshot) = presented.snapshot() else {
-        *target_settings = TargetBoxSettings::default();
-        memory.seen.clear();
-        return;
-    };
-    target_settings.update(local.0, snapshot.meta.script_dvars(local.0));
-    if !surface.is_ready() {
-        memory.seen.clear();
-        return;
-    }
-    let Some(ps) = presented.player(local.0) else {
-        memory.seen.clear();
-        return;
-    };
-    if ps.other_flags & 0x10 != 0 {
-        memory.seen.clear();
-        let dvars = snapshot.meta.script_dvars(local.0);
-        if matches!(ps.pm_type, 5 | 6)
-            || (view.in_killcam() && (!effects.ready || effects.default_killcam_view))
-            || dvars.int("cg_draw2D") == Some(0)
-            || dvars.int("net_showprofile").is_some_and(|value| value != 0)
+#[derive(bevy::ecs::system::SystemParam)]
+struct OverheadNameDisplay<'w, 's> {
+    slots: Res<'w, net::CEntitySlots>,
+    posed_models: Res<'w, OverheadPosedModelFrame>,
+    players: Query<'w, 's, (&'static CEntity, &'static CEntityRuntime)>,
+    cg_clock: Res<'w, FrameClock>,
+    catalog: Option<Res<'w, MenuCatalog>>,
+    strings: Option<Res<'w, assets::PreparedLocalizedStrings>>,
+    collision: Option<Res<'w, net::ClientCollision>>,
+    pass: ResMut<'w, HudTessPass>,
+    names: Query<'w, 's, &'static mut OverheadNameState>,
+    target_settings: Local<'s, TargetBoxSettings>,
+}
+
+impl OverheadNameDisplay<'_, '_> {
+    fn update(
+        &mut self,
+        presentation: net::LocalPresentation,
+        surface: Res<crate::surface::Hud2dSurface>,
+        cameras: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
+        view: Res<frame::ViewSubject>,
+        effects: Res<frame::ScreenEffectsView>,
+    ) {
+        self.pass.overhead_names = TessJob::Hide;
+
+        let now = self.cg_clock.time();
+        let Some(snapshot) = presentation.snapshot() else {
+            *self.target_settings = TargetBoxSettings::default();
+            for mut name in &mut self.names {
+                name.seen = None;
+            }
+            return;
+        };
+        self.target_settings.update(
+            presentation.client_id(),
+            snapshot.meta.script_dvars(presentation.client_id()),
+        );
+        if !surface.is_ready() {
+            for mut name in &mut self.names {
+                name.seen = None;
+            }
+            return;
+        }
+        let Some(ps) = presentation.player() else {
+            for mut name in &mut self.names {
+                name.seen = None;
+            }
+            return;
+        };
+        if let Some(overlay) = snapshot
+            .meta
+            .for_client(presentation.client_id())
+            .and_then(|meta| meta.actor_overlay.as_ref())
         {
+            let dvars = snapshot.meta.script_dvars(presentation.client_id());
+            let hidden = view.in_killcam()
+                || presentation.alive_player().is_none()
+                || dvars.int("cg_paused").is_some_and(|v| v != 0)
+                || dvars.int("hud_missionfailed").is_some_and(|v| v != 0)
+                || dvars.int("cg_draw2d") == Some(0)
+                || is_flashbanged(
+                    now,
+                    ps.shellshock_time,
+                    ps.shellshock_duration,
+                    presentation
+                        .shellshock()
+                        .map_or(SCREEN_BLEND_BLURRED, |shock| shock.screen_type),
+                ) != 0;
+            if !hidden && let Some(catalog) = self.catalog.as_deref() {
+                self.pass.overhead_names = crate::actor_overlay::draw(
+                    overlay,
+                    dvars,
+                    &surface,
+                    catalog,
+                    self.strings.as_deref(),
+                );
+            }
+            return;
+        }
+        if ps.other_flags & 0x10 != 0 {
+            for mut name in &mut self.names {
+                name.seen = None;
+            }
+            let dvars = snapshot.meta.script_dvars(presentation.client_id());
+            if matches!(ps.pm_type, 5 | 6)
+                || (view.in_killcam() && (!effects.ready || effects.default_killcam_view))
+                || dvars.int("cg_draw2D") == Some(0)
+                || dvars.int("net_showprofile").is_some_and(|value| value != 0)
+            {
+                return;
+            }
+            let Some((camera, transform)) = cameras.iter().find(|(c, _)| c.is_active) else {
+                return;
+            };
+            let mut quads = thermal_target_quads(
+                snapshot,
+                presentation.client_id(),
+                now,
+                &surface,
+                (camera, transform),
+                &self.players,
+                &self.target_settings,
+            );
+            quads.extend(vehicle_target_quads(
+                snapshot,
+                presentation.client_id(),
+                &surface,
+                (camera, transform),
+                &self.players,
+                &self.posed_models,
+                &self.target_settings,
+            ));
+            if !quads.is_empty() {
+                self.pass.overhead_names = TessJob::Quads(quads);
+            }
+            return;
+        }
+        if view.in_killcam() || presentation.alive_player().is_none() {
+            for mut name in &mut self.names {
+                name.seen = None;
+            }
+            return;
+        }
+        let Some(local_meta) = snapshot.meta.for_client(presentation.client_id()) else {
+            return;
+        };
+        if is_flashbanged(
+            now,
+            ps.shellshock_time,
+            ps.shellshock_duration,
+            presentation
+                .shellshock()
+                .map_or(SCREEN_BLEND_BLURRED, |shock| shock.screen_type),
+        ) != 0
+        {
+            for mut name in &mut self.names {
+                name.seen = None;
+            }
             return;
         }
         let Some((camera, transform)) = cameras.iter().find(|(c, _)| c.is_active) else {
             return;
         };
-        let mut quads = thermal_target_quads(
-            snapshot,
-            local.0,
-            now,
-            &surface,
-            (camera, transform),
-            &players,
-            &target_settings,
-        );
-        quads.extend(vehicle_target_quads(
-            snapshot,
-            local.0,
-            &surface,
-            (camera, transform),
-            &players,
-            &posed_models,
-            &target_settings,
-        ));
-        if !quads.is_empty() {
-            pass.overhead_names = TessJob::Quads(quads);
-        }
-        return;
-    }
-    if view.in_killcam() || presented.alive_player(local.0).is_none() {
-        memory.seen.clear();
-        return;
-    }
-    let Some(local_meta) = snapshot.meta.for_client(local.0) else {
-        return;
-    };
-    if is_flashbanged(
-        now,
-        ps.shellshock_time,
-        ps.shellshock_duration,
-        presented
-            .shellshock(local.0)
-            .map_or(SCREEN_BLEND_BLURRED, |shock| shock.screen_type),
-    ) != 0
-    {
-        memory.seen.clear();
-        return;
-    }
-    let Some((camera, transform)) = cameras.iter().find(|(c, _)| c.is_active) else {
-        return;
-    };
-    let Some(world) = prediction
-        .as_ref()
-        .filter(|p| p.0.is_armed() && p.0.world().has_world_clip())
-        .map(|p| p.0.world())
-    else {
-        gaps.raise(GapCause::OverheadVisibilityUnavailable);
-        return;
-    };
-    let font_name = ui_get_font_handle(2, surface.scale_virtual_to_real()[1], 1.0);
-    let Some(font) = catalog.as_ref().and_then(|c| c.font(font_name)) else {
-        gaps.raise(GapCause::OverheadFontUnavailable);
-        return;
-    };
-    let eye = transform.translation();
-    let forward = *transform.forward();
-    let mut candidates = Vec::new();
-    for (identity, runtime) in &players {
-        if !runtime.in_next_snap()
-            || runtime.next_state.e_type != entity_iw4::ET_PLAYER
-            || (runtime.next_state.e_flags & (0x20 | 0x20000)) != 0
-        {
-            continue;
-        }
-        let Some(client) = identity.client() else {
-            continue;
+        let Some(world) = self
+            .collision
+            .as_ref()
+            .filter(|scene| scene.0.has_world_clip())
+            .map(|scene| &scene.0)
+        else {
+            diag::warn_once!(Ui, "client point trace or FX visibility is unavailable");
+            return;
         };
-        if client == local.0 {
-            continue;
-        }
-        let Some(meta) = snapshot.meta.for_client(client) else {
-            continue;
+        let font_name = ui_get_font_handle(2, surface.scale_virtual_to_real()[1], 1.0);
+        let Some(font) = self.catalog.as_ref().and_then(|c| c.font(font_name)) else {
+            diag::warn_once!(Ui, "fonts/hudsmallfont or its atlas is unavailable");
+            return;
         };
-        if meta.lifecycle != sim::ClientLifecycle::Alive {
-            continue;
-        }
-        let enemy = local_meta.client_state_team == 0
-            || local_meta.client_state_team != meta.client_state_team;
-        if enemy
-            && snapshot
-                .players
-                .iter()
-                .any(|(id, ps)| *id == client && ps.perks[1] & playerstate_iw4::PERK1_SPYGAME != 0)
-        {
-            continue;
-        }
-        let Some(name) = entity_iw4::client_state_name(&meta.name) else {
-            continue;
-        };
-        let origin = Vec3::from_array(runtime.origin);
-        let head = match posed.get(identity.number()) {
-            Some(OverheadPosedHead::ExactWorld(head)) => Vec3::from_array(head),
-            Some(OverheadPosedHead::NoDObjOrHead) => {
-                origin + Vec3::Z * (OVERHEAD_ORIGIN_FALLBACK_Z - OVERHEAD_HEAD_LIFT)
-            }
-            None => {
-                gaps.raise(GapCause::OverheadHeadUnavailable {
-                    entnum: identity.number(),
-                });
+        let eye = transform.translation();
+        let forward = *transform.forward();
+        let mut candidates = Vec::new();
+        for (identity, runtime) in &self.players {
+            if !runtime.in_next_snap()
+                || runtime.next_state.e_type != entity_iw4::ET_PLAYER
+                || (runtime.next_state.e_flags & (0x20 | 0x20000)) != 0
+            {
                 continue;
             }
-        };
-        if eye.distance_squared(head) > OVERHEAD_MAX_DISTANCE_DEFAULT.powi(2) {
-            continue;
-        }
-        let anchor = head + Vec3::Z * OVERHEAD_HEAD_LIFT;
-        let Ok(pixel) = camera.world_to_viewport(transform, anchor) else {
-            continue;
-        };
-        if !pixel.is_finite()
-            || pixel.x < 0.0
-            || pixel.y < 0.0
-            || pixel.x > surface.width()
-            || pixel.y > surface.height()
-        {
-            continue;
-        }
-        let hit = world.trace_world(
-            eye.to_array(),
-            head.to_array(),
-            [0.0; 3],
-            [0.0; 3],
-            OVERHEAD_TRACE_MASK,
-        );
-        let visible = hit.fraction >= 1.0 && hit.startsolid == 0;
-        let aim = aimed_distance(eye, forward, origin, head).filter(|_| visible);
-        candidates.push((
-            identity.number(),
-            meta.client_state_team,
-            plain_name(name),
-            anchor,
-            pixel,
-            visible,
-            aim,
-            (meta.rank, meta.prestige, client),
-        ));
-    }
-    let aimed = candidates
-        .iter()
-        .filter_map(|c| c.6.map(|d| (c.0, d)))
-        .min_by(|a, b| a.1.total_cmp(&b.1))
-        .map(|c| c.0);
-    memory
-        .seen
-        .retain(|ent, _| candidates.iter().any(|c| c.0 == *ent));
-    let mut list = Draw2dList::default();
-    for (ent, team, name, anchor, pixel, visible, _, (rank, prestige, client)) in candidates {
-        let friendly = local_meta.client_state_team != 0 && local_meta.client_state_team == team;
-        let active = visible && (friendly || aimed == Some(ent));
-        if active {
-            let seen = memory.seen.entry(ent).or_insert((now, now, friendly));
-            if seen.2 != friendly {
-                *seen = (now, now, friendly);
+            let Some(client) = identity.client() else {
+                continue;
+            };
+            if client == presentation.client_id() {
+                continue;
             }
-            seen.1 = now;
-        }
-        let Some(&(start, last, was_friendly)) = memory.seen.get(&ent) else {
-            continue;
-        };
-        if was_friendly != friendly {
-            memory.seen.remove(&ent);
-            continue;
-        }
-        let fade = if friendly {
-            FRIENDLY_NAME_FADE_OUT_DEFAULT_MS
-        } else {
-            ENEMY_NAME_FADE_MS
-        };
-        if now.wrapping_sub(last) >= fade {
-            memory.seen.remove(&ent);
-            continue;
-        }
-        let alpha = overhead_fade_alpha(
-            now,
-            start,
-            last,
-            if friendly { 0 } else { ENEMY_NAME_FADE_MS },
-            fade,
-        );
-        if alpha <= 0.0 {
-            continue;
-        }
-        let distance = overhead_distance_scale(
-            eye.to_array(),
-            anchor.to_array(),
-            OVERHEAD_NEAR_DISTANCE_DEFAULT,
-            OVERHEAD_FAR_DISTANCE_DEFAULT,
-            OVERHEAD_FAR_SCALE_DEFAULT,
-        );
-        let scale = normalized_text_scale(font.pixel_height, OVERHEAD_NAME_SIZE_DEFAULT * distance);
-        let rank_scale =
-            normalized_text_scale(font.pixel_height, OVERHEAD_RANK_SIZE_DEFAULT * distance);
-        let x = (pixel.x - crate::chrome::text_width(font, &name) as f32 * scale * 0.5).round();
-        let mut color = name_color(local_meta.client_state_team, team);
-        color[3] = alpha;
-        let mut text_runs = vec![(name, x, pixel.y.round(), scale, color)];
-        if let Some((icon, level)) = catalog
-            .as_ref()
-            .and_then(|c| rank_presentation(c, rank, prestige))
-        {
-            let text_size = font.pixel_height as f32 * scale;
-            let icon_size = OVERHEAD_ICON_SIZE_DEFAULT * text_size;
-            let level_width = crate::chrome::text_width(font, level) as f32 * rank_scale;
-            let icon_x = x - level_width - icon_size - 2.0 * distance;
-            list.cmds.push(Draw2dCmd {
-                x: icon_x,
-                y: pixel.y.round() - (icon_size + text_size) * 0.5,
-                w: icon_size,
-                h: icon_size,
-                s0: 0.0,
-                t0: 0.0,
-                s1: 1.0,
-                t1: 1.0,
-                color: [1.0, 1.0, 1.0, alpha],
-                material: icon.to_owned(),
-                material_namespace: crate::images::HUD_CHROME_NAMESPACE,
-                op: Draw2dOp::StretchPic,
-                provenance: Draw2dProvenance::CgDraw {
-                    site: "overhead_names",
-                },
-                layer: 1,
-            });
-            text_runs.push((
-                level.to_owned(),
-                icon_x + icon_size,
-                pixel.y.round() + font.pixel_height as f32 * rank_scale * 0.25,
-                rank_scale,
-                [1.0, 1.0, 1.0, alpha],
+            let Some(meta) = snapshot.meta.for_client(client) else {
+                continue;
+            };
+            if meta.lifecycle != sim::ClientLifecycle::Alive {
+                continue;
+            }
+            let enemy = local_meta.client_state_team == 0
+                || local_meta.client_state_team != meta.client_state_team;
+            if enemy
+                && snapshot.players.iter().any(|(id, ps)| {
+                    *id == client && ps.perks[1] & playerstate_iw4::PERK1_SPYGAME != 0
+                })
+            {
+                continue;
+            }
+            let Some(name) = entity_iw4::client_state_name(&meta.name) else {
+                continue;
+            };
+            let origin = Vec3::from_array(runtime.origin);
+            let entity = self.slots.entity_for_number(identity.number());
+            let head = match entity
+                .and_then(|entity| self.names.get(entity).ok())
+                .and_then(|state| state.head)
+            {
+                Some(OverheadPosedHead::ExactWorld(head)) => Vec3::from_array(head),
+                Some(OverheadPosedHead::NoDObjOrHead) => {
+                    origin + Vec3::Z * (OVERHEAD_ORIGIN_FALLBACK_Z - OVERHEAD_HEAD_LIFT)
+                }
+                None => {
+                    diag::warn_once!(
+                        Ui,
+                        "entity {entnum} has no same-Present posed-head product",
+                        entnum = identity.number()
+                    );
+                    continue;
+                }
+            };
+            if eye.distance_squared(head) > OVERHEAD_MAX_DISTANCE_DEFAULT.powi(2) {
+                continue;
+            }
+            let anchor = head + Vec3::Z * OVERHEAD_HEAD_LIFT;
+            let Ok(pixel) = camera.world_to_viewport(transform, anchor) else {
+                continue;
+            };
+            if !pixel.is_finite()
+                || pixel.x < 0.0
+                || pixel.y < 0.0
+                || pixel.x > surface.width()
+                || pixel.y > surface.height()
+            {
+                continue;
+            }
+            let hit = world.trace_world(
+                eye.to_array(),
+                head.to_array(),
+                [0.0; 3],
+                [0.0; 3],
+                OVERHEAD_TRACE_MASK,
+            );
+            let visible = hit.fraction >= 1.0 && hit.startsolid == 0;
+            let aim = aimed_distance(eye, forward, origin, head).filter(|_| visible);
+            candidates.push((
+                identity.number(),
+                meta.client_state_team,
+                plain_name(name),
+                anchor,
+                pixel,
+                visible,
+                aim,
+                (meta.rank, meta.prestige, client),
             ));
-        } else {
-            gaps.raise(GapCause::OverheadRankUnavailable { client: client.0 });
         }
-        for (text, x, y, scale, color) in text_runs {
-            list.cmds.push(Draw2dCmd {
-                x,
-                y,
-                w: scale,
-                h: scale,
-                s0: 0.0,
-                t0: 0.0,
-                s1: 1.0,
-                t1: 1.0,
-                color,
-                material: asset_core::AssetRef::bare_name(&font.material).to_owned(),
-                material_namespace: crate::images::HUD_CHROME_NAMESPACE,
-                op: Draw2dOp::TextRun {
-                    font: font_name.to_owned(),
-                    scale,
-                    text,
-                    loc_key: String::new(),
-                    style: 3,
-                    fx: None,
-                    glow: None,
-                },
-                provenance: Draw2dProvenance::CgDraw {
-                    site: "overhead_names",
-                },
-                layer: 1,
-            });
+        let aimed = candidates
+            .iter()
+            .filter_map(|c| c.6.map(|d| (c.0, d)))
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|c| c.0);
+        for (identity, _) in &self.players {
+            if !candidates.iter().any(|c| c.0 == identity.number())
+                && let Some(entity) = self.slots.entity_for_number(identity.number())
+                && let Ok(mut state) = self.names.get_mut(entity)
+            {
+                state.seen = None;
+            }
+        }
+        let mut list = Draw2dList::default();
+        for (ent, team, name, anchor, pixel, visible, _, (rank, prestige, client)) in candidates {
+            let Some(entity) = self.slots.entity_for_number(ent) else {
+                continue;
+            };
+            let Ok(mut state) = self.names.get_mut(entity) else {
+                continue;
+            };
+            let friendly =
+                local_meta.client_state_team != 0 && local_meta.client_state_team == team;
+            let active = visible && (friendly || aimed == Some(ent));
+            if active {
+                let seen = state.seen.get_or_insert((now, now, friendly));
+                if seen.2 != friendly {
+                    *seen = (now, now, friendly);
+                }
+                seen.1 = now;
+            }
+            let Some((start, last, was_friendly)) = state.seen else {
+                continue;
+            };
+            if was_friendly != friendly {
+                state.seen = None;
+                continue;
+            }
+            let fade = if friendly {
+                FRIENDLY_NAME_FADE_OUT_DEFAULT_MS
+            } else {
+                ENEMY_NAME_FADE_MS
+            };
+            if now.wrapping_sub(last) >= fade {
+                state.seen = None;
+                continue;
+            }
+            let alpha = overhead_fade_alpha(
+                now,
+                start,
+                last,
+                if friendly { 0 } else { ENEMY_NAME_FADE_MS },
+                fade,
+            );
+            if alpha <= 0.0 {
+                continue;
+            }
+            let distance = overhead_distance_scale(
+                eye.to_array(),
+                anchor.to_array(),
+                OVERHEAD_NEAR_DISTANCE_DEFAULT,
+                OVERHEAD_FAR_DISTANCE_DEFAULT,
+                OVERHEAD_FAR_SCALE_DEFAULT,
+            );
+            let scale =
+                normalized_text_scale(font.pixel_height, OVERHEAD_NAME_SIZE_DEFAULT * distance);
+            let rank_scale =
+                normalized_text_scale(font.pixel_height, OVERHEAD_RANK_SIZE_DEFAULT * distance);
+            let x = (pixel.x - crate::chrome::text_width(font, &name) as f32 * scale * 0.5).round();
+            let mut color = name_color(local_meta.client_state_team, team);
+            color[3] = alpha;
+            let mut text_runs = vec![(name, x, pixel.y.round(), scale, color)];
+            if let Some((icon, level)) = self
+                .catalog
+                .as_ref()
+                .and_then(|c| rank_presentation(c, rank, prestige))
+            {
+                let text_size = font.pixel_height as f32 * scale;
+                let icon_size = OVERHEAD_ICON_SIZE_DEFAULT * text_size;
+                let level_width = crate::chrome::text_width(font, level) as f32 * rank_scale;
+                let icon_x = x - level_width - icon_size - 2.0 * distance;
+                list.cmds.push(Draw2dCmd {
+                    x: icon_x,
+                    y: pixel.y.round() - (icon_size + text_size) * 0.5,
+                    w: icon_size,
+                    h: icon_size,
+                    s0: 0.0,
+                    t0: 0.0,
+                    s1: 1.0,
+                    t1: 1.0,
+                    color: [1.0, 1.0, 1.0, alpha],
+                    material: icon.to_owned(),
+                    material_namespace: crate::images::HUD_CHROME_NAMESPACE,
+                    op: Draw2dOp::StretchPic,
+                    provenance: Draw2dProvenance::CgDraw {
+                        site: "overhead_names",
+                    },
+                    layer: 1,
+                });
+                text_runs.push((
+                    level.to_owned(),
+                    icon_x + icon_size,
+                    pixel.y.round() + font.pixel_height as f32 * rank_scale * 0.25,
+                    rank_scale,
+                    [1.0, 1.0, 1.0, alpha],
+                ));
+            } else {
+                diag::warn_once!(
+                    Ui,
+                    "rank/prestige presentation for client {client} is unavailable",
+                    client = client.0
+                );
+            }
+            for (text, x, y, scale, color) in text_runs {
+                list.cmds.push(Draw2dCmd {
+                    x,
+                    y,
+                    w: scale,
+                    h: scale,
+                    s0: 0.0,
+                    t0: 0.0,
+                    s1: 1.0,
+                    t1: 1.0,
+                    color,
+                    material: asset_core::AssetRef::bare_name(&font.material).to_owned(),
+                    material_namespace: crate::images::HUD_CHROME_NAMESPACE,
+                    op: Draw2dOp::TextRun {
+                        font: font_name.to_owned(),
+                        scale,
+                        text,
+                        loc_key: String::new(),
+                        style: 3,
+                        fx: None,
+                        glow: None,
+                    },
+                    provenance: Draw2dProvenance::CgDraw {
+                        site: "overhead_names",
+                    },
+                    layer: 1,
+                });
+            }
+        }
+        let fonts = HashMap::from([(font_name.to_owned(), font)]);
+        let (quads, _) = tessellate_fonts(&list, &fonts);
+        if !quads.is_empty() {
+            self.pass.overhead_names = TessJob::Quads(quads);
         }
     }
-    let fonts = HashMap::from([(font_name.to_owned(), font)]);
-    let (quads, _) = tessellate_fonts(&list, &fonts);
-    if !quads.is_empty() {
-        pass.overhead_names = TessJob::Quads(quads);
-    }
+}
+
+fn update_overhead_names(
+    presentation: net::LocalPresentation,
+    surface: Res<crate::surface::Hud2dSurface>,
+    cameras: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
+    view: Res<frame::ViewSubject>,
+    effects: Res<frame::ScreenEffectsView>,
+    mut display: OverheadNameDisplay,
+) {
+    display.update(presentation, surface, cameras, view, effects);
 }
 
 pub(crate) fn rank_presentation(
@@ -681,4 +743,11 @@ fn vehicle_target_quads(
         });
     }
     quads
+}
+
+fn install_entity_hud(event: On<Add<CEntity>>, mut commands: Commands) {
+    commands.entity(event.entity).insert((
+        OverheadNameState::default(),
+        crate::compass::CompassPing::default(),
+    ));
 }

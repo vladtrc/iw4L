@@ -68,6 +68,9 @@ pub struct LaunchIdentity {
     pub zone: String,
 }
 
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct MatchRuntimeProfile(pub asset_core::RuntimeProfile);
+
 #[derive(Resource, Clone, Debug)]
 pub struct LaunchReport {
     pub zone: String,
@@ -75,7 +78,7 @@ pub struct LaunchReport {
     pub zone_ff: Result<PathBuf, String>,
 
     pub zone_alias: Option<String>,
-    pub sim_gap: &'static str,
+    pub sim_gap: String,
 
     pub prediction_metrics: Option<String>,
     pub world_report: Vec<String>,
@@ -88,7 +91,7 @@ impl Default for LaunchReport {
             common_mp: Err("not requested".into()),
             zone_ff: Err("not requested".into()),
             zone_alias: None,
-            sim_gap: "no map load yet",
+            sim_gap: "no map load yet".into(),
             prediction_metrics: None,
             world_report: Vec::new(),
         }
@@ -134,49 +137,6 @@ pub struct ClassSelectHandoff {
     pub lock_reasons: Vec<Option<String>>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub struct WorldStamp(pub Option<u64>);
-
-#[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
-pub struct WorldGeneration {
-    id: std::num::NonZeroU64,
-    stamp: WorldStamp,
-}
-impl WorldGeneration {
-    pub fn from_install(request_id: u64) -> Self {
-        Self {
-            id: std::num::NonZeroU64::new(
-                request_id
-                    .checked_add(1)
-                    .expect("match generation exhausted"),
-            )
-            .unwrap(),
-            stamp: WorldStamp(Some(request_id)),
-        }
-    }
-    pub fn id(self) -> std::num::NonZeroU64 {
-        self.id
-    }
-    pub fn stamp(self) -> WorldStamp {
-        self.stamp
-    }
-}
-impl std::ops::Deref for WorldGeneration {
-    type Target = WorldStamp;
-    fn deref(&self) -> &WorldStamp {
-        &self.stamp
-    }
-}
-
-impl WorldStamp {
-    pub fn stamp(self) -> Self {
-        self
-    }
-    pub fn from_install(request_id: u64) -> Self {
-        Self(Some(request_id))
-    }
-}
-
 #[derive(Resource, Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct WorldProducts(pub Option<u64>);
 
@@ -215,46 +175,6 @@ impl MatchKey {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub struct LocalLoadKey {
-    pub incarnation: u64,
-    pub match_key: MatchKey,
-    pub local_load_request_id: u64,
-}
-
-impl LocalLoadKey {
-    pub fn from_request(request_id: u64, match_key: MatchKey, incarnation: u64) -> Self {
-        Self {
-            incarnation,
-            match_key,
-            local_load_request_id: request_id,
-        }
-    }
-
-    pub fn belongs_to(self, match_key: MatchKey) -> bool {
-        !match_key.is_none() && self.match_key == match_key
-    }
-
-    pub fn matches_completion(self, other: Self) -> bool {
-        self == other
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct PresentationContext {
-    pub installation: LocalLoadKey,
-    pub timeline: u64,
-}
-
-impl PresentationContext {
-    pub fn new(installation: LocalLoadKey, timeline: u64) -> Self {
-        Self {
-            installation,
-            timeline,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct AdmissionKey {
     pub match_key: MatchKey,
     pub member_id: [u8; 16],
@@ -264,9 +184,7 @@ pub struct AdmissionKey {
 
 #[derive(Resource, Clone, Debug, PartialEq, Eq)]
 pub struct InstalledMatch {
-    pub request_id: u64,
-
-    pub load_key: LocalLoadKey,
+    pub match_key: MatchKey,
 
     pub zone: String,
 
@@ -275,15 +193,13 @@ pub struct InstalledMatch {
 
 #[derive(Message, Clone, Debug, PartialEq, Eq)]
 pub struct MapLoadApproved {
-    pub request_id: u64,
-    pub load_key: LocalLoadKey,
+    pub match_key: MatchKey,
     pub zone: String,
 }
 
 #[derive(Message, Clone, Debug, PartialEq, Eq)]
 pub struct MapLoadFailed {
-    pub request_id: u64,
-    pub load_key: LocalLoadKey,
+    pub match_key: MatchKey,
     pub zone: String,
     pub error: String,
 }
@@ -400,13 +316,7 @@ pub struct HudInputView {
 }
 
 #[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct LocalSpawnArmed(pub WorldStamp);
-
-impl LocalSpawnArmed {
-    pub fn armed_for(self, generation: WorldStamp) -> bool {
-        generation.0.is_some() && self.0 == generation
-    }
-}
+pub struct LocalSpawnArmed(pub bool);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ReadinessState {
@@ -419,25 +329,20 @@ pub enum ReadinessState {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct WorldReadiness {
-    pub generation: WorldStamp,
     pub state: ReadinessState,
 }
 
 impl WorldReadiness {
-    pub fn new(generation: WorldStamp, state: ReadinessState) -> Self {
-        Self { generation, state }
+    pub fn new(state: ReadinessState) -> Self {
+        Self { state }
     }
 
-    pub fn ready_for(self, generation: WorldStamp) -> bool {
-        generation.0.is_some()
-            && self.generation == generation
-            && matches!(self.state, ReadinessState::Ready | ReadinessState::Silent)
+    pub fn is_ready(self) -> bool {
+        matches!(self.state, ReadinessState::Ready | ReadinessState::Silent)
     }
 
-    pub fn failed_for(self, generation: WorldStamp) -> bool {
-        generation.0.is_some()
-            && self.generation == generation
-            && self.state == ReadinessState::Failed
+    pub fn is_failed(self) -> bool {
+        self.state == ReadinessState::Failed
     }
 }
 

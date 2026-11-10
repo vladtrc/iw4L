@@ -109,6 +109,14 @@ pub fn phases(map_b: &str, scenes_a: &[ResolvedScene], scenes_b: &[ResolvedScene
     ));
     out.push(captured("capture_round", "01c_after_round_restart"));
     out.push(Phase::new(
+        "a.audio_pressure",
+        vec![
+            "sound iw4:ui_mp_timer_countdown 8192".into(),
+            "wait 4t".into(),
+        ],
+    ));
+    out.push(captured("capture_audio", "01d_audio_pressure"));
+    out.push(Phase::new(
         "disconnect",
         vec!["disconnect".into(), "wait torn".into()],
     ));

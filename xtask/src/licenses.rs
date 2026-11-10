@@ -12,7 +12,7 @@ fn generate(root: &Path) -> Res<String> {
         Command::new("cargo")
             .current_dir(root)
             .args(["about", "generate", "--locked", "--fail"])
-            .args(["-m", "crates/launcher/Cargo.toml"])
+            .args(["-m", "apps/launcher/Cargo.toml"])
             .args(["-c", "xtask/about/about.toml"])
             .arg("xtask/about/licenses.hbs"),
     )

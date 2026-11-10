@@ -2,7 +2,7 @@
 
 `asset_game::WeaponCatalog` captures source rows. `WeaponBuild` links dependencies and publishes immutable effective rows, semantic policies and consumer projections.
 `weapon_catalog/{capture_merge,catalog_linking,model_linking,publication}` own
-those operations; `configuration/{iw4,iw5,t5,t6}` own source selection rules.
+those operations; installed `WeaponFamilyPolicy` values own source selection rules.
 
 `WeaponFamilies` normalizes selections and checks attachments and host limits.
 Frontend loadout publication defers map-selected hands admission; matches validate soldiers and skeletons. Saved class previews include unavailable captured families.
@@ -35,8 +35,8 @@ rows never inherit another family's row. Publication retains captured family.
 
 The map selects the soldier kit and hands family. Weapon-authored hands are
 eligible only for that family. FPV composition validates typed native model
-pairs; T6 guns additionally admit an explicit `T6WithIw4Hands` connection for
-IW4 soldiers. Catalog owners must match. Unsupported family pairs refuse.
+pairs through `SoldierFpvConnection<G, H>`; same-family composition uses
+`NativeFpvConnection<F>`. Catalog owners must match. Unsupported family pairs refuse.
 
 `FpvWeaponTable::bind` checks registry, mesh, clip, material, image and atlas owners
 before accepting handles and alternate links. Retained compositions validate model

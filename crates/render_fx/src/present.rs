@@ -7,25 +7,25 @@ use asset_game::{FxDefinitions, FxName, OwnedFxEffectDef};
 use bevy::tasks::ComputeTaskPool;
 use fx::{
     FX_CATALOG_INDEX_NONE, FxBoltTarget, FxChildKind, FxCloudInstance, FxDrawElemContext,
-    FxDrawTrailContext, FxDrawTrailSampleContext, FxEffectDefInfo, FxElemDefInfo,
-    FxElemLightInstance, FxElemMotionResult, FxElemTraceHit, FxGapCause, FxGenerateVertsOut,
+    FxDrawTrailContext, FxDrawTrailSampleContext, FxEffectDefInfo, FxElemCollision, FxElemDefInfo,
+    FxElemLightInstance, FxElemMotion, FxElemMotionResult, FxElemTraceHit, FxGenerateVertsOut,
     FxModelInstance, FxPackedLightingSrc, FxPlayPose, FxPlayRequest, FxSparkDrawQuery,
     FxSparkFillQuery, FxSparkFillVisual, FxSpriteInstance, FxSystemHost, FxTrailCollideHit,
     FxTrailDrawDef, FxTrailSampleVisual, PendingCollide, PlayResult, axis_from_hit_normal,
-    evaluate_elem_collide_motion, evaluate_elem_motion, evaluate_elem_physics_motion,
-    generate_verts_with_trails, play_bolted, play_oriented, spawn_impact_or_death_effect,
-    spawn_looping_partial, spawn_oriented, update as fx_update,
+    evaluate_elem_physics_motion, generate_verts_with_trails, play_bolted, play_oriented,
+    spawn_impact_or_death_effect, spawn_looping_partial, spawn_oriented, update as fx_update,
 };
 use fx_iw4::{
     FX_ELEM_AT_REST_NONE, FX_ELEM_ATLAS_OFF, FX_ELEM_ATLAS_SIZE, FxElemType, FxRandomChannel,
-    apply_lighting_frac_bgra, build_cloud, clamp_elem_rotation_time, cull_cloud, cull_elem_light,
+    apply_lighting_frac_bgra, build_cloud, clamp_elem_rotation_time, cull_elem_sphere,
     effect_def_needs_lighting_sample, elem_light_color_rgb, elem_uses_lighting_frac,
     evaluate_rotation_total, evaluate_scale, evaluate_size0, evaluate_size1, get_elem_angles_axis,
-    get_velocity_at_time, msec_for_sampling_axis, sample_f32, sprite_atlas_uv, vec3_normalize,
-    vis_blocker_add_prepared,
+    msec_for_sampling_axis, sample_f32, sprite_atlas_uv, vec3_normalize,
 };
 use math_iw4::angle_vectors;
-use sim::SimWorld;
+use sim::CollisionScene;
+
+type VisibilityBlockerAdds = RefCell<Vec<(i32, [f32; 3], f32, u8, fx_iw4::FxDistanceFade)>>;
 
 pub trait FxScene {
     fn sample_atpoint_rgb(&self, origin: [f32; 3]) -> Option<[u8; 3]>;
@@ -287,20 +287,24 @@ pub fn play_named_oriented_in_world(
     world: Option<&dyn FxScene>,
 ) -> Option<PlayResult> {
     let msec = host.msec_now;
-    let result = play_named_at(host, catalog, cache, name, origin, axis, msec, world)?;
+    let result = play_named_at(
+        host,
+        catalog,
+        cache,
+        name,
+        FxPlayPose { origin, axis, msec },
+        world,
+    )?;
     drain_spawn_side_effects(host, catalog, cache, world);
     Some(result)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn spawn_named_oriented_in_world(
     host: &mut FxSystemHost,
     catalog: &FxDefinitions,
     cache: &FxElemInfoCache,
     name: FxName<'_>,
-    origin: [f32; 3],
-    axis: [[f32; 3]; 3],
-    msec: i32,
+    pose: FxPlayPose,
     world: Option<&dyn FxScene>,
 ) -> Option<PlayResult> {
     let effect = name.resolve(catalog)?;
@@ -309,7 +313,7 @@ pub fn spawn_named_oriented_in_world(
         host,
         FxPlayRequest {
             def_name: effect.name.as_str(),
-            pose: FxPlayPose { origin, axis, msec },
+            pose,
             wants_spotlight: false,
             catalog_index: catalog_index_of(catalog, effect),
             def: Some(def_info(effect, &elem_infos)),
@@ -320,18 +324,15 @@ pub fn spawn_named_oriented_in_world(
     Some(result)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn play_named_oriented_at_msec(
     host: &mut FxSystemHost,
     catalog: &FxDefinitions,
     cache: &FxElemInfoCache,
     name: FxName<'_>,
-    origin: [f32; 3],
-    axis: [[f32; 3]; 3],
-    msec: i32,
+    pose: FxPlayPose,
     world: Option<&dyn FxScene>,
 ) -> Option<PlayResult> {
-    let result = play_named_at(host, catalog, cache, name, origin, axis, msec, world)?;
+    let result = play_named_at(host, catalog, cache, name, pose, world)?;
     drain_spawn_side_effects(host, catalog, cache, world);
     Some(result)
 }
@@ -371,9 +372,7 @@ fn play_named_at(
     catalog: &FxDefinitions,
     cache: &FxElemInfoCache,
     name: FxName<'_>,
-    origin: [f32; 3],
-    axis: [[f32; 3]; 3],
-    msec: i32,
+    pose: FxPlayPose,
     world: Option<&dyn FxScene>,
 ) -> Option<PlayResult> {
     let effect = name.resolve(catalog)?;
@@ -383,7 +382,7 @@ fn play_named_at(
         host,
         FxPlayRequest {
             def_name: effect.name.as_str(),
-            pose: FxPlayPose { origin, axis, msec },
+            pose,
             wants_spotlight: false,
             catalog_index: catalog_index_of(catalog, effect),
             def: Some(def_info(effect, &elem_infos)),
@@ -434,9 +433,11 @@ pub fn drain_spawn_runners(
                 catalog,
                 cache,
                 child,
-                req.origin,
-                req.axis,
-                req.msec_begin,
+                FxPlayPose {
+                    origin: req.origin,
+                    axis: req.axis,
+                    msec: req.msec_begin,
+                },
                 world,
             )
             .is_some();
@@ -458,9 +459,7 @@ fn play_def_at(
     catalog: &FxDefinitions,
     cache: &FxElemInfoCache,
     effect: &OwnedFxEffectDef,
-    origin: [f32; 3],
-    axis: [[f32; 3]; 3],
-    msec: i32,
+    pose: FxPlayPose,
     world: Option<&dyn FxScene>,
 ) -> Option<PlayResult> {
     if effect.elems.is_empty() {
@@ -471,7 +470,7 @@ fn play_def_at(
         host,
         FxPlayRequest {
             def_name: effect.name.as_str(),
-            pose: FxPlayPose { origin, axis, msec },
+            pose,
             wants_spotlight: false,
             catalog_index: catalog_index_of(catalog, effect),
             def: Some(def_info(effect, &elem_infos)),
@@ -483,9 +482,11 @@ fn play_def_at(
 fn skip_runner(host: &mut FxSystemHost, req: &fx::PendingRunnerSpawn) {
     host.last_runner_parent = Some(req.parent_name.clone()).filter(|name| !name.is_empty());
     host.last_runner_elem = Some(req.def_index);
-    host.gaps.raise(FxGapCause::ElemRunnerSpawnSkipped {
-        def_index: req.def_index,
-    });
+    diag::warn_once!(
+        World,
+        "elem {def_index} is Runner and the child FxEffectDef name is absent",
+        def_index = req.def_index
+    );
 }
 
 fn drain_spawn_side_effects(
@@ -593,13 +594,13 @@ fn record_spawn_decal(
                 host.note_models_go_skip(req.def_index);
             }
         }
-    } else if result.entered {
-        if let Some(scene) = world {
-            if scene.box_surfaces_prelude_ran(host) {
-                host.note_box_surfaces_run();
-            } else {
-                host.note_box_surfaces_skip();
-            }
+    } else if result.entered
+        && let Some(scene) = world
+    {
+        if scene.box_surfaces_prelude_ran(host) {
+            host.note_box_surfaces_run();
+        } else {
+            host.note_box_surfaces_skip();
         }
     }
     if !result.entered {
@@ -642,9 +643,21 @@ struct CollideJobOut {
     gap: Option<u8>,
 }
 
+fn elem_motion(elem: &asset_game::OwnedFxElemDef) -> FxElemMotion<'_> {
+    FxElemMotion {
+        velocity: fx_iw4::FxVelocityField {
+            flags: elem.view.flags,
+            local_samples: elem.vel_graph_local.as_slice(),
+            world_samples: elem.vel_graph_world.as_slice(),
+        },
+        gravity_base: elem.view.gravity_base,
+        gravity_amp: elem.view.gravity_amplitude,
+    }
+}
+
 fn eval_pending_collide(
     catalog: &FxDefinitions,
-    clip_world: Option<&SimWorld>,
+    clip_world: Option<&CollisionScene>,
     job: &PendingCollide,
 ) -> CollideJobOut {
     let q = job.query();
@@ -672,19 +685,16 @@ fn eval_pending_collide(
             out.gap = Some(q.def_index);
             return out;
         };
-        out.result = evaluate_elem_collide_motion(
-            elem.view.flags,
-            elem.view.gravity_base,
-            elem.view.gravity_amplitude,
-            elem.view.reflection_factor[0],
-            elem.view.reflection_factor[1],
-            elem.view.coll_mins,
-            elem.view.coll_maxs,
-            elem.view.use_item_clip != 0,
-            !elem.effect_on_impact.is_absent(),
-            elem.view.elem_type == FxElemType::Model as u8,
-            elem.vel_graph_local.as_slice(),
-            elem.vel_graph_world.as_slice(),
+        out.result = elem_motion(elem).collide(
+            &FxElemCollision {
+                reflection_base: elem.view.reflection_factor[0],
+                reflection_amp: elem.view.reflection_factor[1],
+                mins: elem.view.coll_mins,
+                maxs: elem.view.coll_maxs,
+                use_item_clip: elem.view.use_item_clip != 0,
+                has_effect_on_impact: !elem.effect_on_impact.is_absent(),
+                leaves_start_solid: elem.view.elem_type == FxElemType::Model as u8,
+            },
             q,
             |start, end, mins, maxs, mask| {
                 let t = world.trace_world(start, end, mins, maxs, mask);
@@ -699,20 +709,13 @@ fn eval_pending_collide(
         );
         return out;
     }
-    out.result = evaluate_elem_motion(
-        elem.view.flags,
-        elem.view.gravity_base,
-        elem.view.gravity_amplitude,
-        elem.vel_graph_local.as_slice(),
-        elem.vel_graph_world.as_slice(),
-        q,
-    );
+    out.result = elem_motion(elem).evaluate(q);
     out
 }
 
 fn evaluate_physics_piece(
     elem: &asset_game::OwnedFxElemDef,
-    world: &SimWorld,
+    world: &CollisionScene,
     q: fx::FxElemMotionQuery<'_>,
 ) -> FxElemMotionResult {
     evaluate_elem_physics_motion(
@@ -748,7 +751,7 @@ fn collide_worker_count(jobs: usize) -> usize {
 
 fn run_collide_jobs(
     catalog: &FxDefinitions,
-    clip_world: Option<&SimWorld>,
+    clip_world: Option<&CollisionScene>,
     jobs: &[PendingCollide],
 ) -> (HashMap<u16, Option<FxElemMotionResult>>, Vec<u8>) {
     let workers = collide_worker_count(jobs.len());
@@ -791,20 +794,12 @@ pub fn tick_fx_non_dependent(
     cache: &FxElemInfoCache,
     msec: i32,
     camera_origin: [f32; 3],
-    clip_world: Option<&SimWorld>,
+    clip_world: Option<&CollisionScene>,
     world: Option<&dyn FxScene>,
 ) {
-    tick_fx_pass(
-        host,
-        catalog,
-        cache,
-        msec,
-        camera_origin,
-        clip_world,
-        world,
-        true,
-        true,
-    )
+    host.set_msec_now(msec);
+    host.advance_frame_stamp();
+    tick_fx_pass(host, catalog, cache, camera_origin, clip_world, world, true)
 }
 
 pub fn tick_fx_remaining(
@@ -813,300 +808,343 @@ pub fn tick_fx_remaining(
     cache: &FxElemInfoCache,
     msec: i32,
     camera_origin: [f32; 3],
-    clip_world: Option<&SimWorld>,
+    clip_world: Option<&CollisionScene>,
     world: Option<&dyn FxScene>,
 ) {
+    host.set_msec_now(msec);
     tick_fx_pass(
         host,
         catalog,
         cache,
-        msec,
         camera_origin,
         clip_world,
         world,
         false,
-        false,
     )
+}
+
+struct CatalogUpdateHooks<'a> {
+    catalog: &'a FxDefinitions,
+    cache: &'a FxElemInfoCache,
+    clip_world: Option<&'a CollisionScene>,
+    collide_gap_indices: &'a RefCell<Vec<u8>>,
+    emit_rand_gap_indices: &'a mut Vec<u8>,
+}
+
+impl fx::FxUpdateHooks for CatalogUpdateHooks<'_> {
+    fn pending_loop(
+        &mut self,
+        sys: &mut FxSystemHost,
+        slot: usize,
+        prev: i32,
+        now: i32,
+        _def_name: &str,
+    ) -> Option<i32> {
+        let catalog = self.catalog;
+        let cache = self.cache;
+
+        let index = sys
+            .effect_at(slot)
+            .map(|e| e.catalog_index)
+            .unwrap_or(FX_CATALOG_INDEX_NONE);
+        let effect = catalog_lookup(catalog, index)?;
+        let elems = cache.arc_for(catalog, effect);
+        spawn_looping_partial(sys, slot, def_info(effect, &elems), prev, now);
+        Some(effect.view.msec_looping_life)
+    }
+    fn motion(&mut self, q: fx::FxElemMotionQuery<'_>) -> Option<FxElemMotionResult> {
+        let catalog = self.catalog;
+        let clip_world = self.clip_world;
+        let collide_gap_indices = self.collide_gap_indices;
+
+        (|| {
+            let effect = catalog_lookup(catalog, q.catalog_index)?;
+            let elem = effect.elems.get(q.def_index as usize)?;
+            if fx_iw4::elem_skips_position_update(elem.view.elem_type, elem.view.flags) {
+                let Some(world) = clip_world else {
+                    collide_gap_indices.borrow_mut().push(q.def_index);
+                    return None;
+                };
+                return Some(evaluate_physics_piece(elem, world, q));
+            }
+            if fx_iw4::elem_uses_collision(elem.view.flags) {
+                let Some(world) = clip_world else {
+                    collide_gap_indices.borrow_mut().push(q.def_index);
+                    return None;
+                };
+                return elem_motion(elem).collide(
+                    &FxElemCollision {
+                        reflection_base: elem.view.reflection_factor[0],
+                        reflection_amp: elem.view.reflection_factor[1],
+                        mins: elem.view.coll_mins,
+                        maxs: elem.view.coll_maxs,
+                        use_item_clip: elem.view.use_item_clip != 0,
+                        has_effect_on_impact: !elem.effect_on_impact.is_absent(),
+                        leaves_start_solid: elem.view.elem_type == FxElemType::Model as u8,
+                    },
+                    q,
+                    |start, end, mins, maxs, mask| {
+                        let t = world.trace_world(start, end, mins, maxs, mask);
+                        FxElemTraceHit {
+                            complete: world.collision_complete(),
+                            fraction: t.fraction,
+                            normal: t.normal,
+                            startsolid: t.startsolid != 0,
+                            allsolid: t.allsolid != 0,
+                        }
+                    },
+                );
+            }
+            elem_motion(elem).evaluate(q)
+        })()
+    }
+    fn emit(&mut self, q: fx::FxEmitQuery<'_>) -> Option<fx_iw4::FxEmitSchedule> {
+        let catalog = self.catalog;
+        let emit_rand_gap_indices = &mut *self.emit_rand_gap_indices;
+
+        let effect = catalog_lookup(catalog, q.catalog_index)?;
+        let elem = effect.elems.get(q.def_index as usize)?;
+        if elem.effect_emitted.is_absent() {
+            return None;
+        }
+        let (base, max) = fx_iw4::emit_dist_range(
+            elem.view.emit_dist[0],
+            elem.view.emit_dist[1],
+            elem.view.emit_dist_variance[0],
+            elem.view.emit_dist_variance[1],
+            q.elem_random_seed,
+        );
+
+        if elem.view.emit_dist_variance[1] != 0.0 {
+            emit_rand_gap_indices.push(q.def_index);
+        }
+        Some(
+            fx_iw4::FxEmitSegment {
+                origin_begin: q.origin_begin,
+                origin_end: q.origin_end,
+                msec_begin: q.msec_update_begin,
+                msec_end: q.msec_update_end,
+            }
+            .schedule(q.emit_residual, base, max, || 0.0),
+        )
+    }
+    fn child(&mut self, sys: &mut FxSystemHost, req: fx::FxChildSpawnRequest<'_>) -> bool {
+        let catalog = self.catalog;
+        let cache = self.cache;
+
+        let Some(parent) = catalog_lookup(catalog, req.catalog_index) else {
+            return false;
+        };
+        let Some(elem) = parent.elems.get(req.def_index as usize) else {
+            return false;
+        };
+        let child_edge = match req.kind {
+            FxChildKind::Impact => elem.effect_on_impact,
+            FxChildKind::Death => elem.effect_on_death,
+            FxChildKind::Emitted => elem.effect_emitted,
+        };
+
+        if child_edge.is_absent() {
+            return true;
+        }
+
+        let Some(index) = child_edge.bound_index() else {
+            return false;
+        };
+        let Some(child) = catalog.def_at(index).filter(|d| !d.elems.is_empty()) else {
+            return false;
+        };
+        let child_name = child.name.as_str();
+        let elems = cache.arc_for(catalog, child);
+        let previous_products = sys.spawn_products;
+        let previous_mark_entity = sys.spawn_mark_entity;
+        sys.spawn_products = req.products;
+        sys.spawn_mark_entity = req.mark_entity;
+        let played = match spawn_impact_or_death_effect(
+            sys,
+            FxPlayRequest {
+                def_name: child_name,
+                pose: FxPlayPose {
+                    origin: req.origin,
+                    axis: req.axis,
+                    msec: req.msec,
+                },
+                wants_spotlight: false,
+                catalog_index: catalog_index_of(catalog, child),
+                def: Some(def_info(child, &elems)),
+            },
+        ) {
+            PlayResult::PlayedReleased { .. } | PlayResult::Held { .. } => true,
+            PlayResult::Failed(_) => false,
+        };
+        sys.spawn_products = previous_products;
+        sys.spawn_mark_entity = previous_mark_entity;
+        played
+    }
+    fn spark_fill(&mut self, q: FxSparkFillQuery<'_>) -> Option<FxSparkFillVisual> {
+        let catalog = self.catalog;
+
+        let effect = catalog_lookup(catalog, q.catalog_index)?;
+        let elem = effect.elems.get(q.def_index as usize)?;
+        let rand_size = sample_f32(q.elem_random_seed, FxRandomChannel::Size);
+        let rand_scale = sample_f32(q.elem_random_seed, FxRandomChannel::Scale);
+        let rand_color = sample_f32(q.elem_random_seed, FxRandomChannel::Color);
+        let size0 = evaluate_size0(
+            elem.vis_samples.as_slice(),
+            elem.view.vis_state_interval_count,
+            q.norm_time,
+            rand_size,
+        )?;
+        let scale = evaluate_scale(
+            elem.vis_samples.as_slice(),
+            elem.view.vis_state_interval_count,
+            q.norm_time,
+            rand_scale,
+        )
+        .unwrap_or(0.0);
+        let color = evaluate_color_rgba(
+            elem.vis_samples.as_slice(),
+            elem.view.vis_state_interval_count,
+            q.norm_time,
+            rand_color,
+        )
+        .unwrap_or([255, 255, 255, 255]);
+        Some(FxSparkFillVisual {
+            size0,
+            scale,
+            color_rgba: color,
+            spawn_angles: elem.view.spawn_angles,
+            angular_velocity: elem.view.angular_velocity,
+        })
+    }
+    fn fountain_trace(&mut self, start: [f32; 3], end: [f32; 3]) -> (f32, [f32; 3]) {
+        let clip_world = self.clip_world;
+
+        let Some(world) = clip_world else {
+            return (1.0, [0.0, 0.0, 1.0]);
+        };
+        let t = world.trace_world(
+            start,
+            end,
+            fx_iw4::FX_SPARK_FOUNTAIN_TRACE_BOUNDS,
+            fx_iw4::FX_SPARK_FOUNTAIN_TRACE_BOUNDS,
+            fx_iw4::FX_SPARK_FOUNTAIN_TRACE_MASK,
+        );
+        (t.fraction, t.normal)
+    }
+}
+
+impl fx::FxTrailUpdateHooks for CatalogUpdateHooks<'_> {
+    fn trail_def(&mut self, index: u16, def_index: u8) -> Option<FxElemDefInfo> {
+        let catalog = self.catalog;
+        let cache = self.cache;
+
+        let effect = catalog_lookup(catalog, index)?;
+        cache
+            .arc_for(catalog, effect)
+            .get(def_index as usize)
+            .copied()
+    }
+    fn trail_trace(
+        &mut self,
+        start: [f32; 3],
+        end: [f32; 3],
+        mins: [f32; 3],
+        maxs: [f32; 3],
+        mask: u32,
+    ) -> Option<FxTrailCollideHit> {
+        let clip_world = self.clip_world;
+
+        let world = clip_world?;
+
+        let t = world.trace_world(start, end, mins, maxs, mask);
+        Some(FxTrailCollideHit {
+            fraction: t.fraction,
+            normal: t.normal,
+            startsolid: t.startsolid != 0,
+            allsolid: t.allsolid != 0,
+        })
+    }
+    fn trail_vel_graphs(
+        &mut self,
+        index: u16,
+        def_index: u8,
+    ) -> (Vec<fx_iw4::FxElemVec3Range>, Vec<fx_iw4::FxElemVec3Range>) {
+        let catalog = self.catalog;
+
+        catalog_lookup(catalog, index)
+            .and_then(|effect| effect.elems.get(def_index as usize))
+            .map(|elem| (elem.vel_graph_local.clone(), elem.vel_graph_world.clone()))
+            .unwrap_or_else(|| (Vec::new(), Vec::new()))
+    }
 }
 
 fn tick_fx_pass(
     host: &mut FxSystemHost,
     catalog: &FxDefinitions,
     cache: &FxElemInfoCache,
-    msec: i32,
     camera_origin: [f32; 3],
-    clip_world: Option<&SimWorld>,
+    clip_world: Option<&CollisionScene>,
     world: Option<&dyn FxScene>,
-    advance_frame: bool,
     non_bolted_only: bool,
 ) {
-    host.set_msec_now(msec);
-    if advance_frame {
-        host.advance_frame_stamp();
-    }
-
     let collide_gap_indices = RefCell::new(Vec::new());
     let mut emit_rand_gap_indices = Vec::new();
-    fx_update(
-        host,
-        non_bolted_only,
-        camera_origin,
-        |sys, slot, prev, now, _| {
-            let index = sys
-                .effect_at(slot)
-                .map(|e| e.catalog_index)
-                .unwrap_or(FX_CATALOG_INDEX_NONE);
-            let effect = catalog_lookup(catalog, index)?;
-            let elems = cache.arc_for(catalog, effect);
-            spawn_looping_partial(sys, slot, def_info(effect, &elems), prev, now);
-            Some(effect.view.msec_looping_life)
-        },
-        |q| {
-            let out = (|| {
-                let effect = catalog_lookup(catalog, q.catalog_index)?;
-                let elem = effect.elems.get(q.def_index as usize)?;
-                if fx_iw4::elem_skips_position_update(elem.view.elem_type, elem.view.flags) {
-                    let Some(world) = clip_world else {
-                        collide_gap_indices.borrow_mut().push(q.def_index);
-                        return None;
-                    };
-                    return Some(evaluate_physics_piece(elem, world, q));
-                }
-                if fx_iw4::elem_uses_collision(elem.view.flags) {
-                    let Some(world) = clip_world else {
-                        collide_gap_indices.borrow_mut().push(q.def_index);
-                        return None;
-                    };
-                    return evaluate_elem_collide_motion(
-                        elem.view.flags,
-                        elem.view.gravity_base,
-                        elem.view.gravity_amplitude,
-                        elem.view.reflection_factor[0],
-                        elem.view.reflection_factor[1],
-                        elem.view.coll_mins,
-                        elem.view.coll_maxs,
-                        elem.view.use_item_clip != 0,
-                        !elem.effect_on_impact.is_absent(),
-                        elem.view.elem_type == FxElemType::Model as u8,
-                        elem.vel_graph_local.as_slice(),
-                        elem.vel_graph_world.as_slice(),
-                        q,
-                        |start, end, mins, maxs, mask| {
-                            let t = world.trace_world(start, end, mins, maxs, mask);
-                            FxElemTraceHit {
-                                complete: world.collision_complete(),
-                                fraction: t.fraction,
-                                normal: t.normal,
-                                startsolid: t.startsolid != 0,
-                                allsolid: t.allsolid != 0,
-                            }
-                        },
-                    );
-                }
-                evaluate_elem_motion(
-                    elem.view.flags,
-                    elem.view.gravity_base,
-                    elem.view.gravity_amplitude,
-                    elem.vel_graph_local.as_slice(),
-                    elem.vel_graph_world.as_slice(),
-                    q,
-                )
-            })();
-            out
-        },
-        |q| {
-            let effect = catalog_lookup(catalog, q.catalog_index)?;
-            let elem = effect.elems.get(q.def_index as usize)?;
-            if elem.effect_emitted.is_absent() {
-                return None;
-            }
-            let (base, max) = fx_iw4::emit_dist_range(
-                elem.view.emit_dist[0],
-                elem.view.emit_dist[1],
-                elem.view.emit_dist_variance[0],
-                elem.view.emit_dist_variance[1],
-                q.elem_random_seed,
-            );
-
-            if elem.view.emit_dist_variance[1] != 0.0 {
-                emit_rand_gap_indices.push(q.def_index);
-            }
-            Some(fx_iw4::process_emitting_schedule(
-                q.emit_residual,
-                q.origin_begin,
-                q.origin_end,
-                q.msec_update_begin,
-                q.msec_update_end,
-                base,
-                max,
-                || 0.0,
-            ))
-        },
-        |sys, req| {
-            let Some(parent) = catalog_lookup(catalog, req.catalog_index) else {
-                return false;
-            };
-            let Some(elem) = parent.elems.get(req.def_index as usize) else {
-                return false;
-            };
-            let child_edge = match req.kind {
-                FxChildKind::Impact => elem.effect_on_impact,
-                FxChildKind::Death => elem.effect_on_death,
-                FxChildKind::Emitted => elem.effect_emitted,
-            };
-
-            if child_edge.is_absent() {
-                return true;
-            }
-
-            let Some(index) = child_edge.bound_index() else {
-                return false;
-            };
-            let Some(child) = catalog.def_at(index).filter(|d| !d.elems.is_empty()) else {
-                return false;
-            };
-            let child_name = child.name.as_str();
-            let elems = cache.arc_for(catalog, child);
-            let previous_products = sys.spawn_products;
-            let previous_mark_entity = sys.spawn_mark_entity;
-            sys.spawn_products = req.products;
-            sys.spawn_mark_entity = req.mark_entity;
-            let played = match spawn_impact_or_death_effect(
-                sys,
-                FxPlayRequest {
-                    def_name: child_name,
-                    pose: FxPlayPose {
-                        origin: req.origin,
-                        axis: req.axis,
-                        msec: req.msec,
-                    },
-                    wants_spotlight: false,
-                    catalog_index: catalog_index_of(catalog, child),
-                    def: Some(def_info(child, &elems)),
-                },
-            ) {
-                PlayResult::PlayedReleased { .. } | PlayResult::Held { .. } => true,
-                PlayResult::Failed(_) => false,
-            };
-            sys.spawn_products = previous_products;
-            sys.spawn_mark_entity = previous_mark_entity;
-            played
-        },
-        |index, def_index| {
-            let effect = catalog_lookup(catalog, index)?;
-            cache
-                .arc_for(catalog, effect)
-                .get(def_index as usize)
-                .copied()
-        },
-        |start, end, mins, maxs, mask| {
-            let Some(world) = clip_world else {
-                return None;
-            };
-
-            let t = world.trace_world(start, end, mins, maxs, mask);
-            Some(FxTrailCollideHit {
-                fraction: t.fraction,
-                normal: t.normal,
-                startsolid: t.startsolid != 0,
-                allsolid: t.allsolid != 0,
-            })
-        },
-        |index, def_index| {
-            catalog_lookup(catalog, index)
-                .and_then(|effect| effect.elems.get(def_index as usize))
-                .map(|elem| (elem.vel_graph_local.clone(), elem.vel_graph_world.clone()))
-                .unwrap_or_else(|| (Vec::new(), Vec::new()))
-        },
-        |q: FxSparkFillQuery<'_>| {
-            let effect = catalog_lookup(catalog, q.catalog_index)?;
-            let elem = effect.elems.get(q.def_index as usize)?;
-            let rand_size = sample_f32(q.elem_random_seed, FxRandomChannel::Size);
-            let rand_scale = sample_f32(q.elem_random_seed, FxRandomChannel::Scale);
-            let rand_color = sample_f32(q.elem_random_seed, FxRandomChannel::Color);
-            let size0 = evaluate_size0(
-                elem.vis_samples.as_slice(),
-                elem.view.vis_state_interval_count,
-                q.norm_time,
-                rand_size,
-            )?;
-            let scale = evaluate_scale(
-                elem.vis_samples.as_slice(),
-                elem.view.vis_state_interval_count,
-                q.norm_time,
-                rand_scale,
-            )
-            .unwrap_or(0.0);
-            let color = evaluate_color_rgba(
-                elem.vis_samples.as_slice(),
-                elem.view.vis_state_interval_count,
-                q.norm_time,
-                rand_color,
-            )
-            .unwrap_or([255, 255, 255, 255]);
-            Some(FxSparkFillVisual {
-                size0,
-                scale,
-                color_rgba: color,
-                spawn_angles: elem.view.spawn_angles,
-                angular_velocity: elem.view.angular_velocity,
-            })
-        },
-        |jobs| {
+    {
+        let mut hooks = CatalogUpdateHooks {
+            catalog,
+            cache,
+            clip_world,
+            collide_gap_indices: &collide_gap_indices,
+            emit_rand_gap_indices: &mut emit_rand_gap_indices,
+        };
+        fx_update(host, non_bolted_only, camera_origin, &mut hooks, |jobs| {
             if jobs.is_empty() {
                 return HashMap::new();
             }
             let (map, mut gaps) = run_collide_jobs(catalog, clip_world, jobs);
             collide_gap_indices.borrow_mut().append(&mut gaps);
             map
-        },
-        |start, end| {
-            let Some(world) = clip_world else {
-                return (1.0, [0.0, 0.0, 1.0]);
-            };
-            let t = world.trace_world(
-                start,
-                end,
-                fx_iw4::FX_SPARK_FOUNTAIN_TRACE_BOUNDS,
-                fx_iw4::FX_SPARK_FOUNTAIN_TRACE_BOUNDS,
-                fx_iw4::FX_SPARK_FOUNTAIN_TRACE_MASK,
-            );
-            (t.fraction, t.normal)
-        },
-    );
+        });
+    }
     let collide_gap_indices = collide_gap_indices.into_inner();
     for def_index in collide_gap_indices {
-        host.gaps
-            .raise(FxGapCause::NoWorldClipForCollide { def_index });
+        diag::warn_once!(
+            World,
+            "elem {def_index} collides and no world clip was given"
+        );
     }
     for def_index in emit_rand_gap_indices {
-        host.gaps
-            .raise(FxGapCause::EmitRandVarianceNotApplied { def_index });
+        diag::warn_once!(
+            World,
+            "elem {def_index} authored an unapplied spacing variance"
+        );
     }
     drain_spawn_side_effects(host, catalog, cache, world);
 }
 
-pub fn build_fx_verts(
-    host: &mut FxSystemHost,
-    catalog: &FxDefinitions,
-    cull: FxDrawCull<'_>,
-    camera: [f32; 3],
-) -> (FxGenerateVertsOut, FxVertsGaps) {
-    let mut gaps = FxVertsGaps::default();
-    let catalog_index_n = Cell::new(0u32);
-    let catalog_name_n = Cell::new(0u32);
-    let vis_blocker_adds = RefCell::new(Vec::new());
-    // Most adjacent particles use the same definition/material. Share their
-    // diagnostic names instead of allocating two strings per generated sprite.
-    // The cache lives only as long as this generation call.
-    let mut sprite_names: Option<(Arc<str>, Arc<str>)> = None;
-    let mut on_elem = |ctx: FxDrawElemContext<'_>| -> Option<FxSpriteInstance> {
-        let Some(effect) = catalog_lookup_draw(
-            catalog,
-            ctx.catalog_index,
-            &catalog_index_n,
-            &catalog_name_n,
-        ) else {
+struct CatalogDrawResolver<'a> {
+    catalog: &'a FxDefinitions,
+    cull: FxDrawCull<'a>,
+    gaps: FxVertsGaps,
+    catalog_index_n: Cell<u32>,
+    catalog_name_n: Cell<u32>,
+    vis_blocker_adds: VisibilityBlockerAdds,
+    sprite_names: Option<(Arc<str>, Arc<str>)>,
+}
+
+impl fx::FxDrawResolver for CatalogDrawResolver<'_> {
+    fn sprite(&mut self, ctx: FxDrawElemContext<'_>) -> Option<FxSpriteInstance> {
+        let catalog = self.catalog;
+        let gaps = &mut self.gaps;
+        let catalog_index_n = &self.catalog_index_n;
+        let catalog_name_n = &self.catalog_name_n;
+        let vis_blocker_adds = &self.vis_blocker_adds;
+        let sprite_names = &mut self.sprite_names;
+
+        let Some(effect) =
+            catalog_lookup_draw(catalog, ctx.catalog_index, catalog_index_n, catalog_name_n)
+        else {
             gaps.no_def = gaps.no_def.saturating_add(1);
             return None;
         };
@@ -1172,7 +1210,7 @@ pub fn build_fx_verts(
             ctx.packed_lighting,
             ctx.packed_lighting_src,
             ctx.def_index,
-            &mut gaps,
+            gaps,
         );
 
         let axis = if ctx.elem_type == 1 {
@@ -1188,13 +1226,15 @@ pub fn build_fx_verts(
         };
 
         let vel_dir = if ctx.elem_type == 2 {
-            let vel = get_velocity_at_time(
-                ctx.flags,
+            let vel = fx_iw4::FxVelocityField {
+                flags: ctx.flags,
+                local_samples: elem.vel_graph_local.as_slice(),
+                world_samples: elem.vel_graph_world.as_slice(),
+            }
+            .at_time(
                 ctx.base_vel,
                 ctx.age_msec as f32,
                 ctx.life_msec.max(1) as f32,
-                elem.vel_graph_local.as_slice(),
-                elem.vel_graph_world.as_slice(),
                 ctx.axis,
                 ctx.elem_random_seed,
             );
@@ -1228,13 +1268,15 @@ pub fn build_fx_verts(
             ctx.origin,
             size0,
             vis_alpha,
-            elem.view.fade_in_range,
-            elem.view.fade_out_range,
+            fx_iw4::FxDistanceFade {
+                fade_in: elem.view.fade_in_range,
+                fade_out: elem.view.fade_out_range,
+            },
         ));
         if !sprite_names.as_ref().is_some_and(|(def, material)| {
             def.as_ref() == ctx.def_name && material.as_ref() == material_name
         }) {
-            sprite_names = Some((Arc::from(ctx.def_name), Arc::from(material_name)));
+            *sprite_names = Some((Arc::from(ctx.def_name), Arc::from(material_name)));
         }
         let (def_name, material_name) = sprite_names.as_ref().unwrap();
         Some(FxSpriteInstance {
@@ -1258,15 +1300,14 @@ pub fn build_fx_verts(
             lighting_frac: elem.view.lighting_frac,
             packed_lighting_src: ctx.packed_lighting_src,
         })
-    };
+    }
+    fn trail_def(&mut self, ctx: FxDrawTrailContext<'_>, def_index: u8) -> Option<FxTrailDrawDef> {
+        let catalog = self.catalog;
+        let catalog_index_n = &self.catalog_index_n;
+        let catalog_name_n = &self.catalog_name_n;
 
-    let mut on_trail_def = |ctx: FxDrawTrailContext<'_>, def_index: u8| -> Option<FxTrailDrawDef> {
-        let effect = catalog_lookup_draw(
-            catalog,
-            ctx.catalog_index,
-            &catalog_index_n,
-            &catalog_name_n,
-        )?;
+        let effect =
+            catalog_lookup_draw(catalog, ctx.catalog_index, catalog_index_n, catalog_name_n)?;
         let elem = effect.elems.get(def_index as usize)?;
         let trail = elem.trail_def.as_ref()?;
         if trail.verts.is_empty() || trail.inds.len() < 2 || trail.repeat_dist == 0 {
@@ -1285,14 +1326,15 @@ pub fn build_fx_verts(
             material_name: material_name.to_owned(),
             material_index: Some(material_index),
         })
-    };
-    let mut on_trail_sample = |ctx: FxDrawTrailSampleContext<'_>| -> Option<FxTrailSampleVisual> {
-        let effect = catalog_lookup_draw(
-            catalog,
-            ctx.catalog_index,
-            &catalog_index_n,
-            &catalog_name_n,
-        )?;
+    }
+    fn trail_sample(&mut self, ctx: FxDrawTrailSampleContext<'_>) -> Option<FxTrailSampleVisual> {
+        let catalog = self.catalog;
+        let catalog_index_n = &self.catalog_index_n;
+        let catalog_name_n = &self.catalog_name_n;
+        let vis_blocker_adds = &self.vis_blocker_adds;
+
+        let effect =
+            catalog_lookup_draw(catalog, ctx.catalog_index, catalog_index_n, catalog_name_n)?;
         let elem = effect.elems.get(ctx.def_index as usize)?;
         let rand_size = sample_f32(ctx.elem_random_seed, FxRandomChannel::Size);
         let rand_color = sample_f32(ctx.elem_random_seed, FxRandomChannel::Color);
@@ -1334,23 +1376,24 @@ pub fn build_fx_verts(
             ctx.sample_origin,
             size0,
             color[3],
-            elem.view.fade_in_range,
-            elem.view.fade_out_range,
+            fx_iw4::FxDistanceFade {
+                fade_in: elem.view.fade_in_range,
+                fade_out: elem.view.fade_out_range,
+            },
         ));
         Some(FxTrailSampleVisual {
             size: [size0, size1],
             color_rgba: color,
             rotation,
         })
-    };
+    }
+    fn spark_size1(&mut self, ctx: FxSparkDrawQuery<'_>) -> Option<f32> {
+        let catalog = self.catalog;
+        let catalog_index_n = &self.catalog_index_n;
+        let catalog_name_n = &self.catalog_name_n;
 
-    let mut on_spark_size1 = |ctx: FxSparkDrawQuery<'_>| -> Option<f32> {
-        let effect = catalog_lookup_draw(
-            catalog,
-            ctx.catalog_index,
-            &catalog_index_n,
-            &catalog_name_n,
-        )?;
+        let effect =
+            catalog_lookup_draw(catalog, ctx.catalog_index, catalog_index_n, catalog_name_n)?;
         let elem = effect.elems.get(ctx.def_index as usize)?;
         let rand_size = sample_f32(ctx.elem_random_seed, FxRandomChannel::Size);
         let size1 = evaluate_size1(
@@ -1360,14 +1403,15 @@ pub fn build_fx_verts(
             rand_size,
         )?;
         (size1 >= 0.0).then_some(size1)
-    };
-    let mut on_cloud = |ctx: FxDrawElemContext<'_>| -> Option<FxCloudInstance> {
-        let effect = catalog_lookup_draw(
-            catalog,
-            ctx.catalog_index,
-            &catalog_index_n,
-            &catalog_name_n,
-        )?;
+    }
+    fn cloud(&mut self, ctx: FxDrawElemContext<'_>) -> Option<FxCloudInstance> {
+        let catalog = self.catalog;
+        let cull = self.cull;
+        let catalog_index_n = &self.catalog_index_n;
+        let catalog_name_n = &self.catalog_name_n;
+
+        let effect =
+            catalog_lookup_draw(catalog, ctx.catalog_index, catalog_index_n, catalog_name_n)?;
         let elem = effect.elems.get(ctx.def_index as usize)?;
         let rand_size = sample_f32(ctx.elem_random_seed, FxRandomChannel::Size);
         let rand_scale = sample_f32(ctx.elem_random_seed, FxRandomChannel::Scale);
@@ -1391,15 +1435,18 @@ pub fn build_fx_verts(
             ctx.norm_time,
             rand_scale,
         )?;
-        if cull_cloud(
+        let shape = fx_iw4::FxCloudShape {
+            size0,
+            size1,
+            placement_scale: scale,
+        };
+        if cull_elem_sphere(
             cull.elem_draw,
             cull.planes,
             cull.planes.len() as u32,
             ctx.flags,
             ctx.origin,
-            size0,
-            size1,
-            scale + ctx.cull_reach,
+            shape.cull_radius(ctx.cull_reach),
         ) {
             return None;
         }
@@ -1424,13 +1471,15 @@ pub fn build_fx_verts(
             rot_t,
             ctx.axis,
         );
-        let vel = get_velocity_at_time(
-            ctx.flags,
+        let vel = fx_iw4::FxVelocityField {
+            flags: ctx.flags,
+            local_samples: elem.vel_graph_local.as_slice(),
+            world_samples: elem.vel_graph_world.as_slice(),
+        }
+        .at_time(
             ctx.base_vel,
             ctx.age_msec as f32,
             ctx.life_msec.max(1) as f32,
-            elem.vel_graph_local.as_slice(),
-            elem.vel_graph_world.as_slice(),
             ctx.axis,
             ctx.elem_random_seed,
         );
@@ -1441,23 +1490,22 @@ pub fn build_fx_verts(
             cloud: build_cloud(
                 ctx.origin,
                 axis,
-                size0,
-                size1,
-                scale,
+                shape,
                 color,
                 ctx.flags,
                 vel,
                 ctx.age_msec as f32,
             ),
         })
-    };
-    let mut on_light = |ctx: FxDrawElemContext<'_>| -> Option<FxElemLightInstance> {
-        let effect = catalog_lookup_draw(
-            catalog,
-            ctx.catalog_index,
-            &catalog_index_n,
-            &catalog_name_n,
-        )?;
+    }
+    fn light(&mut self, ctx: FxDrawElemContext<'_>) -> Option<FxElemLightInstance> {
+        let catalog = self.catalog;
+        let cull = self.cull;
+        let catalog_index_n = &self.catalog_index_n;
+        let catalog_name_n = &self.catalog_name_n;
+
+        let effect =
+            catalog_lookup_draw(catalog, ctx.catalog_index, catalog_index_n, catalog_name_n)?;
         let elem = effect.elems.get(ctx.def_index as usize)?;
         let rand_size = sample_f32(ctx.elem_random_seed, FxRandomChannel::Size);
         let rand_scale = sample_f32(ctx.elem_random_seed, FxRandomChannel::Scale);
@@ -1477,7 +1525,7 @@ pub fn build_fx_verts(
             ctx.norm_time,
             rand_scale,
         )?;
-        if cull_elem_light(
+        if cull_elem_sphere(
             cull.elem_draw,
             cull.planes,
             cull.planes.len() as u32,
@@ -1514,36 +1562,39 @@ pub fn build_fx_verts(
             color_rgb: elem_light_color_rgb(color, scale),
             axis,
         })
-    };
-    let mut on_model = |ctx: FxDrawElemContext<'_>| {
-        evaluate_fx_model_instance(catalog, ctx, &catalog_index_n, &catalog_name_n)
-    };
-    let out = generate_verts_with_trails(
-        host,
-        &mut on_elem,
-        &mut on_trail_def,
-        &mut on_trail_sample,
-        &mut on_spark_size1,
-        &mut on_cloud,
-        &mut on_light,
-        &mut on_model,
-        camera,
-    );
-    for (flags, origin, size0, alpha, fade_in, fade_out) in vis_blocker_adds.into_inner() {
-        vis_blocker_add_prepared(
-            &mut host.vis_blocker_read,
-            flags,
-            origin,
-            size0,
-            alpha,
-            fade_in,
-            fade_out,
-            camera,
-        );
     }
-    gaps.catalog_index_n = catalog_index_n.get();
-    gaps.catalog_name_n = catalog_name_n.get();
-    (out, gaps)
+    fn model(&mut self, ctx: FxDrawElemContext<'_>) -> Option<FxModelInstance> {
+        let catalog = self.catalog;
+        let catalog_index_n = &self.catalog_index_n;
+        let catalog_name_n = &self.catalog_name_n;
+
+        evaluate_fx_model_instance(catalog, ctx, catalog_index_n, catalog_name_n)
+    }
+}
+
+pub fn build_fx_verts(
+    host: &mut FxSystemHost,
+    catalog: &FxDefinitions,
+    cull: FxDrawCull<'_>,
+    camera: [f32; 3],
+) -> (FxGenerateVertsOut, FxVertsGaps) {
+    let mut resolver = CatalogDrawResolver {
+        catalog,
+        cull,
+        gaps: FxVertsGaps::default(),
+        catalog_index_n: Cell::new(0u32),
+        catalog_name_n: Cell::new(0u32),
+        vis_blocker_adds: RefCell::new(Vec::new()),
+        sprite_names: None,
+    };
+    let out = generate_verts_with_trails(host, &mut resolver, camera);
+    for (flags, origin, size0, alpha, fade) in resolver.vis_blocker_adds.into_inner() {
+        host.vis_blocker_read
+            .add_prepared(flags, origin, size0, alpha, fade, camera);
+    }
+    resolver.gaps.catalog_index_n = resolver.catalog_index_n.get();
+    resolver.gaps.catalog_name_n = resolver.catalog_name_n.get();
+    (out, resolver.gaps)
 }
 
 fn evaluate_fx_model_instance(

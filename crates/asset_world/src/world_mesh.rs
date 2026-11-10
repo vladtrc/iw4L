@@ -66,7 +66,10 @@ pub enum WorldMeshError {
         half: f32,
     },
     Zone(fastfile_iw4::ZoneError),
-    Iw5Zone(fastfile_iw5::ZoneError),
+    Source {
+        family: asset_core::FamilyId,
+        detail: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,7 +115,9 @@ impl std::fmt::Display for WorldMeshError {
                  this box in the wrong representation (mid/half vs mins/maxs)"
             ),
             WorldMeshError::Zone(e) => write!(f, "reading world geometry: {e}"),
-            WorldMeshError::Iw5Zone(e) => write!(f, "reading IW5 world geometry: {e}"),
+            WorldMeshError::Source { family, detail } => {
+                write!(f, "reading {} world geometry: {detail}", family.as_str())
+            }
         }
     }
 }
@@ -122,12 +127,6 @@ impl std::error::Error for WorldMeshError {}
 impl From<fastfile_iw4::ZoneError> for WorldMeshError {
     fn from(e: fastfile_iw4::ZoneError) -> Self {
         Self::Zone(e)
-    }
-}
-
-impl From<fastfile_iw5::ZoneError> for WorldMeshError {
-    fn from(e: fastfile_iw5::ZoneError) -> Self {
-        Self::Iw5Zone(e)
     }
 }
 
@@ -164,10 +163,10 @@ pub fn build_world_mesh(
         Some(surfaces) => {
             for i in 0..geometry.surface_count {
                 let surface = surfaces.at(i * s.layout(sz::GFX_SURFACE, 32));
-                let first_vertex = s.u32_at(surface, 4)? as usize;
-                let vertex_count = s.u16_at(surface, 8)? as usize;
-                let tri_count = s.u16_at(surface, 10)? as usize;
-                let base_index = s.u32_at(surface, 12)? as usize;
+                let first_vertex = s.u32_at(surface, sz::gfx_surface::FIRST_VERTEX)? as usize;
+                let vertex_count = s.u16_at(surface, sz::gfx_surface::VERTEX_COUNT)? as usize;
+                let tri_count = s.u16_at(surface, sz::gfx_surface::TRI_COUNT)? as usize;
+                let base_index = s.u32_at(surface, sz::gfx_surface::BASE_INDEX)? as usize;
 
                 if first_vertex + vertex_count > geometry.vertex_count
                     || base_index + tri_count * 3 > geometry.index_count

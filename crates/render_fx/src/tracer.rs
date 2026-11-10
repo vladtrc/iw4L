@@ -14,56 +14,57 @@ use fx_iw4::{
 
 use crate::host::CombatFxDump;
 
+type TracerShotHistory = HashMap<(Option<sim::FireCause>, u32, u32, u16), (i32, u16, Option<bool>)>;
+
 #[derive(Resource, Default)]
 pub struct PreparedTracers(pub TracerDefinitions);
+
+#[derive(Clone, Copy, Debug)]
+pub struct TracerPellet {
+    pub cause: Option<sim::FireCause>,
+    pub source_id: u32,
+    pub correlation: u32,
+    pub pellet: u16,
+}
+
+impl TracerPellet {
+    fn key(self) -> (Option<sim::FireCause>, u32, u32, u16) {
+        if self.cause.is_some() {
+            (self.cause, 0, 0, self.pellet)
+        } else {
+            (None, self.source_id, self.correlation, self.pellet)
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct TracerSegment {
+    pub pellet: TracerPellet,
+    pub start: [f32; 3],
+    pub end: [f32; 3],
+    pub own_shot: bool,
+}
 
 #[derive(Resource, Default)]
 pub struct TracerDrawGate {
     counts: HashMap<u32, u8>,
 
-    shots: HashMap<(Option<sim::FireCause>, u32, u32, u16), (i32, u16, Option<bool>)>,
-    scope: Option<(Option<u64>, u64)>,
+    shots: TracerShotHistory,
 }
 
 impl TracerDrawGate {
-    pub fn adopt_scope(&mut self, generation: frame::WorldStamp, timeline: u64) {
-        let scope = (generation.0, timeline);
-        if self.scope != Some(scope) {
-            *self = Self {
-                scope: Some(scope),
-                ..Self::default()
-            };
-        }
-    }
-
     pub fn maintain(&mut self, now: i32) {
         self.shots
             .retain(|_, (at, _, _)| (0..5000).contains(&now.wrapping_sub(*at)));
     }
 
-    fn shot_key(
-        cause: Option<sim::FireCause>,
-        source: u32,
-        correlation: u32,
-        pellet: u16,
-    ) -> (Option<sim::FireCause>, u32, u32, u16) {
-        if cause.is_some() {
-            (cause, 0, 0, pellet)
-        } else {
-            (None, source, correlation, pellet)
-        }
-    }
-
     pub fn first_segment_of_pellet(
         &mut self,
-        cause: Option<sim::FireCause>,
-        source_id: u32,
-        correlation: u32,
-        pellet: u16,
+        pellet: TracerPellet,
         segment: u16,
         now: i32,
     ) -> bool {
-        let key = Self::shot_key(cause, source_id, correlation, pellet);
+        let key = pellet.key();
         if let Some((_, first, _)) = self.shots.get(&key) {
             return *first == segment;
         }
@@ -74,20 +75,13 @@ impl TracerDrawGate {
         true
     }
 
-    fn should_spawn_pellet(
-        &mut self,
-        cause: Option<sim::FireCause>,
-        source_id: u32,
-        correlation: u32,
-        pellet: u16,
-        draw_interval: u32,
-    ) -> Option<bool> {
-        let key = Self::shot_key(cause, source_id, correlation, pellet);
+    fn should_spawn_pellet(&mut self, pellet: TracerPellet, draw_interval: u32) -> Option<bool> {
+        let key = pellet.key();
         let (_, _, previous) = self.shots.get(&key)?;
         if let Some(selected) = previous {
             return Some(*selected);
         }
-        let selected = self.should_spawn(source_id, draw_interval);
+        let selected = self.should_spawn(pellet.source_id, draw_interval);
         if let Some(slot) = self.shots.get_mut(&key) {
             slot.2 = Some(selected);
         }
@@ -145,40 +139,44 @@ pub enum TracerSpawnSkip {
     HistoryCapacity,
 }
 
-pub fn try_spawn_tracer(
-    gate: &mut TracerDrawGate,
-    world: &mut TracerWorld,
-    catalog: &TracerDefinitions,
-    tracer: AssetEdge<TracerSpace>,
-    cause: Option<sim::FireCause>,
-    source_id: u32,
-    correlation: u32,
-    pellet: u16,
-    start: [f32; 3],
-    end: [f32; 3],
-    own_shot: bool,
-    clock: FxMsec,
-    combat: &mut CombatFxDump,
-) -> Result<(), TracerSpawnSkip> {
-    let Some(def) = tracer.bound_index().and_then(|index| catalog.def_at(index)) else {
-        return Err(TracerSpawnSkip::NoDef);
-    };
-    combat.last_tracer_name = Some(def.name.clone());
-    combat.last_tracer_mat_edge = Some(def.material.edge_kind().to_owned());
-    combat.last_tracer_mat_index = def.material.bound_index().map(|i| i as i64);
-    combat.last_tracer_material = def.present_name().map(str::to_owned);
-    combat.last_tracer_bind = def
-        .present_name()
-        .map(|name| asset_game::material_bind_name(name).to_owned());
-    combat.last_tracer_speed = Some(def.speed);
-    combat.last_tracer_beam_length = Some(def.beam_length);
-    combat.last_tracer_draw_interval = Some(i64::from(def.draw_interval));
-    match gate.should_spawn_pellet(cause, source_id, correlation, pellet, def.draw_interval) {
-        Some(true) => {}
-        Some(false) => return Err(TracerSpawnSkip::Interval),
-        None => return Err(TracerSpawnSkip::HistoryCapacity),
+impl TracerWorld {
+    pub fn try_spawn(
+        &mut self,
+        gate: &mut TracerDrawGate,
+        catalog: &TracerDefinitions,
+        tracer: AssetEdge<TracerSpace>,
+        segment: TracerSegment,
+        clock: FxMsec,
+        combat: &mut CombatFxDump,
+    ) -> Result<(), TracerSpawnSkip> {
+        let Some(def) = tracer.bound_index().and_then(|index| catalog.def_at(index)) else {
+            return Err(TracerSpawnSkip::NoDef);
+        };
+        combat.last_tracer_name = Some(def.name.clone());
+        combat.last_tracer_mat_edge = Some(def.material.edge_kind().to_owned());
+        combat.last_tracer_mat_index = def.material.bound_index().map(|i| i as i64);
+        combat.last_tracer_material = def.present_name().map(str::to_owned);
+        combat.last_tracer_bind = def
+            .present_name()
+            .map(|name| asset_game::material_bind_name(name).to_owned());
+        combat.last_tracer_speed = Some(def.speed);
+        combat.last_tracer_beam_length = Some(def.beam_length);
+        combat.last_tracer_draw_interval = Some(i64::from(def.draw_interval));
+        match gate.should_spawn_pellet(segment.pellet, def.draw_interval) {
+            Some(true) => {}
+            Some(false) => return Err(TracerSpawnSkip::Interval),
+            None => return Err(TracerSpawnSkip::HistoryCapacity),
+        }
+        spawn_moving_tracer(
+            self,
+            def,
+            segment.start,
+            segment.end,
+            segment.own_shot,
+            clock,
+        )
+        .map_err(|_| TracerSpawnSkip::Short)
     }
-    spawn_moving_tracer(world, def, start, end, own_shot, clock).map_err(|_| TracerSpawnSkip::Short)
 }
 
 fn spawn_moving_tracer(

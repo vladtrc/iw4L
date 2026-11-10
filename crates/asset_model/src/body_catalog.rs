@@ -5,9 +5,7 @@ use fastfile_iw4::{ScriptStrings, ZoneStream};
 use crate::asset_graph::{
     AssetEdge, AssetEdgeCensus, capture_xmodel_material_slots, stamp_xmodel_material_edges,
 };
-use crate::model_skel::{
-    ModelSkel, capture_body_skel, capture_body_skel_iw5, capture_body_skel_t5,
-};
+use crate::model_skel::{ModelSkel, capture_body_skel};
 use crate::soldiers::{SoldierKits, body_has_tp_attach_bones, is_body_model, soldier_kits};
 use asset_material::{MaterialCatalog, MaterialDefinitions};
 
@@ -23,7 +21,7 @@ pub const BODY_SPINE_BONES: &[&str] = &[
 #[derive(Clone, Debug)]
 pub struct BodyMeshEntry {
     pub skel: ModelSkel,
-    pub namespace: asset_core::AssetNamespace,
+    pub namespace: asset_core::FamilyId,
 
     pub material_keys: Vec<Option<asset_core::MaterialKey>>,
 
@@ -34,7 +32,7 @@ impl BodyMeshEntry {
     fn from_skel(
         skel: ModelSkel,
         materials: Option<&MaterialCatalog>,
-        namespace: asset_core::AssetNamespace,
+        namespace: asset_core::FamilyId,
     ) -> Self {
         let (material_keys, material_edges) =
             capture_xmodel_material_slots(&skel.surface_materials, materials.map(|c| &**c));
@@ -125,43 +123,7 @@ impl BodyMeshBuild {
         };
         self.insert_entry(
             skel.name.clone(),
-            BodyMeshEntry::from_skel(skel, Some(materials), asset_core::AssetNamespace::Iw4),
-        );
-    }
-
-    pub fn capture_t5(
-        &mut self,
-        stream: &fastfile_t5::ZoneStream<'_>,
-        strings: &fastfile_t5::ScriptStrings,
-        materials: &MaterialCatalog,
-    ) {
-        let Some(geometry) = stream.latest_xmodel() else {
-            return;
-        };
-        let Some(skel) = capture_body_skel_t5(stream, strings, geometry, Some(materials)) else {
-            return;
-        };
-        self.insert_entry(
-            skel.name.clone(),
-            BodyMeshEntry::from_skel(skel, Some(materials), asset_core::AssetNamespace::T5),
-        );
-    }
-
-    pub fn capture_iw5(
-        &mut self,
-        stream: &fastfile_iw5::ZoneStream<'_>,
-        strings: &fastfile_iw5::ScriptStrings,
-        materials: &MaterialCatalog,
-    ) {
-        let Some(geometry) = stream.latest_xmodel() else {
-            return;
-        };
-        let Some(skel) = capture_body_skel_iw5(stream, strings, geometry, Some(materials)) else {
-            return;
-        };
-        self.insert_entry(
-            skel.name.clone(),
-            BodyMeshEntry::from_skel(skel, Some(materials), asset_core::AssetNamespace::Iw5),
+            BodyMeshEntry::from_skel(skel, Some(materials), asset_core::FamilyId::IW4),
         );
     }
 
@@ -175,12 +137,12 @@ impl BodyMeshBuild {
     }
 
     pub fn insert_captured(&mut self, skel: crate::ModelSkel, materials: Option<&MaterialCatalog>) {
-        self.insert_in(asset_core::AssetNamespace::Iw4, skel, materials);
+        self.insert_in(asset_core::FamilyId::IW4, skel, materials);
     }
 
     pub fn insert_in(
         &mut self,
-        namespace: asset_core::AssetNamespace,
+        namespace: asset_core::FamilyId,
         skel: ModelSkel,
         materials: Option<&MaterialCatalog>,
     ) {

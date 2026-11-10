@@ -6,7 +6,12 @@ pub(crate) fn fly_camera(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
     sim_cam: Option<Res<SimCamera>>,
-    mut q: Query<(&mut Transform, &mut FlyCamera)>,
+    level: Option<Res<net::ClientLevel>>,
+    mut q: Query<(
+        &mut Transform,
+        &mut FlyCamera,
+        &mut render_scene::CameraWorld,
+    )>,
 ) {
     let (sim_driven, freeze_fly) = sim_cam
         .as_ref()
@@ -15,8 +20,16 @@ pub(crate) fn fly_camera(
     if sim_driven || freeze_fly {
         return;
     }
+    // A portal-atlas point names its slab; a shared-scene point does not.
+    let slab_owned = !matches!(
+        level
+            .as_deref()
+            .and_then(|level| level.content.atlas())
+            .map(|atlas| &atlas.space),
+        Some(asset_core::world_frame::SceneSpace::Shared(_))
+    );
     let dt = time.delta_secs();
-    for (mut transform, mut cam) in &mut q {
+    for (mut transform, mut cam, mut camera_world) in &mut q {
         let look = 1.6 * dt;
         let mut yaw_delta = 0.0;
         let mut pitch_delta = 0.0;
@@ -85,6 +98,11 @@ pub(crate) fn fly_camera(
                 1.0
             };
             transform.translation += movement.normalize() * cam.speed * sprint * dt;
+        }
+        if slab_owned {
+            camera_world.0 = asset_core::atlas::WorldLayout
+                .world_at(transform.translation.to_array())
+                .index();
         }
     }
 }

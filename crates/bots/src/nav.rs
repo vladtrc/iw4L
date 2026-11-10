@@ -5,9 +5,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use sim::{ClientId, SimBrush};
 
 use crate::observation::ModeObjective;
-use crate::query::{HullTrace, QueryResult, QuerySubsystem, SightSample, WalkSample, WorldQuery};
+use crate::query::{HullTrace, QueryResult, SightSample, WalkSample, WorldQuery};
 
-pub const NAV_SCHEMA: u32 = 9;
+pub const NAV_SCHEMA: u32 = 10;
 pub const GRID_IN: f32 = 48.0;
 pub const SNAP_IN: f32 = 256.0;
 pub const STEP_Z_IN: f32 = 18.0;
@@ -37,6 +37,7 @@ pub enum TraversalKind {
     Walk,
     Drop,
     BreakGlass,
+    Portal,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -79,6 +80,7 @@ impl TraversalKind {
             Self::Walk => 0,
             Self::Drop => 1,
             Self::BreakGlass => 2,
+            Self::Portal => 3,
         }
     }
 
@@ -87,6 +89,7 @@ impl TraversalKind {
             0 => Some(Self::Walk),
             1 => Some(Self::Drop),
             2 => Some(Self::BreakGlass),
+            3 => Some(Self::Portal),
             _ => None,
         }
     }
@@ -438,57 +441,66 @@ fn column_floors(
     floors
 }
 
-fn merge_column(nodes: &mut Vec<[f32; 3]>, dedupe: &mut Buckets, floors: &[Floor]) -> bool {
-    let before = nodes.len();
-    let mut boundary = false;
-    for floor in floors {
-        if nodes.len() >= u16::MAX as usize {
-            break;
-        }
-        let feet = floor.feet;
-        if floor.standable
-            && !neighbors(dedupe, feet, DEDUPE_IN).into_iter().any(|i| {
-                dist_xy(nodes[i], feet) < DEDUPE_IN && (nodes[i][2] - feet[2]).abs() < DEDUPE_IN
-            })
-        {
-            dedupe
-                .entry(cell(feet, DEDUPE_IN))
-                .or_default()
-                .push(nodes.len());
-            nodes.push(feet);
-            boundary |= floor.boundary;
-        }
-    }
-    boundary || nodes.len() == before
+#[derive(Default)]
+struct NodeSamples {
+    nodes: Vec<[f32; 3]>,
+    dedupe: Buckets,
+    columns: usize,
 }
 
-fn sample_columns(
-    world: &impl BakeTraces,
-    positions: &[[f32; 3]],
-    (z_top, z_bot): (f32, f32),
-    find_boundary: bool,
-    nodes: &mut Vec<[f32; 3]>,
-    dedupe: &mut Buckets,
-    columns: &mut usize,
-    mut boundary: impl FnMut([f32; 3]),
-) -> bool {
-    const BATCH: usize = 4096;
-    for batch in positions.chunks(BATCH) {
-        let floors = par_map(batch.len(), |i| {
-            column_floors(&mut Baker(world), batch[i], z_top, z_bot, find_boundary)
-        });
-        for (at, floors) in batch.iter().zip(&floors) {
-            if *columns >= COLUMN_CAP || nodes.len() >= u16::MAX as usize {
-                return false;
+impl NodeSamples {
+    fn merge_column(&mut self, floors: &[Floor]) -> bool {
+        let nodes = &mut self.nodes;
+        let dedupe = &mut self.dedupe;
+        let before = nodes.len();
+        let mut boundary = false;
+        for floor in floors {
+            if nodes.len() >= u16::MAX as usize {
+                break;
             }
-            let edge = merge_column(nodes, dedupe, floors);
-            *columns += 1;
-            if edge {
-                boundary(*at);
+            let feet = floor.feet;
+            if floor.standable
+                && !neighbors(dedupe, feet, DEDUPE_IN).into_iter().any(|i| {
+                    dist_xy(nodes[i], feet) < DEDUPE_IN && (nodes[i][2] - feet[2]).abs() < DEDUPE_IN
+                })
+            {
+                dedupe
+                    .entry(cell(feet, DEDUPE_IN))
+                    .or_default()
+                    .push(nodes.len());
+                nodes.push(feet);
+                boundary |= floor.boundary;
             }
         }
+        boundary || nodes.len() == before
     }
-    true
+
+    fn sample_columns(
+        &mut self,
+        world: &impl BakeTraces,
+        positions: &[[f32; 3]],
+        (z_top, z_bot): (f32, f32),
+        find_boundary: bool,
+        mut boundary: impl FnMut([f32; 3]),
+    ) -> bool {
+        const BATCH: usize = 4096;
+        for batch in positions.chunks(BATCH) {
+            let floors = par_map(batch.len(), |i| {
+                column_floors(&mut Baker(world), batch[i], z_top, z_bot, find_boundary)
+            });
+            for (at, floors) in batch.iter().zip(&floors) {
+                if self.columns >= COLUMN_CAP || self.nodes.len() >= u16::MAX as usize {
+                    return false;
+                }
+                let edge = self.merge_column(floors);
+                self.columns += 1;
+                if edge {
+                    boundary(*at);
+                }
+            }
+        }
+        true
+    }
 }
 
 pub fn bake_seeded(
@@ -499,13 +511,12 @@ pub fn bake_seeded(
 ) -> NavGraph {
     let (mins, maxs) = bounds;
     let step = GRID_IN;
-    let mut nodes = Vec::new();
+    let mut samples = NodeSamples::default();
     let z_top = maxs[2] + 72.0;
     let z_bot = mins[2] - 8.0;
-    let mut dedupe = Buckets::new();
     for seed in seeds {
         let floors = column_floors(&mut Baker(world), *seed, seed[2] + STEP_Z_IN, z_bot, false);
-        merge_column(&mut nodes, &mut dedupe, &floors);
+        samples.merge_column(&floors);
     }
     // Stable world-space tiles keep a distant bounds change from shifting doors
     // between samples. Multi-source breadth-first order gives every seed coverage
@@ -547,18 +558,10 @@ pub fn bake_seeded(
             }
         }
     }
-    let mut columns = 0;
     let mut refinements = Vec::new();
-    let mut truncated = !sample_columns(
-        world,
-        &scan,
-        (z_top, z_bot),
-        true,
-        &mut nodes,
-        &mut dedupe,
-        &mut columns,
-        |at| refinements.push([at[0], at[1]]),
-    );
+    let mut truncated = !samples.sample_columns(world, &scan, (z_top, z_bot), true, |at| {
+        refinements.push([at[0], at[1]])
+    });
     // Finish base coverage before refinement can consume the node/column cap.
     // Refine in the same seed-first tile order, with the remaining bake budget.
     if !truncated {
@@ -580,17 +583,9 @@ pub fn bake_seeded(
                 }
             }
         }
-        truncated = !sample_columns(
-            world,
-            &refine,
-            (z_top, z_bot),
-            false,
-            &mut nodes,
-            &mut dedupe,
-            &mut columns,
-            |_| {},
-        );
+        truncated = !samples.sample_columns(world, &refine, (z_top, z_bot), false, |_| {});
     }
+    let NodeSamples { nodes, .. } = samples;
     let n = nodes.len();
     let buckets = node_buckets(&nodes, step);
     let mut adj = par_map(n, |i| {
@@ -661,6 +656,104 @@ pub fn bake_seeded(
         drops,
         component_links,
     }
+}
+
+/// Join independently baked worlds without sampling the empty slab between them.
+pub fn append_world(graph: &mut NavGraph, other: NavGraph) -> bool {
+    let offset = graph.nodes.len();
+    if offset + other.nodes.len() > u16::MAX as usize {
+        graph.truncated = true;
+        return false;
+    }
+    graph.nodes.extend(other.nodes);
+    graph.adj.extend(other.adj.into_iter().map(|edges| {
+        edges
+            .into_iter()
+            .map(|edge| NavEdge {
+                to: (usize::from(edge.to) + offset) as u16,
+                ..edge
+            })
+            .collect()
+    }));
+    graph.truncated |= other.truncated;
+    graph.drops += other.drops;
+    true
+}
+
+pub fn portal_entrance(door: sim::world_graph::AtlasDoor) -> [f32; 3] {
+    let offset = sim::world_graph::world_offset(door.world.index());
+    std::array::from_fn(|i| {
+        door.base[i] + offset[i] + door.normal[i] * 20.0 + if i == 2 { 1.5 } else { 0.0 }
+    })
+}
+
+/// A portal is an explicit nonlocal edge, never a walk across the slab.
+/// Only attach it to nearby supports reachable by the standing hull.
+pub fn link_portals(
+    world: &impl BakeTraces,
+    graph: &mut NavGraph,
+    atlas: &sim::world_graph::Atlas,
+) {
+    let mut query = Baker(world);
+    for portal in &atlas.portals {
+        let mut endpoints = Vec::new();
+        for door in [portal.a, portal.b] {
+            let at = portal_entrance(door);
+            let candidates: Vec<_> = graph
+                .nodes
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| distance(**p, at) < 128.0)
+                .map(|(i, p)| (i, *p))
+                .collect();
+            let links: Vec<_> = candidates
+                .into_iter()
+                .filter(|(_, p)| query.walk_hull(at, *p) == Ok(WalkSample::Clear))
+                .collect();
+            if links.is_empty() || graph.nodes.len() >= u16::MAX as usize {
+                break;
+            }
+            let id = graph.nodes.len() as u16;
+            graph.nodes.push(at);
+            graph.adj.push(Vec::new());
+            for (i, p) in links {
+                let cost = distance(at, p);
+                graph.adj[i].push(NavEdge {
+                    to: id,
+                    cost,
+                    kind: TraversalKind::Walk,
+                });
+                graph.adj[id as usize].push(NavEdge {
+                    to: i as u16,
+                    cost,
+                    kind: TraversalKind::Walk,
+                });
+            }
+            endpoints.push(id);
+        }
+        if let [a, b] = endpoints[..] {
+            graph.adj[a as usize].push(NavEdge {
+                to: b,
+                cost: 40.0,
+                kind: TraversalKind::Portal,
+            });
+            graph.adj[b as usize].push(NavEdge {
+                to: a,
+                cost: 40.0,
+                kind: TraversalKind::Portal,
+            });
+        }
+    }
+    graph.component = label_components(graph.nodes.len(), &graph.adj);
+    graph.component_links = vec![
+        Vec::new();
+        graph
+            .component
+            .iter()
+            .copied()
+            .max()
+            .map_or(0, |i| i as usize + 1)
+    ];
 }
 
 fn dist_xy(a: [f32; 3], b: [f32; 3]) -> f32 {
@@ -918,6 +1011,7 @@ enum RoutePhase {
 /// live state is still rechecked before a result is used.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct RouteKey {
+    portal_state: u64,
     graph: (u64, u64, u32, u32),
     to: [f32; 3],
     objective: Option<(u32, u32, crate::observation::ObjectiveAction, [f32; 3], f32)>,
@@ -933,6 +1027,7 @@ impl RouteKey {
     ) -> Self {
         Self {
             graph: graph_key(graph),
+            portal_state: 0,
             to,
             objective: objective.map(|o| (o.id, o.round, o.action, o.origin, o.radius)),
             from,
@@ -941,6 +1036,7 @@ impl RouteKey {
 
     fn matches(&self, other: &Self) -> bool {
         self.graph == other.graph
+            && self.portal_state == other.portal_state
             && self.to == other.to
             && self.objective == other.objective
             && distance(self.from, other.from) <= GRID_IN
@@ -962,8 +1058,6 @@ pub struct RouteRequest {
     goal_kinds: BTreeMap<u16, TraversalKind>,
     search: Option<RouteSearch>,
     path: Vec<RouteStep>,
-    age_slices: u32,
-    starved_slices: u32,
 }
 
 impl RouteRequest {
@@ -982,29 +1076,7 @@ impl RouteRequest {
             goal_kinds: BTreeMap::new(),
             search: None,
             path: Vec::new(),
-            age_slices: 0,
-            starved_slices: 0,
         }
-    }
-
-    /// Everything a granted query can move. Equal marks mean the slice bought
-    /// nothing, which is what starvation counts.
-    fn progress_mark(&self) -> (RoutePhase, usize, usize, usize, usize, u32, usize, u32) {
-        (
-            self.phase,
-            self.start_cursor,
-            self.starts.len(),
-            self.goal_cursor,
-            self.goals.len(),
-            self.search.as_ref().map_or(0, |s| s.expanded),
-            self.path.len(),
-            self.probe.as_ref().map_or(0, |p| p.done),
-        )
-    }
-
-    /// Connector work a cancelled request throws away and a reissue must redo.
-    fn holds_attachments(&self) -> bool {
-        self.start_cursor > 0 || !self.starts.is_empty() || !self.goals.is_empty()
     }
 
     fn expanded(&self) -> u32 {
@@ -1153,7 +1225,12 @@ impl RouteRequest {
             let search = self
                 .search
                 .get_or_insert_with(|| RouteSearch::begin(graph, starts, goals));
-            self.path = search.advance(graph, budget)?;
+            self.path = search.advance_filtered(graph, budget, |from, edge| {
+                edge.kind != TraversalKind::Portal
+                    || world
+                        .portal_waypoint(graph.nodes[from as usize], graph.nodes[edge.to as usize])
+                        .is_some()
+            })?;
             self.phase = RoutePhase::ValidateEntry;
         }
         // The completed route waits here for collision quota; A* does not rerun.
@@ -1208,63 +1285,26 @@ impl RouteRequest {
     }
 }
 
-/// Route outcomes and starvation for the bot that owns this work, plus the
-/// terminal results that must not be re-searched against an unchanged graph.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct RouteStats {
-    pub completed: u32,
-    pub terminal: u32,
-    pub cancelled: u32,
-    /// Requests dropped while they already held attachment work.
-    pub discarded_attachments: u32,
-    pub denied_slices: u32,
-    pub max_age_slices: u32,
-    pub max_starved_slices: u32,
-}
-
 const TERMINAL_MEMO: usize = 8;
 
 /// One bot's routing work: the request being served and the graph-topology
 /// answers that reissuing cannot change.
 #[derive(Clone, Debug, Default)]
 pub struct RouteWork {
+    portal_graph: Option<(u64, u64, u32, u32)>,
+    portal_edges: Vec<(u16, u16)>,
     active: Option<RouteRequest>,
     terminal: Vec<(RouteKey, PathError)>,
-    stats: RouteStats,
 }
 
 impl RouteWork {
-    pub fn stats(&self) -> RouteStats {
-        self.stats
-    }
-
     pub fn is_active(&self) -> bool {
         self.active.is_some()
     }
 
-    /// Slices the live request has waited, and its longest run without progress.
-    pub fn live_age(&self) -> (u32, u32) {
-        self.active
-            .as_ref()
-            .map_or((0, 0), |r| (r.age_slices, r.starved_slices))
-    }
-
     pub fn cancel(&mut self) {
-        self.drop_active(true);
+        self.active = None;
         self.terminal.clear();
-    }
-
-    fn drop_active(&mut self, cancelled: bool) {
-        let Some(request) = self.active.take() else {
-            return;
-        };
-        if !cancelled {
-            return;
-        }
-        self.stats.cancelled = self.stats.cancelled.saturating_add(1);
-        if request.holds_attachments() {
-            self.stats.discarded_attachments = self.stats.discarded_attachments.saturating_add(1);
-        }
     }
 
     /// Budget denial stays pending; a truncated or disconnected graph does not
@@ -1299,16 +1339,41 @@ pub fn find_route_resumable(
     budget: &mut u32,
     work: &mut RouteWork,
 ) -> Result<Vec<RouteStep>, PathError> {
-    world.enter(QuerySubsystem::Connector);
-    let key = RouteKey::new(graph, from, to, objective);
+    let mut key = RouteKey::new(graph, from, to, objective);
+    // A topology answer becomes stale when an otherwise valid portal closes or
+    // reopens. Probe only nonlocal edges; do not clone/rebuild the baked graph.
+    use std::hash::{Hash, Hasher};
+    let mut portal_state = std::collections::hash_map::DefaultHasher::new();
+    if work.portal_graph != Some(key.graph) {
+        work.portal_edges = graph
+            .adj
+            .iter()
+            .enumerate()
+            .flat_map(|(from, edges)| {
+                edges
+                    .iter()
+                    .filter(|edge| edge.kind == TraversalKind::Portal)
+                    .map(move |edge| (from as u16, edge.to))
+            })
+            .collect();
+        work.portal_graph = Some(key.graph);
+    }
+    for &(from, to) in &work.portal_edges {
+        world
+            .portal_waypoint(graph.nodes[from as usize], graph.nodes[to as usize])
+            .is_some()
+            .hash(&mut portal_state);
+    }
+    key.portal_state = portal_state.finish();
     // Terminal answers belong to the coverage that produced them.
-    work.terminal.retain(|(k, _)| k.graph == key.graph);
+    work.terminal
+        .retain(|(k, _)| k.graph == key.graph && k.portal_state == key.portal_state);
     if work
         .active
         .as_ref()
         .is_some_and(|r| !r.key.matches(&key) || r.key.graph != key.graph)
     {
-        work.drop_active(true);
+        work.active = None;
     }
     if graph.is_empty() {
         let error = if graph.truncated {
@@ -1325,31 +1390,18 @@ pub fn find_route_resumable(
     let request = work
         .active
         .get_or_insert_with(|| RouteRequest::begin(key, objective));
-    let before = request.progress_mark();
     let result = request.advance(world, graph, budget, from);
-    request.age_slices = request.age_slices.saturating_add(1);
-    if request.progress_mark() == before {
-        request.starved_slices = request.starved_slices.saturating_add(1);
-    } else {
-        request.starved_slices = 0;
-    }
-    let stats = &mut work.stats;
-    stats.max_age_slices = stats.max_age_slices.max(request.age_slices);
-    stats.max_starved_slices = stats.max_starved_slices.max(request.starved_slices);
     match result {
         Err(PathError::BudgetExhausted { expanded }) => {
-            stats.denied_slices = stats.denied_slices.saturating_add(1);
             Err(PathError::BudgetExhausted { expanded })
         }
         Err(error) => {
-            work.stats.terminal = work.stats.terminal.saturating_add(1);
-            work.drop_active(false);
+            work.active = None;
             work.remember(key, error);
             Err(error)
         }
         Ok(path) => {
-            work.stats.completed = work.stats.completed.saturating_add(1);
-            work.drop_active(false);
+            work.active = None;
             Ok(path)
         }
     }
@@ -1374,6 +1426,7 @@ fn near_nodes(graph: &NavGraph, at: [f32; 3]) -> Vec<(u16, f32)> {
 
 #[derive(Clone, Debug)]
 pub struct RouteSearch {
+    nonlocal_edges: bool,
     graph_key: (u64, u64, u32, u32),
     goals: Vec<u16>,
     is_goal: Vec<bool>,
@@ -1393,6 +1446,11 @@ impl RouteSearch {
     pub fn begin(graph: &NavGraph, starts: &[(u16, f32)], goals: &[u16]) -> Self {
         let n = graph.nodes.len();
         let mut search = Self {
+            nonlocal_edges: graph
+                .adj
+                .iter()
+                .flatten()
+                .any(|edge| edge.kind == TraversalKind::Portal),
             graph_key: graph_key(graph),
             goals: goals.to_vec(),
             is_goal: vec![false; n],
@@ -1418,6 +1476,9 @@ impl RouteSearch {
     }
 
     fn heuristic(&self, graph: &NavGraph, id: u16) -> f32 {
+        if self.nonlocal_edges {
+            return 0.0;
+        }
         self.goals
             .iter()
             .map(|&g| distance(graph.nodes[id as usize], graph.nodes[g as usize]))
@@ -1428,6 +1489,15 @@ impl RouteSearch {
         &mut self,
         graph: &NavGraph,
         budget: &mut u32,
+    ) -> Result<Vec<RouteStep>, PathError> {
+        self.advance_filtered(graph, budget, |_, _| true)
+    }
+
+    fn advance_filtered(
+        &mut self,
+        graph: &NavGraph,
+        budget: &mut u32,
+        mut allowed: impl FnMut(u16, &NavEdge) -> bool,
     ) -> Result<Vec<RouteStep>, PathError> {
         if self.graph_key != graph_key(graph) || self.g.len() != graph.nodes.len() {
             return Err(PathError::GraphChanged);
@@ -1458,6 +1528,9 @@ impl RouteSearch {
                 return Ok(path);
             }
             for edge in &graph.adj[i as usize] {
+                if !allowed(i, edge) {
+                    continue;
+                }
                 let j = edge.to as usize;
                 let ng = self.g[i as usize] + edge.cost;
                 if !self.closed[j] && ng + 0.01 < self.g[j] {

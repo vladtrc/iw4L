@@ -25,6 +25,6 @@ pub fn register_dyn_ent_frontend(app: &mut App) {
         drain_cell_dyn_model_cmds
             .in_set(frame::InMatch)
             .in_set(frame::RenderSet::Anim)
-            .in_set(frame::WorkerCmdSet::CellDynModel),
+            .in_set(frame::WorkerCmdSet::DynamicModels),
     );
 }

@@ -14,13 +14,8 @@ pub struct SmodelCacheGpu {
     ib: Option<Buffer>,
 
     dynamic_ib: Option<Buffer>,
-    uploaded_revision: Option<u64>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SmcPatchWriteRefuse {
-    NoBuffer,
-    LockRejected,
+    uploaded_layout: Option<(frame::WorldProducts, u64)>,
+    uploaded_index_words: usize,
 }
 
 impl SmodelCacheGpu {
@@ -67,16 +62,22 @@ impl SmodelCacheGpu {
         &mut self,
         queue: &RenderQueue,
         indices: &[u16],
+        world_products: frame::WorldProducts,
         layout_revision: u64,
     ) -> bool {
-        if self.uploaded_revision == Some(layout_revision) && layout_revision != 0 {
+        if layout_revision != 0
+            && self.uploaded_layout.is_some_and(|(owner, revision)| {
+                owner.same_as(world_products) && revision == layout_revision
+            })
+        {
             return true;
         }
         let Some(ib) = self.dynamic_ib.as_ref() else {
             return false;
         };
         if indices.is_empty() {
-            self.uploaded_revision = Some(layout_revision);
+            self.uploaded_layout = Some((world_products, layout_revision));
+            self.uploaded_index_words = 0;
             return false;
         }
         let bytes = bytemuck::cast_slice(indices);
@@ -85,8 +86,14 @@ impl SmodelCacheGpu {
             return false;
         }
         write_buffer_padded(queue, ib, bytes);
-        self.uploaded_revision = Some(layout_revision);
+        self.uploaded_index_words = indices.len();
+        self.uploaded_layout = Some((world_products, layout_revision));
         false
+    }
+
+    pub fn index_upload(&self) -> Option<(frame::WorldProducts, u64, usize)> {
+        self.uploaded_layout
+            .map(|(owner, revision)| (owner, revision, self.uploaded_index_words))
     }
 
     pub fn bank_byte_range(cache_index: u16) -> Option<(u64, u64)> {
@@ -99,12 +106,12 @@ impl SmodelCacheGpu {
         queue: &RenderQueue,
         lock: SmcPatchLock,
         bytes: &[u8],
-    ) -> Result<(), SmcPatchWriteRefuse> {
+    ) -> Result<(), &'static str> {
         let Some(vb) = self.vb.as_ref() else {
-            return Err(SmcPatchWriteRefuse::NoBuffer);
+            return Err("static model patch buffer missing");
         };
         if !lock.accepts_bytes(bytes.len()) {
-            return Err(SmcPatchWriteRefuse::LockRejected);
+            return Err("static model patch lock rejected");
         }
         queue.write_buffer(vb, u64::from(lock.byte_offset), bytes);
         Ok(())
@@ -115,13 +122,13 @@ impl SmodelCacheGpu {
         queue: &RenderQueue,
         byte_offset: u32,
         bytes: &[u8],
-    ) -> Result<(), SmcPatchWriteRefuse> {
+    ) -> Result<(), &'static str> {
         let Some(ib) = self.ib.as_ref() else {
-            return Err(SmcPatchWriteRefuse::NoBuffer);
+            return Err("static model patch buffer missing");
         };
         let end = (byte_offset as usize).saturating_add(bytes.len());
         if end > SMC_INDEX_U16_N * 2 {
-            return Err(SmcPatchWriteRefuse::LockRejected);
+            return Err("static model patch lock rejected");
         }
         queue.write_buffer(ib, u64::from(byte_offset), bytes);
         Ok(())

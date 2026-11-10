@@ -1,3 +1,4 @@
+use crate::CapturedStringTable;
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::Arc;
@@ -292,55 +293,6 @@ pub struct ZoneUiImage {
     pub rgba: Arc<Vec<u8>>,
 
     pub source: &'static str,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct CapturedStringTable {
-    pub name: String,
-    pub columns: usize,
-    pub rows: usize,
-    pub cells: Vec<String>,
-}
-
-impl CapturedStringTable {
-    #[must_use]
-    pub fn cell(&self, row: i32, col: i32) -> &str {
-        if row < 0 || col < 0 {
-            return "";
-        }
-        let row = row as usize;
-        let col = col as usize;
-        if col >= self.columns || row >= self.rows {
-            return "";
-        }
-        self.cells
-            .get(row.saturating_mul(self.columns).saturating_add(col))
-            .map(String::as_str)
-            .unwrap_or("")
-    }
-
-    #[must_use]
-    pub fn lookup_col(&self, key: &str, col: i32) -> &str {
-        match self.lookup_row(key) {
-            Some(row) => self.cell(row, col),
-            None => "",
-        }
-    }
-
-    #[must_use]
-    pub fn lookup_row(&self, key: &str) -> Option<i32> {
-        self.lookup_row_in_col(0, key)
-    }
-
-    #[must_use]
-    pub fn lookup_row_in_col(&self, col: i32, key: &str) -> Option<i32> {
-        for row in 0..self.rows {
-            if self.cell(row as i32, col).eq_ignore_ascii_case(key) {
-                return Some(row as i32);
-            }
-        }
-        None
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -744,6 +696,33 @@ pub fn load_menu_catalog(path: &Path) -> Result<MenuCatalog, String> {
     load_menu_catalog_with_iwd(path, None)
 }
 
+#[derive(Resource, Clone)]
+pub struct CampaignHudCatalog(pub Arc<MenuCatalog>);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BloodOverlayAssets {
+    pub material: &'static str,
+    pub color: &'static str,
+    pub mask: &'static str,
+}
+
+impl BloodOverlayAssets {
+    pub const fn for_profile(profile: asset_core::RuntimeProfile) -> Self {
+        match profile {
+            asset_core::RuntimeProfile::Campaign => Self {
+                material: "splatter_alt_sp",
+                color: "blood_defocus_color_sp",
+                mask: "blood_defocus_mask_sp",
+            },
+            asset_core::RuntimeProfile::Multiplayer => Self {
+                material: "splatter_alt",
+                color: "blood_defocus_color",
+                mask: "blood_defocus_mask",
+            },
+        }
+    }
+}
+
 fn load_menu_catalog_with_iwd(path: &Path, games: Option<&Path>) -> Result<MenuCatalog, String> {
     let image = open_zone(path).map_err(|e| e.to_string())?;
     let header = image.header().map_err(|e| e.to_string())?;
@@ -766,6 +745,7 @@ fn load_menu_catalog_with_iwd(path: &Path, games: Option<&Path>) -> Result<MenuC
         image_links: HashMap::new(),
         images: Vec::new(),
         technique_links: HashMap::new(),
+        technique_sets: Vec::new(),
         material_ts2d: HashMap::new(),
         loading_asset: None,
     };
@@ -786,7 +766,7 @@ enum ImageLink {
 
 #[derive(Clone, Copy)]
 enum TechniqueLink {
-    Direct(fastfile_iw4::TechniqueSetGeometry),
+    Direct(usize),
     Alias(Ptr),
 }
 
@@ -819,6 +799,7 @@ struct MenuSink {
     images: Vec<CapturedZoneImage>,
 
     technique_links: HashMap<Ptr, TechniqueLink>,
+    technique_sets: Vec<fastfile_iw4::TechniqueSetGeometry>,
 
     material_ts2d: HashMap<String, usize>,
 
@@ -876,7 +857,7 @@ fn hud_unlit_pass_states(
             )
         })
         .collect::<Option<Vec<_>>>()
-        .unwrap_or_default();
+        .unwrap_or(Vec::new());
     (count, states)
 }
 
@@ -969,7 +950,7 @@ impl MenuSink {
     fn resolve_technique_set(&self, mut slot: Ptr) -> Option<fastfile_iw4::TechniqueSetGeometry> {
         for _ in 0..32 {
             match self.technique_links.get(&slot).copied()? {
-                TechniqueLink::Direct(set) => return Some(set),
+                TechniqueLink::Direct(index) => return self.technique_sets.get(index).copied(),
                 TechniqueLink::Alias(target) => slot = target,
             }
         }
@@ -1308,9 +1289,11 @@ impl AssetLinkSink for MenuSink {
             }
             AssetType::TechniqueSet => {
                 if let Some(set) = s.latest_technique_set() {
-                    self.bind_technique(slot, TechniqueLink::Direct(set));
+                    let index = self.technique_sets.len();
+                    self.technique_sets.push(set);
+                    self.bind_technique(slot, TechniqueLink::Direct(index));
                     if let Some(ins) = insert_slot {
-                        self.bind_technique(ins, TechniqueLink::Direct(set));
+                        self.bind_technique(ins, TechniqueLink::Direct(index));
                     }
                 }
                 return Ok(());
@@ -1700,10 +1683,10 @@ impl AssetLinkSink for MenuSink {
         let Some(body) = self.script_set_stack.pop() else {
             return;
         };
-        if let Some(slot) = insert_slot {
-            if let Some(scripts) = self.script_sets.get(&ptr_key(body)).cloned() {
-                self.script_sets.insert(ptr_key(slot), scripts);
-            }
+        if let Some(slot) = insert_slot
+            && let Some(scripts) = self.script_sets.get(&ptr_key(body)).cloned()
+        {
+            self.script_sets.insert(ptr_key(slot), scripts);
         }
     }
 
@@ -1770,7 +1753,7 @@ impl AssetLinkSink for MenuSink {
 
     fn capture_font(&mut self, rec: &FontCapture<'_>) -> fastfile_iw4::Result<()> {
         let mut glyphs = Vec::new();
-        for chunk in rec.glyphs.chunks_exact(sz::GLYPH) {
+        for chunk in rec.glyphs.as_chunks::<{ sz::GLYPH }>().0.iter() {
             let mut row = [0u8; sz::GLYPH];
             row.copy_from_slice(chunk);
             glyphs.push(GlyphCapture::from_row(&row));

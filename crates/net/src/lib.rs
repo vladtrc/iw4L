@@ -1,49 +1,46 @@
+pub use client::command_capture::{CapturedCommand, LocalCommandCapture};
+pub use client::level::{ClientCollision, ClientLevel};
 mod local_account;
 pub use local_account::{AccountSaveReceipt, LocalAccount};
 mod account_identity;
 pub use account_identity::{AccountChallenge, AccountIdentityError, AccountKey, AccountProof};
 pub mod authority;
 pub mod client;
-pub mod gaps;
 mod observe;
 pub mod plugin;
 pub mod policy;
-pub mod reconciliation;
-pub mod role_matrix;
 pub mod schedule;
 pub mod session_core;
 pub mod signon;
 pub mod svc_gamenotify;
+mod svc_objective;
 pub mod svc_playercard;
 pub mod svc_scores;
 mod svc_script_audio;
+pub use svc_objective::SvcObjective;
 pub mod svc_sound;
 mod time_scale;
 pub mod transport;
 
-pub use authority::actions::{
-    ActionAdmission, ActionRequestIds, ClientActionLedger, MAX_REMEMBERED_ACTIONS_PER_CLIENT,
-};
 pub use authority::inbox::{
     AUTHORITY_HZ, AUTHORITY_MS, ActionEnqueueError, AuthorityClock, ClientActionInbox,
     ClientCommandInbox, GatheredCommands, MAX_PENDING_ACTIONS_PER_CLIENT, MAX_REDUNDANT_CMDS,
     ServerTime, run_fixed_authority_stream,
 };
 pub use authority::runtime::{
-    AuthorityInputGate, AuthorityLoadHold, AuthorityPhaseCensus, AuthorityPhaseTrace,
-    AuthorityWorld, ClientShotSamples, DumpConfigurationChangeLog, DumpDeathLog, DumpGiveLog,
-    FixedUpdateCensus, ListenFanoutCensus, NetDiagnostics, PendingAcks, PendingAuthorityInput,
-    PendingStepResult, ServerTick, ServerTickData, authority_bookkeeping, authority_should_tick,
+    AuthorityInputGate, AuthorityLoadHold, AuthorityWorld, ClientShotSamples, DumpDeathLog,
+    ListenFanoutCensus, NetDiagnostics, PendingAcks, PendingAuthorityInput, PendingStepResult,
+    ServerTick, ServerTickData, authority_bookkeeping, authority_should_tick,
 };
-pub use client::frame_census::{ClientPhaseCensus, HUD_STAGE_N, UpdatePhaseCensus};
+pub use client::frame_census::{HUD_STAGE_N, UpdatePhaseCensus};
 pub use client::frame_clock::{FrameClock, GameActive, GameJoinCensus};
 pub use client::input::{
-    ClientActionInput, KEY_FRAME_MSEC_MAX, LookState, accumulate_look, build_usercmd,
-    frame_time_msec, idle_usercmd, key_frame_msec, look_angles_from_degrees,
+    ClientActionInput, KEY_FRAME_MSEC_MAX, LookState, build_usercmd, frame_time_msec, idle_usercmd,
+    key_frame_msec, look_angles_from_degrees,
 };
 pub use client::predict::{
     AckMatch, ClientPrediction, CmdSeq, DEFAULT_HISTORY_CAP, MAX_UNACKED_SNAPSHOTS, MoveHistory,
-    MoveRecord, PredictionMetrics, ReconcileOutcome, snapshot_ground_e_type,
+    MoveRecord, PredictionMetrics, snapshot_ground_e_type,
 };
 pub use client::predicted_error::PredictedError;
 pub use client::presentation::centity_runtime::{
@@ -53,26 +50,24 @@ pub use client::presentation::centity_runtime::{
     remote_body_submits, remote_pose_sample,
 };
 pub use client::presentation::entities::{
-    CEntity, CEntityBirthCensus, CEntitySlots, CLIENT_ENTITY_SLOT_COUNT, CorpseIdentity,
-    register_client_entities, sync_client_entities,
+    CEntity, CEntityBirthCensus, CEntitySlots, CLIENT_ENTITY_SLOT_COUNT, register_client_entities,
+    sync_client_entities,
 };
 pub use client::presentation::entity_event_dispatch::{
     AppliedEntityEventWalk, DispatchedEntityEvent, EntityBulletHit, EntityEjectBrass,
     EntityEventCursor, EntityEventDomain, EntityEventSound, EntityExplosion, EntityGrenadeContact,
     EntityMeleeBlood, EntityMovementSound, EntityObituary, EntityPhysicsSphere, EntityPlayFx,
-    EntityResetAds, EntityRumble, EntityWeaponFire, KillcamFxTransition, UnsupportedEntityEvents,
-    WeaponFirePing, WeaponFirePingBus, register_entity_event_dispatch,
+    EntityResetAds, EntityRumble, EntityWeaponFire, UnsupportedEntityEvents, WeaponFirePing,
+    WeaponFirePingBus, register_entity_event_dispatch,
 };
 pub use client::presentation::entity_event_registry::{
     EV_DISPATCH_REGISTRY, EntityEventDispatch, EntityEventRow, ev_dispatch_row,
 };
 pub use client::presentation::presented::{
-    FpvEventCues, FpvHandRecord, FpvRawHandSample, LocalPresentClient, PresentLocalCensus,
-    PresentedSnapshot, ViewweaponAim,
+    FpvEventCues, FpvHandRecord, FpvRawHandSample, LocalPresentClient, LocalPresentation,
+    PresentLocalCensus, PresentedSnapshot, ViewweaponAim,
 };
-pub use client::presentation::projectiles::{
-    PresentedProjectile, count_throw_rows, merge_presented_projectiles,
-};
+pub use client::presentation::projectiles::{ClientPredictedProjectile, ProjectileMotion};
 pub use client::proxy::{
     ADAPTIVE_DELAY_POLICY_REVISION, AnimGap, PROXY_BUFFER_TICKS, PROXY_DELAY_MS,
     PresentationSampleOutcome, PresentationSampleProvenance, PresentationSampleTime,
@@ -80,30 +75,22 @@ pub use client::proxy::{
 };
 pub use client::realtime::ClientRealtime;
 pub use client::runtime::{
-    AcceptedImpact, ClientClock, ClientCmdTemplate, ClientPhaseTrace, ClientPredictionState,
-    ClientReliableAck, ClockTick, FireCommandVerdicts, ImpactOccurrence, ImpactReconstruction,
-    LastAdoptedSnapshot, LocationCursor, PendingClientSends, PendingPelletFx,
-    PendingPresentedEntityEvents, ReceivedTicks, ReliableControlEvent, RemoteProxyState,
-    WeaponSelect, advance_cg_frame_clock, advance_cls_realtime, arm_listen_prediction,
-    cycle_weapon_select, follow_held_weapon_select, listen_prediction_needs_content,
-    predict_local_move, publish_presented, receive_ticks, reconcile_prediction,
-    register_client_runtime, register_listen_prediction_arm, sample_client_input,
-    send_pending_commands,
+    AcceptedImpact, ClientClock, ClientCmdTemplate, ClientPredictionState, ClientReliableAck,
+    ClockTick, ImpactOccurrence, ImpactReconstruction, LastAdoptedSnapshot, LocationCursor,
+    PendingClientSends, PendingPelletFx, PendingPresentedEntityEvents, ReceivedTicks,
+    ReliableControlEvent, RemoteProxyState, WeaponSelect, advance_cg_frame_clock,
+    advance_cls_realtime, arm_listen_prediction, cycle_weapon_select, follow_held_weapon_select,
+    listen_prediction_needs_content, predict_local_move, publish_presented, receive_ticks,
+    reconcile_prediction, register_client_runtime, register_listen_prediction_arm,
+    sample_client_input, send_pending_commands,
 };
-pub use gaps::{NetGap, NetGapCause, NetIdentityGaps, ScriptNotify};
 pub use plugin::NetPlugin;
 pub use policy::seat::{
     ActiveKillcams, KillcamSession, SeatSample, apply_seat_to_snapshot, killcam_seconds_to_ms,
     sample_killcam_seat, snapshot_and_sample_for_viewer, snapshot_for_viewer,
 };
-pub use reconciliation::{
-    CorrectionBoundary, CorrectionRule, IDENTITY_CONTRACT, IdentityContractRow,
-    SIDE_EFFECT_CONTRACT, STATE_CONTRACT, SideEffectContractRow, SideEffectReplayRule,
-    SnapshotOrder, StateClass, StateContractRow, classify_snapshot,
-};
 pub use schedule::{
-    AUTHORITY_TOC, AuthoritySet, CLIENT_TOC, ClientSet, PresentedPublished,
-    configure_authority_sets, configure_client_sets,
+    AuthoritySet, ClientSet, PresentedPublished, configure_authority_sets, configure_client_sets,
 };
 pub use session_core::{
     ClientMatchCore, FailStage, HostMatchApply, HostMatchCore, HostMatchEffect, HostMatchEvent,
@@ -133,8 +120,8 @@ pub use svc_sound::{PendingSvcSounds, SVC_PLAY_LOCAL, SVC_STOP_LOCAL, SvcLocalSo
 pub use transport::acked_baseline::{AckedBaselineTable, FlakyDatagramQueue};
 pub use transport::archive::{
     ARCHIVE_BYTE_BUDGET, ARCHIVE_CACHED_SNAPSHOT_CLIENTS, ARCHIVE_LOOKUP_WINDOW_TICKS,
-    ARCHIVE_MAX_TICKS, ARCHIVE_TICK_MS, ArchiveLookup, ArchiveMetrics, ArchivedFrame, FrameArchive,
-    archive_attainable_ticks,
+    ARCHIVE_MAX_TICKS, ARCHIVE_MB_DVAR, ARCHIVE_TICK_MS, ArchiveBudget, ArchiveLookup,
+    ArchiveMetrics, ArchivedFrame, FrameArchive, archive_attainable_ticks,
 };
 pub use transport::bootstrap::BootstrapAck;
 pub use transport::delta::{
@@ -146,10 +133,10 @@ pub use transport::frame::{
 };
 pub use transport::loopback_live::{ListenLoopback, ReceivedTick};
 pub use transport::master::{
-    CONTENT_IW4, CommunityPlayerCounts, MasterAdvert, MasterBridge, MasterBridgeState,
-    MasterBrowser, MasterBrowserSnapshot, MasterLaunchIntent, MasterLifecycleFact,
-    MasterMatchOffer, MasterMatchStart, MasterMenuAction, PendingMasterMenuAction, SessionIdentity,
-    TransportFault, content_inventory, content_names,
+    CommunityPlayerCounts, MasterAdvert, MasterBridge, MasterBridgeState, MasterBrowser,
+    MasterBrowserSnapshot, MasterLaunchIntent, MasterLifecycleFact, MasterMatchOffer,
+    MasterMatchStart, MasterMenuAction, PendingMasterMenuAction, SessionIdentity, TransportFault,
+    content_inventory, content_names,
 };
 pub use transport::meta_wire::{
     SnapshotMetaSectionBytes, WORLD_SYNC_PERIOD_TICKS, WorldObjectSyncDecoder,
@@ -166,8 +153,8 @@ pub use transport::protocol::{
     evaluate_handshake,
 };
 pub use transport::reliable::{
-    ActionVerdict, MAX_PENDING_RELIABLE, ReliableEventHub, ReliableEventQueue, ReliablePayload,
-    ReliableRow, decode_reliable_payload, encode_reliable_payload,
+    MAX_PENDING_RELIABLE, ReliableEventHub, ReliableEventQueue, ReliablePayload, ReliableRow,
+    decode_reliable_payload, encode_reliable_payload,
 };
 pub use transport::udp_session::{CommittedAdmission, UdpAuthorityHub, UdpClientLink};
 pub use transport::udp_socket::UdpSendError;
@@ -175,6 +162,6 @@ pub use transport::wire::{WireError, WireReader, WireWriter};
 
 pub use svc_script_audio::SvcScriptAudio;
 
-pub const PROTOCOL_VERSION: u32 = 119;
+pub const PROTOCOL_VERSION: u32 = 141;
 
-pub use client::fire_verdict::{FireVerdictState, PredictedFireStatus};
+pub use transport::meta_wire::encode_actions;

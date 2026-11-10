@@ -3,14 +3,13 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
-use asset_core::ZoneGame;
+use asset_core::FamilyId;
 pub use fastfile_iw4::Iw4WireFormat;
 use fastfile_iw4::{
     FileHeaderError as Iw4HeaderError, MAGIC_AUTH_HEADER, MAX_XFILE_COUNT, Signing as Iw4Signing,
     ZoneHeader, ZoneStream, parse_file_header as parse_iw4_header, parse_zone_header,
 };
 use fastfile_iw4::{WireAssetTable, WireTableError, read_wire_asset_table};
-use fastfile_iw5::Signing as Iw5Signing;
 
 const AUTHED_CHUNK_SIZE: usize = 0x2000;
 
@@ -20,10 +19,13 @@ const AUTHED_CHUNKS_PER_GROUP: usize = 256;
 pub enum ZoneOpenError {
     Io(std::io::Error),
     Iw4Header(Iw4HeaderError),
-    T5Header(fastfile_t5::FileHeaderError),
-    Iw5Header(fastfile_iw5::FileHeaderError),
-    T6(T6ZoneError),
-
+    Family {
+        family: FamilyId,
+        message: String,
+    },
+    DecoderUnavailable {
+        family: FamilyId,
+    },
     UnsupportedVersion {
         got: u32,
     },
@@ -43,8 +45,8 @@ pub enum ZoneOpenError {
     },
 
     WrongGame {
-        expected: ZoneGame,
-        got: ZoneGame,
+        expected: FamilyId,
+        got: FamilyId,
     },
 }
 
@@ -53,13 +55,16 @@ impl std::fmt::Display for ZoneOpenError {
         match self {
             ZoneOpenError::Io(e) => write!(f, "reading zone: {e}"),
             ZoneOpenError::Iw4Header(e) => write!(f, "bad IW4 fastfile header: {e:?}"),
-            ZoneOpenError::T5Header(e) => write!(f, "bad T5 fastfile header: {e:?}"),
-            ZoneOpenError::Iw5Header(e) => write!(f, "bad IW5 fastfile header: {e:?}"),
-            ZoneOpenError::T6(e) => write!(f, "{e}"),
+            ZoneOpenError::Family { family, message } => {
+                write!(f, "{} zone: {message}", family.as_str())
+            }
+            ZoneOpenError::DecoderUnavailable { family } => {
+                write!(f, "no zone decoder for {}", family.as_str())
+            }
             ZoneOpenError::UnsupportedVersion { got } => {
                 write!(
                     f,
-                    "unsupported fastfile version {got:#x} (want IW4 0x114, T5 0x1d9, IW5 0x1 or T6 0x93)"
+                    "unsupported fastfile version {got:#x} for the registered families"
                 )
             }
             ZoneOpenError::BadAuthHeader => {
@@ -96,7 +101,7 @@ impl std::error::Error for ZoneOpenError {
 }
 
 pub struct ZoneImage {
-    pub game: ZoneGame,
+    pub game: FamilyId,
     pub version: u32,
     pub bytes: Vec<u8>,
 
@@ -104,10 +109,18 @@ pub struct ZoneImage {
 }
 
 impl ZoneImage {
+    pub fn runtime_profile(&self) -> Result<asset_core::RuntimeProfile, String> {
+        if self.game != FamilyId::IW4 {
+            return Ok(asset_core::RuntimeProfile::Multiplayer);
+        }
+        let table = self.iw4_table().map_err(|error| error.to_string())?;
+        iw4_runtime_profile(table.kinds())
+    }
+
     pub fn iw4_table(&self) -> Result<WireAssetTable<'_>, ZoneOpenError> {
-        if self.game != ZoneGame::Iw4 {
+        if self.game != FamilyId::IW4 {
             return Err(ZoneOpenError::WrongGame {
-                expected: ZoneGame::Iw4,
+                expected: FamilyId::IW4,
                 got: self.game,
             });
         }
@@ -116,36 +129,12 @@ impl ZoneImage {
 
     pub fn header(&self) -> Result<ZoneHeader, ZoneOpenError> {
         match self.game {
-            ZoneGame::Iw4 => {
+            FamilyId::IW4 => {
                 self.iw4_table()?;
                 parse_zone_header(&self.bytes).map_err(|_| ZoneOpenError::Truncated)
             }
             other => Err(ZoneOpenError::WrongGame {
-                expected: ZoneGame::Iw4,
-                got: other,
-            }),
-        }
-    }
-
-    pub fn t5_header(&self) -> Result<fastfile_t5::ZoneHeader, ZoneOpenError> {
-        match self.game {
-            ZoneGame::T5 => {
-                fastfile_t5::parse_zone_header(&self.bytes).map_err(|_| ZoneOpenError::Truncated)
-            }
-            other => Err(ZoneOpenError::WrongGame {
-                expected: ZoneGame::T5,
-                got: other,
-            }),
-        }
-    }
-
-    pub fn iw5_header(&self) -> Result<fastfile_iw5::ZoneHeader, ZoneOpenError> {
-        match self.game {
-            ZoneGame::Iw5 => {
-                fastfile_iw5::parse_zone_header(&self.bytes).map_err(|_| ZoneOpenError::Truncated)
-            }
-            other => Err(ZoneOpenError::WrongGame {
-                expected: ZoneGame::Iw5,
+                expected: FamilyId::IW4,
                 got: other,
             }),
         }
@@ -246,29 +235,49 @@ fn select_iw4_table(image: &[u8]) -> Result<WireAssetTable<'_>, ZoneOpenError> {
     }
 }
 
+pub type ZoneDecoder = fn(&[u8]) -> Result<ZoneImage, ZoneOpenError>;
+
+#[derive(Default)]
+pub struct ZoneDecoders(std::collections::BTreeMap<FamilyId, ZoneDecoder>);
+impl ZoneDecoders {
+    pub fn register(&mut self, family: FamilyId, decoder: ZoneDecoder) {
+        assert!(!self.0.contains_key(&family), "duplicate zone decoder");
+        self.0.insert(family, decoder);
+    }
+}
+static DECODERS: OnceLock<ZoneDecoders> = OnceLock::new();
+pub fn install_zone_decoders(decoders: ZoneDecoders) -> Result<(), &'static str> {
+    DECODERS
+        .set(decoders)
+        .map_err(|_| "zone decoders already installed")
+}
+
 pub fn parse_zone_image(bytes: &[u8]) -> Result<ZoneImage, ZoneOpenError> {
     if bytes.len() < 12 {
         return Err(ZoneOpenError::Truncated);
     }
     let version = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
-    match version {
-        fastfile_iw4::ZONE_VERSION_PC => parse_iw4_zone_image(bytes),
-        fastfile_t5::ZONE_VERSION_PC => parse_t5_zone_image(bytes),
-        fastfile_iw5::ZONE_VERSION_PC => parse_iw5_zone_image(bytes),
-        fastfile_t6::ZONE_VERSION_PC if bytes.starts_with(fastfile_t6::MAGIC_SIGNED) => {
-            let image = parse_t6_zone_image(bytes).map_err(ZoneOpenError::T6)?;
-            Ok(ZoneImage {
-                game: ZoneGame::T6,
-                version: image.header.version,
-                bytes: image.bytes,
-                iw4_wire_format: None,
-            })
-        }
-        other => Err(ZoneOpenError::UnsupportedVersion { got: other }),
+    let family = asset_core::families()
+        .iter()
+        .find(|family| family.accepts_zone_header(&bytes[..12]))
+        .ok_or(ZoneOpenError::UnsupportedVersion { got: version })?;
+    let decoder = DECODERS
+        .get()
+        .and_then(|decoders| decoders.0.get(&family.id()))
+        .ok_or(ZoneOpenError::DecoderUnavailable {
+            family: family.id(),
+        })?;
+    let image = decoder(bytes)?;
+    if image.game != family.id() || image.version != version {
+        return Err(ZoneOpenError::Family {
+            family: family.id(),
+            message: "decoder returned a different family or version".to_owned(),
+        });
     }
+    Ok(image)
 }
 
-fn inflate_zone(bytes: &[u8]) -> Result<Vec<u8>, ZoneOpenError> {
+pub fn inflate_zone(bytes: &[u8]) -> Result<Vec<u8>, ZoneOpenError> {
     let mut decoder = flate2::Decompress::new(true);
     let mut out = Vec::with_capacity(bytes.len());
     loop {
@@ -290,7 +299,7 @@ fn inflate_zone(bytes: &[u8]) -> Result<Vec<u8>, ZoneOpenError> {
     }
 }
 
-fn parse_iw4_zone_image(bytes: &[u8]) -> Result<ZoneImage, ZoneOpenError> {
+pub fn parse_iw4_zone_image(bytes: &[u8]) -> Result<ZoneImage, ZoneOpenError> {
     let header = parse_iw4_header(bytes).map_err(ZoneOpenError::Iw4Header)?;
     let body = &bytes[fastfile_iw4::FILE_PREAMBLE_LEN..];
 
@@ -307,55 +316,14 @@ fn parse_iw4_zone_image(bytes: &[u8]) -> Result<ZoneImage, ZoneOpenError> {
 
     let iw4_wire_format = Some(select_iw4_table(&image)?.format());
     Ok(ZoneImage {
-        game: ZoneGame::Iw4,
+        game: FamilyId::IW4,
         version: header.version,
         bytes: image,
         iw4_wire_format,
     })
 }
 
-fn parse_t5_zone_image(bytes: &[u8]) -> Result<ZoneImage, ZoneOpenError> {
-    let header = fastfile_t5::parse_file_header(bytes).map_err(ZoneOpenError::T5Header)?;
-    let body = &bytes[fastfile_t5::FILE_PREAMBLE_LEN..];
-
-    let _ = header.signing;
-    let image = inflate_zone(body)?;
-
-    if image.len() < fastfile_t5::XFILE_HEADER_LEN {
-        return Err(ZoneOpenError::Truncated);
-    }
-
-    Ok(ZoneImage {
-        game: ZoneGame::T5,
-        version: header.version,
-        bytes: image,
-        iw4_wire_format: None,
-    })
-}
-
-fn parse_iw5_zone_image(bytes: &[u8]) -> Result<ZoneImage, ZoneOpenError> {
-    let header = fastfile_iw5::parse_file_header(bytes).map_err(ZoneOpenError::Iw5Header)?;
-    let body = &bytes[fastfile_iw5::FILE_PREAMBLE_LEN..];
-    let compressed: Cow<'_, [u8]> = match header.signing {
-        Iw5Signing::Unsigned => Cow::Borrowed(body),
-        Iw5Signing::Signed => Cow::Owned(dechunk_authed(body)?),
-    };
-
-    let image = inflate_zone(&compressed)?;
-
-    if image.len() < fastfile_iw5::XFILE_HEADER_LEN {
-        return Err(ZoneOpenError::Truncated);
-    }
-
-    Ok(ZoneImage {
-        game: ZoneGame::Iw5,
-        version: header.version,
-        bytes: image,
-        iw4_wire_format: None,
-    })
-}
-
-fn dechunk_authed(body: &[u8]) -> Result<Vec<u8>, ZoneOpenError> {
+pub fn dechunk_authed(body: &[u8]) -> Result<Vec<u8>, ZoneOpenError> {
     if body.len() < 8 || &body[0..8] != MAGIC_AUTH_HEADER {
         return Err(ZoneOpenError::BadAuthHeader);
     }
@@ -427,159 +395,18 @@ impl ZoneMemory {
     }
 }
 
-pub struct T5ZoneMemory {
-    blocks: [Vec<u8>; fastfile_t5::MAX_XFILE_COUNT],
-    insert_map: Vec<u8>,
-}
-
-impl T5ZoneMemory {
-    pub fn for_header(header: &fastfile_t5::ZoneHeader) -> T5ZoneMemory {
-        let blocks = std::array::from_fn(|i| vec![0u8; t5_block_capacity(header, i)]);
-        let insert_map = vec![0u8; fastfile_t5::ZoneStream::insert_map_len(header)];
-        T5ZoneMemory { blocks, insert_map }
+fn iw4_runtime_profile(
+    kinds: impl IntoIterator<Item = fastfile_iw4::AssetType>,
+) -> Result<asset_core::RuntimeProfile, String> {
+    use fastfile_iw4::AssetType::*;
+    let (mut sp, mut mp) = (false, false);
+    for kind in kinds {
+        sp |= matches!(kind, ClipMapSp | GameWorldSp);
+        mp |= matches!(kind, ClipMapMp | GameWorldMp);
     }
-
-    pub fn total_bytes(&self) -> usize {
-        self.blocks.iter().map(|b| b.len()).sum()
-    }
-
-    pub fn stream<'a>(
-        &'a mut self,
-        image: &'a [u8],
-    ) -> Result<fastfile_t5::ZoneStream<'a>, fastfile_t5::ZoneError> {
-        let [b0, b1, b2, b3, b4, b5, b6] = &mut self.blocks;
-        let blocks: [&mut [u8]; fastfile_t5::MAX_XFILE_COUNT] = [
-            b0.as_mut_slice(),
-            b1.as_mut_slice(),
-            b2.as_mut_slice(),
-            b3.as_mut_slice(),
-            b4.as_mut_slice(),
-            b5.as_mut_slice(),
-            b6.as_mut_slice(),
-        ];
-        fastfile_t5::ZoneStream::new(image, blocks, &mut self.insert_map)
-    }
-}
-
-fn t5_block_capacity(header: &fastfile_t5::ZoneHeader, block: usize) -> usize {
-    let logical = header.block_size[block] as usize;
-    if logical == 0 || block != fastfile_t5::XFILE_BLOCK_RUNTIME {
-        return logical;
-    }
-
-    logical.saturating_add(0x0f).next_multiple_of(0x1000)
-}
-
-pub struct Iw5ZoneMemory {
-    blocks: [Vec<u8>; fastfile_iw5::MAX_XFILE_COUNT],
-    insert_map: Vec<u8>,
-}
-
-impl Iw5ZoneMemory {
-    pub fn for_header(header: &fastfile_iw5::ZoneHeader) -> Iw5ZoneMemory {
-        let blocks = std::array::from_fn(|i| vec![0u8; header.block_size[i] as usize]);
-        let insert_map = vec![0u8; fastfile_iw5::ZoneStream::insert_map_len(header)];
-        Iw5ZoneMemory { blocks, insert_map }
-    }
-
-    pub fn total_bytes(&self) -> usize {
-        self.blocks.iter().map(|b| b.len()).sum()
-    }
-
-    pub fn stream<'a>(
-        &'a mut self,
-        image: &'a [u8],
-    ) -> Result<fastfile_iw5::ZoneStream<'a>, fastfile_iw5::ZoneError> {
-        let [b0, b1, b2, b3, b4, b5, b6, b7, b8] = &mut self.blocks;
-        let blocks: [&mut [u8]; fastfile_iw5::MAX_XFILE_COUNT] = [
-            b0.as_mut_slice(),
-            b1.as_mut_slice(),
-            b2.as_mut_slice(),
-            b3.as_mut_slice(),
-            b4.as_mut_slice(),
-            b5.as_mut_slice(),
-            b6.as_mut_slice(),
-            b7.as_mut_slice(),
-            b8.as_mut_slice(),
-        ];
-        fastfile_iw5::ZoneStream::new(image, blocks, &mut self.insert_map)
-    }
-}
-
-pub struct T6ZoneImage {
-    pub header: fastfile_t6::FileHeader,
-    pub bytes: Vec<u8>,
-}
-
-#[derive(Debug)]
-pub enum T6ZoneError {
-    Io(std::io::Error),
-    Header(fastfile_t6::FileHeaderError),
-    ChunkOverrun(usize),
-    Inflate { chunk: usize, error: String },
-}
-
-impl std::fmt::Display for T6ZoneError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Io(e) => write!(f, "reading zone: {e}"),
-            Self::Header(e) => write!(f, "bad T6 fastfile header: {e:?}"),
-            Self::ChunkOverrun(at) => write!(f, "T6 chunk at {at:#x} runs past end of file"),
-            Self::Inflate { chunk, error } => {
-                write!(f, "T6 chunk {chunk}: inflate failed: {error}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for T6ZoneError {}
-
-pub fn open_t6_zone(path: impl AsRef<Path>) -> Result<T6ZoneImage, T6ZoneError> {
-    let bytes = std::fs::read(path).map_err(T6ZoneError::Io)?;
-    parse_t6_zone_image(&bytes)
-}
-
-pub fn parse_t6_zone_image(bytes: &[u8]) -> Result<T6ZoneImage, T6ZoneError> {
-    let header = fastfile_t6::parse_file_header(bytes).map_err(T6ZoneError::Header)?;
-    let mut cipher = fastfile_t6::ZoneCipher::new(header.name());
-    let mut out = Vec::with_capacity(bytes.len() * 3);
-    let mut plain = Vec::new();
-    // Each chunk inflates into `scratch` first: `decompress_vec` initializes
-    // all spare capacity of the vector it writes to, and the image's spare
-    // capacity is hundreds of megabytes.
-    let mut scratch = Vec::new();
-    for chunk in fastfile_t6::Chunks::new(bytes) {
-        let chunk = chunk.map_err(T6ZoneError::ChunkOverrun)?;
-        plain.clear();
-        plain.extend_from_slice(chunk.bytes);
-        cipher.decrypt(chunk.index, &mut plain);
-        scratch.clear();
-        inflate_raw_into(&plain, &mut scratch).map_err(|error| T6ZoneError::Inflate {
-            chunk: chunk.index,
-            error,
-        })?;
-        out.extend_from_slice(&scratch);
-    }
-    Ok(T6ZoneImage { header, bytes: out })
-}
-
-fn inflate_raw_into(input: &[u8], out: &mut Vec<u8>) -> Result<(), String> {
-    let mut decoder = flate2::Decompress::new(false);
-    loop {
-        out.reserve((input.len() * 4).max(64 * 1024));
-        let before = (decoder.total_in(), decoder.total_out());
-        let status = decoder
-            .decompress_vec(
-                &input[decoder.total_in() as usize..],
-                out,
-                flate2::FlushDecompress::Finish,
-            )
-            .map_err(|e| e.to_string())?;
-        if status == flate2::Status::StreamEnd {
-            return Ok(());
-        }
-        if before == (decoder.total_in(), decoder.total_out()) {
-            return Err("truncated deflate stream".into());
-        }
+    match (sp, mp) {
+        (true, true) => Err("IW4 map mixes single-player and multiplayer world assets".into()),
+        (true, false) => Ok(asset_core::RuntimeProfile::Campaign),
+        _ => Ok(asset_core::RuntimeProfile::Multiplayer),
     }
 }

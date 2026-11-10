@@ -8,7 +8,6 @@ use net::{ClientSet, UpdatePhaseCensus};
 use crate::blood::{BloodGpuJob, BloodOverlayLatch, HudRootVisible, update_blood_overlay};
 use crate::compass::{CompassRaster, spawn_compass, update_compass};
 use crate::flash::{FlashGpuJob, FlashWhiteoutLatch, update_flash_whiteout};
-use crate::gaps::{HudPresentationGaps, report_hud_gaps};
 use crate::gpu_list::{self, HudTessPass};
 use crate::hud_elems::{
     HudElemsBackRaster, HudElemsRaster, spawn_hud_elems, spawn_hud_elems_back, update_hud_elems,
@@ -43,27 +42,26 @@ impl Plugin for HudPlugin {
         let _ = crate::scorebar::milliseconds();
         app.init_resource::<frame::HudDraw>()
             .init_resource::<HudImages>()
-            .init_resource::<HudPresentationGaps>()
             .init_resource::<ReticleAdsLatch>()
             .init_resource::<IrisLetterboxFill>()
             .init_resource::<BloodOverlayLatch>()
-            .scoped::<crate::damage_direction::DamageDirections>(frame::Timeline::Running)
+            .scoped::<crate::damage_direction::DamageDirections>(frame::Timeline::Live)
             .init_resource::<BloodGpuJob>()
-            .init_resource::<FlashWhiteoutLatch>()
-            .init_resource::<FlashGpuJob>()
-            .scoped::<PendingSplash>(frame::Timeline::Running)
-            .scoped::<SplashSlots>(frame::Timeline::Running)
-            .scoped::<KillfeedWindow>(frame::Timeline::Running)
+            .scoped::<FlashWhiteoutLatch>(frame::Timeline::Live)
+            .scoped::<FlashGpuJob>(frame::Timeline::Live)
+            .scoped::<PendingSplash>(frame::Timeline::Live)
+            .scoped::<SplashSlots>(frame::Timeline::Live)
+            .scoped::<KillfeedWindow>(frame::Timeline::Live)
             .scoped::<PlayerCardCache>(frame::MatchScope::Live)
             .scoped::<UiLocalVars>(frame::MatchScope::Live)
             .init_resource::<crate::playercard::FrontendLocalVars>()
             .init_resource::<HudRootVisible>()
-            .scoped::<crate::compass::CompassPingLatch>(frame::Timeline::Running)
+            .scoped::<crate::compass::CompassPingLatch>(frame::Timeline::Live)
             .init_resource::<crate::surface::Hud2dSurface>()
             .init_resource::<HudPresentStamp>()
             .init_resource::<HudStageStamp>()
             .init_resource::<crate::expr_cache::MenuExprCache>()
-            .scoped::<crate::hudelem::HudElemSoundLatch>(frame::Timeline::Running)
+            .scoped::<crate::hudelem::HudElemSoundLatch>(frame::Timeline::Live)
             .scoped::<crate::menus::ScriptMenus>(frame::MatchScope::Live)
             .init_resource::<crate::menus::FrontendMenus>()
             .add_message::<net::SvcCardSlotCmd>()
@@ -71,6 +69,7 @@ impl Plugin for HudPlugin {
 
         frame::register_ui_contracts(app);
         crate::overhead_names::register(app);
+        crate::campaign_objectives::register(app);
         app.add_message::<LifeStarted>()
             .add_observer(crate::killfeed::obituary)
             .add_systems(
@@ -136,7 +135,7 @@ impl Plugin for HudPlugin {
                             .chain(),
                     )
                         .chain(),
-                    (report_hud_gaps, hud_stage_close::<8>, hud_surfaces_close).chain(),
+                    (hud_stage_close::<8>, hud_surfaces_close).chain(),
                 )
                     .chain()
                     .in_set(LifeFrontPublished),
@@ -145,8 +144,9 @@ impl Plugin for HudPlugin {
                 Update,
                 (
                     begin_hud_tess_frame,
-                    flush_flash_tess,
+                    flush_flash_tess.in_set(frame::InMatch),
                     flush_overhead_names_tess,
+                    flush_campaign_objectives_tess,
                     flush_hud_tess,
                     flush_killcam_skip_tess,
                     flush_playercard_tess,
@@ -164,7 +164,7 @@ impl Plugin for HudPlugin {
                 )
                     .chain()
                     .after(hud_stage_close::<7>)
-                    .before(report_hud_gaps)
+                    .before(hud_stage_close::<8>)
                     .in_set(LifeFrontPublished),
             )
             .add_systems(
@@ -276,24 +276,38 @@ fn sync_map_zone_tree(mut hud_images: ResMut<HudImages>, report: Option<Res<Laun
 
 fn sync_zone_atlases(
     catalog: Option<Res<asset_game::MenuCatalog>>,
+    campaign: Option<Res<asset_game::CampaignHudCatalog>>,
+    profile: Option<Res<frame::MatchRuntimeProfile>>,
     mut hud_images: ResMut<HudImages>,
 ) {
+    let catalog = campaign
+        .as_ref()
+        .map(|c| c.0.as_ref())
+        .or(catalog.as_deref());
     match catalog {
-        Some(catalog) if !hud_images.zone_installed() || catalog.is_changed() => {
-            hud_images.install_zone_catalog(&catalog)
-        }
+        Some(catalog) => hud_images.install_zone_catalog(
+            catalog,
+            profile
+                .as_ref()
+                .map_or(Default::default(), |profile| profile.0),
+        ),
         None if hud_images.zone_installed() => hud_images.clear_zone_catalog(),
-        _ => {}
+        None => {}
     }
 }
 
 fn warm_hud_images(
     catalog: Option<Res<asset_game::MenuCatalog>>,
+    campaign: Option<Res<asset_game::CampaignHudCatalog>>,
     compass: Option<Res<assets::SessionCompass>>,
     mut hud_images: ResMut<HudImages>,
     mut images: ResMut<Assets<Image>>,
 ) {
-    hud_images.warm_present_stems(&mut images, catalog.as_deref(), compass.as_deref());
+    let catalog = campaign
+        .as_ref()
+        .map(|c| c.0.as_ref())
+        .or(catalog.as_deref());
+    hud_images.warm_present_stems(&mut images, catalog, compass.as_deref());
 }
 
 #[derive(Component)]
@@ -302,9 +316,10 @@ struct FrontendCamera;
 fn sync_frontend_camera(
     mut commands: Commands,
     screen: Res<AppScreen>,
+    scope: Res<State<frame::MatchScope>>,
     cameras: Query<Entity, With<FrontendCamera>>,
 ) {
-    if *screen == AppScreen::MainMenu {
+    if *screen == AppScreen::MainMenu && *scope.get() == frame::MatchScope::Absent {
         if cameras.is_empty() {
             commands.spawn((
                 FrontendCamera,
@@ -345,6 +360,10 @@ fn ensure_hud_root(mut commands: Commands, existing: Query<Entity, With<HudRoot>
         ))
         .with_children(|root| {
             crate::font_overlay::spawn_overlay(root, crate::overhead_names::OverheadNamesRaster);
+            crate::font_overlay::spawn_overlay(
+                root,
+                crate::campaign_objectives::CampaignObjectivesRaster,
+            );
             spawn_reticle(root);
             crate::damage_direction::spawn(root);
             spawn_iris(root);
@@ -428,12 +447,13 @@ fn hud_surfaces_open(
     *pass = HudTessPass::default();
 }
 
+#[expect(
+    clippy::type_complexity,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 fn flush_hud_tess(
-    surface: Res<crate::surface::Hud2dSurface>,
+    mut writer: gpu_list::HudTessWriter,
     mut pass: ResMut<HudTessPass>,
-    mut hud_images: ResMut<HudImages>,
-    mut images: ResMut<Assets<Image>>,
-    mut frame: ResMut<crate::gpu_list::HudTessGpuFrame>,
     mut compass: Query<
         (Entity, &mut Node, &mut crate::gpu_list::GpuListLatch),
         With<CompassRaster>,
@@ -471,294 +491,164 @@ fn flush_hud_tess(
     >,
 ) {
     let _body = gpu_list::TessBody::open();
-    if !surface.is_ready() {
+    if !writer.is_ready() {
         return;
     }
-    let w = surface.width();
-    let h = surface.height();
     let compass_job = std::mem::take(&mut pass.compass);
     let scorebar_job = std::mem::take(&mut pass.scorebar);
     let weaponbar_job = std::mem::take(&mut pass.weaponbar);
     let splash_job = std::mem::take(&mut pass.splash);
     let killfeed_job = std::mem::take(&mut pass.killfeed);
     if let Ok((_, mut host, mut latch)) = compass.single_mut() {
-        gpu_list::apply_tess_job(
-            compass_job,
-            &mut host,
-            &mut latch,
-            &mut hud_images,
-            &mut images,
-            &mut frame,
-            w,
-            h,
-        );
+        writer.apply(compass_job, &mut host, &mut latch);
     }
     if let Ok((_, mut host, mut latch)) = scorebar.single_mut() {
-        gpu_list::apply_tess_job(
-            scorebar_job,
-            &mut host,
-            &mut latch,
-            &mut hud_images,
-            &mut images,
-            &mut frame,
-            w,
-            h,
-        );
+        writer.apply(scorebar_job, &mut host, &mut latch);
     }
     if let Ok((_, mut host, mut latch)) = weaponbar.single_mut() {
-        gpu_list::apply_tess_job(
-            weaponbar_job,
-            &mut host,
-            &mut latch,
-            &mut hud_images,
-            &mut images,
-            &mut frame,
-            w,
-            h,
-        );
+        writer.apply(weaponbar_job, &mut host, &mut latch);
     }
     if let Ok((_, mut host, mut latch)) = splash.single_mut() {
-        gpu_list::apply_tess_job(
-            splash_job,
-            &mut host,
-            &mut latch,
-            &mut hud_images,
-            &mut images,
-            &mut frame,
-            w,
-            h,
-        );
+        writer.apply(splash_job, &mut host, &mut latch);
     }
     if let Ok((_, mut host, mut latch)) = killfeed.single_mut() {
-        gpu_list::apply_tess_job(
-            killfeed_job,
-            &mut host,
-            &mut latch,
-            &mut hud_images,
-            &mut images,
-            &mut frame,
-            w,
-            h,
-        );
+        writer.apply(killfeed_job, &mut host, &mut latch);
     }
 }
 
 fn flush_killcam_skip_tess(
-    surface: Res<crate::surface::Hud2dSurface>,
+    mut writer: gpu_list::HudTessWriter,
     mut pass: ResMut<HudTessPass>,
-    mut hud_images: ResMut<HudImages>,
-    mut images: ResMut<Assets<Image>>,
-    mut frame: ResMut<crate::gpu_list::HudTessGpuFrame>,
     mut skip: Query<
         (Entity, &mut Node, &mut crate::gpu_list::GpuListLatch),
         With<KillcamSkipRaster>,
     >,
 ) {
     let _body = gpu_list::TessBody::open();
-    if !surface.is_ready() {
+    if !writer.is_ready() {
         return;
     }
     let job = std::mem::take(&mut pass.killcam_skip);
     if let Ok((_, mut host, mut latch)) = skip.single_mut() {
-        gpu_list::apply_tess_job(
-            job,
-            &mut host,
-            &mut latch,
-            &mut hud_images,
-            &mut images,
-            &mut frame,
-            surface.width(),
-            surface.height(),
-        );
+        writer.apply(job, &mut host, &mut latch);
     }
 }
 
 fn flush_targetmap_tess(
-    surface: Res<crate::surface::Hud2dSurface>,
+    mut writer: gpu_list::HudTessWriter,
     mut pass: ResMut<HudTessPass>,
-    mut hud_images: ResMut<HudImages>,
-    mut images: ResMut<Assets<Image>>,
-    mut frame: ResMut<crate::gpu_list::HudTessGpuFrame>,
     mut raster: Query<
         (Entity, &mut Node, &mut crate::gpu_list::GpuListLatch),
         With<TargetmapRaster>,
     >,
 ) {
     let _body = gpu_list::TessBody::open();
-    if !surface.is_ready() {
+    if !writer.is_ready() {
         return;
     }
     let job = std::mem::take(&mut pass.targetmap);
     if let Ok((_, mut host, mut latch)) = raster.single_mut() {
-        gpu_list::apply_tess_job(
-            job,
-            &mut host,
-            &mut latch,
-            &mut hud_images,
-            &mut images,
-            &mut frame,
-            surface.width(),
-            surface.height(),
-        );
+        writer.apply(job, &mut host, &mut latch);
     }
 }
 
 fn flush_script_menus_tess(
-    surface: Res<crate::surface::Hud2dSurface>,
+    mut writer: gpu_list::HudTessWriter,
     mut pass: ResMut<HudTessPass>,
-    mut hud_images: ResMut<HudImages>,
-    mut images: ResMut<Assets<Image>>,
-    mut frame: ResMut<crate::gpu_list::HudTessGpuFrame>,
     mut raster: Query<
         (Entity, &mut Node, &mut crate::gpu_list::GpuListLatch),
         With<crate::menus::ScriptMenuRaster>,
     >,
 ) {
     let _body = gpu_list::TessBody::open();
-    if !surface.is_ready() {
+    if !writer.is_ready() {
         return;
     }
     let job = std::mem::take(&mut pass.script_menus);
     if let Ok((_, mut host, mut latch)) = raster.single_mut() {
-        gpu_list::apply_tess_job(
-            job,
-            &mut host,
-            &mut latch,
-            &mut hud_images,
-            &mut images,
-            &mut frame,
-            surface.width(),
-            surface.height(),
-        );
+        writer.apply(job, &mut host, &mut latch);
     }
 }
 
 fn flush_playercard_tess(
-    surface: Res<crate::surface::Hud2dSurface>,
+    mut writer: gpu_list::HudTessWriter,
     mut pass: ResMut<HudTessPass>,
-    mut hud_images: ResMut<HudImages>,
-    mut images: ResMut<Assets<Image>>,
-    mut frame: ResMut<crate::gpu_list::HudTessGpuFrame>,
     mut card: Query<
         (Entity, &mut Node, &mut crate::gpu_list::GpuListLatch),
         With<PlayerCardRaster>,
     >,
 ) {
     let _body = gpu_list::TessBody::open();
-    if !surface.is_ready() {
+    if !writer.is_ready() {
         return;
     }
     let job = std::mem::take(&mut pass.playercard);
     if let Ok((_, mut host, mut latch)) = card.single_mut() {
-        gpu_list::apply_tess_job(
-            job,
-            &mut host,
-            &mut latch,
-            &mut hud_images,
-            &mut images,
-            &mut frame,
-            surface.width(),
-            surface.height(),
-        );
+        writer.apply(job, &mut host, &mut latch);
     }
 }
 
 fn flush_mantle_hint_tess(
-    surface: Res<crate::surface::Hud2dSurface>,
+    mut writer: gpu_list::HudTessWriter,
     mut pass: ResMut<HudTessPass>,
-    mut hud_images: ResMut<HudImages>,
-    mut images: ResMut<Assets<Image>>,
-    mut frame: ResMut<crate::gpu_list::HudTessGpuFrame>,
     mut hint: Query<
         (Entity, &mut Node, &mut crate::gpu_list::GpuListLatch),
         With<MantleHintRaster>,
     >,
 ) {
     let _body = gpu_list::TessBody::open();
-    if !surface.is_ready() {
+    if !writer.is_ready() {
         return;
     }
     let job = std::mem::take(&mut pass.mantle_hint);
     if let Ok((_, mut host, mut latch)) = hint.single_mut() {
-        gpu_list::apply_tess_job(
-            job,
-            &mut host,
-            &mut latch,
-            &mut hud_images,
-            &mut images,
-            &mut frame,
-            surface.width(),
-            surface.height(),
-        );
+        writer.apply(job, &mut host, &mut latch);
     }
 }
 
 fn flush_damage_direction_tess(
-    surface: Res<crate::surface::Hud2dSurface>,
+    mut writer: gpu_list::HudTessWriter,
     mut pass: ResMut<HudTessPass>,
-    mut hud_images: ResMut<HudImages>,
-    mut images: ResMut<Assets<Image>>,
-    mut frame: ResMut<crate::gpu_list::HudTessGpuFrame>,
     mut hint: Query<
         (Entity, &mut Node, &mut crate::gpu_list::GpuListLatch),
         With<crate::damage_direction::DamageDirectionRaster>,
     >,
 ) {
     let _body = gpu_list::TessBody::open();
-    if !surface.is_ready() {
+    if !writer.is_ready() {
         return;
     }
     let job = std::mem::take(&mut pass.damage_direction);
     if let Ok((_, mut host, mut latch)) = hint.single_mut() {
-        gpu_list::apply_tess_job(
-            job,
-            &mut host,
-            &mut latch,
-            &mut hud_images,
-            &mut images,
-            &mut frame,
-            surface.width(),
-            surface.height(),
-        );
+        writer.apply(job, &mut host, &mut latch);
     }
 }
 
 fn flush_scoreboard_tess(
-    surface: Res<crate::surface::Hud2dSurface>,
+    mut writer: gpu_list::HudTessWriter,
     mut pass: ResMut<HudTessPass>,
-    mut hud_images: ResMut<HudImages>,
-    mut images: ResMut<Assets<Image>>,
-    mut frame: ResMut<crate::gpu_list::HudTessGpuFrame>,
     mut scoreboard: Query<
         (Entity, &mut Node, &mut crate::gpu_list::GpuListLatch),
         With<ScoreboardRaster>,
     >,
 ) {
     let _body = gpu_list::TessBody::open();
-    if !surface.is_ready() {
+    if !writer.is_ready() {
         return;
     }
     let job = std::mem::take(&mut pass.scoreboard);
     if let Ok((_, mut host, mut latch)) = scoreboard.single_mut() {
-        gpu_list::apply_tess_job(
-            job,
-            &mut host,
-            &mut latch,
-            &mut hud_images,
-            &mut images,
-            &mut frame,
-            surface.width(),
-            surface.height(),
-        );
+        writer.apply(job, &mut host, &mut latch);
     }
 }
 
+#[expect(
+    clippy::type_complexity,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 fn flush_hud_elems_tess(
-    surface: Res<crate::surface::Hud2dSurface>,
+    mut writer: gpu_list::HudTessWriter,
     mut pass: ResMut<HudTessPass>,
-    mut hud_images: ResMut<HudImages>,
-    mut images: ResMut<Assets<Image>>,
-    mut frame: ResMut<crate::gpu_list::HudTessGpuFrame>,
     mut front: Query<
         (Entity, &mut Node, &mut crate::gpu_list::GpuListLatch),
         (With<HudElemsRaster>, Without<HudElemsBackRaster>),
@@ -769,7 +659,7 @@ fn flush_hud_elems_tess(
     >,
 ) {
     let _body = gpu_list::TessBody::open();
-    if !surface.is_ready() {
+    if !writer.is_ready() {
         return;
     }
     let front_job = std::mem::take(&mut pass.hud_elems);
@@ -779,16 +669,7 @@ fn flush_hud_elems_tess(
         (back_job, back.single_mut()),
     ] {
         if let Ok((_, mut host, mut latch)) = raster {
-            gpu_list::apply_tess_job(
-                job,
-                &mut host,
-                &mut latch,
-                &mut hud_images,
-                &mut images,
-                &mut frame,
-                surface.width(),
-                surface.height(),
-            );
+            writer.apply(job, &mut host, &mut latch);
         }
     }
 }
@@ -820,152 +701,92 @@ fn hud_surfaces_close(stamp: Res<HudPresentStamp>, mut census: ResMut<UpdatePhas
 }
 
 fn flush_use_hint_tess(
-    surface: Res<crate::surface::Hud2dSurface>,
+    mut writer: gpu_list::HudTessWriter,
     mut pass: ResMut<HudTessPass>,
-    mut hud_images: ResMut<HudImages>,
-    mut images: ResMut<Assets<Image>>,
-    mut frame: ResMut<crate::gpu_list::HudTessGpuFrame>,
     mut hint: Query<
         (Entity, &mut Node, &mut crate::gpu_list::GpuListLatch),
         With<crate::use_hint::UseHintRaster>,
     >,
 ) {
     let _body = gpu_list::TessBody::open();
-    if !surface.is_ready() {
+    if !writer.is_ready() {
         return;
     }
     let job = std::mem::take(&mut pass.use_hint);
     if let Ok((_, mut host, mut latch)) = hint.single_mut() {
-        gpu_list::apply_tess_job(
-            job,
-            &mut host,
-            &mut latch,
-            &mut hud_images,
-            &mut images,
-            &mut frame,
-            surface.width(),
-            surface.height(),
-        );
+        writer.apply(job, &mut host, &mut latch);
     }
 }
 
 pub(crate) fn flush_overhead_names_tess(
-    surface: Res<crate::surface::Hud2dSurface>,
+    mut writer: gpu_list::HudTessWriter,
     mut pass: ResMut<HudTessPass>,
-    mut hud_images: ResMut<HudImages>,
-    mut images: ResMut<Assets<Image>>,
-    mut frame: ResMut<crate::gpu_list::HudTessGpuFrame>,
     mut hint: Query<
         (Entity, &mut Node, &mut crate::gpu_list::GpuListLatch),
         With<crate::overhead_names::OverheadNamesRaster>,
     >,
 ) {
     let _body = gpu_list::TessBody::open();
-    if !surface.is_ready() {
+    if !writer.is_ready() {
         return;
     }
     let job = std::mem::take(&mut pass.overhead_names);
     if let Ok((_, mut host, mut latch)) = hint.single_mut() {
-        gpu_list::apply_tess_job(
-            job,
-            &mut host,
-            &mut latch,
-            &mut hud_images,
-            &mut images,
-            &mut frame,
-            surface.width(),
-            surface.height(),
-        );
+        writer.apply(job, &mut host, &mut latch);
     }
 }
 
 fn flush_emp_static_tess(
-    surface: Res<crate::surface::Hud2dSurface>,
+    mut writer: gpu_list::HudTessWriter,
     mut pass: ResMut<HudTessPass>,
-    mut hud_images: ResMut<HudImages>,
-    mut images: ResMut<Assets<Image>>,
-    mut frame: ResMut<crate::gpu_list::HudTessGpuFrame>,
     mut raster: Query<
         (Entity, &mut Node, &mut crate::gpu_list::GpuListLatch),
         With<crate::emp_static::EmpStaticRaster>,
     >,
 ) {
     let _body = gpu_list::TessBody::open();
-    if !surface.is_ready() {
+    if !writer.is_ready() {
         return;
     }
     let job = std::mem::take(&mut pass.emp_static);
     if let Ok((_, mut host, mut latch)) = raster.single_mut() {
-        gpu_list::apply_tess_job(
-            job,
-            &mut host,
-            &mut latch,
-            &mut hud_images,
-            &mut images,
-            &mut frame,
-            surface.width(),
-            surface.height(),
-        );
+        writer.apply(job, &mut host, &mut latch);
     }
 }
 
 fn flush_breath_hint_tess(
-    surface: Res<crate::surface::Hud2dSurface>,
+    mut writer: gpu_list::HudTessWriter,
     mut pass: ResMut<HudTessPass>,
-    mut hud_images: ResMut<HudImages>,
-    mut images: ResMut<Assets<Image>>,
-    mut frame: ResMut<crate::gpu_list::HudTessGpuFrame>,
     mut hint: Query<
         (Entity, &mut Node, &mut crate::gpu_list::GpuListLatch),
         With<crate::breath_hint::BreathHintRaster>,
     >,
 ) {
     let _body = gpu_list::TessBody::open();
-    if !surface.is_ready() {
+    if !writer.is_ready() {
         return;
     }
     let job = std::mem::take(&mut pass.breath_hint);
     if let Ok((_, mut host, mut latch)) = hint.single_mut() {
-        gpu_list::apply_tess_job(
-            job,
-            &mut host,
-            &mut latch,
-            &mut hud_images,
-            &mut images,
-            &mut frame,
-            surface.width(),
-            surface.height(),
-        );
+        writer.apply(job, &mut host, &mut latch);
     }
 }
 
 fn flush_connection_notice_tess(
-    surface: Res<crate::surface::Hud2dSurface>,
+    mut writer: gpu_list::HudTessWriter,
     mut pass: ResMut<HudTessPass>,
-    mut hud_images: ResMut<HudImages>,
-    mut images: ResMut<Assets<Image>>,
-    mut frame: ResMut<crate::gpu_list::HudTessGpuFrame>,
     mut hint: Query<
         (Entity, &mut Node, &mut crate::gpu_list::GpuListLatch),
         With<crate::connection_notice::ConnectionNoticeRaster>,
     >,
 ) {
     let _body = gpu_list::TessBody::open();
-    if !surface.is_ready() {
+    if !writer.is_ready() {
         return;
     }
     let job = std::mem::take(&mut pass.connection_notice);
     if let Ok((_, mut host, mut latch)) = hint.single_mut() {
-        gpu_list::apply_tess_job(
-            job,
-            &mut host,
-            &mut latch,
-            &mut hud_images,
-            &mut images,
-            &mut frame,
-            surface.width(),
-            surface.height(),
-        );
+        writer.apply(job, &mut host, &mut latch);
     }
 }
 
@@ -973,12 +794,32 @@ fn release_hud_publication(
     mut latches: Query<&mut crate::gpu_list::GpuListLatch>,
     mut frame: ResMut<crate::gpu_list::HudTessGpuFrame>,
     mut blood: ResMut<BloodGpuJob>,
-    mut flash: ResMut<FlashGpuJob>,
+    flash: Option<ResMut<FlashGpuJob>>,
 ) {
     for mut latch in &mut latches {
         latch.mark_hidden();
     }
     *frame = Default::default();
     *blood = BloodGpuJob::Hide;
-    *flash = FlashGpuJob::Hide;
+    if let Some(mut flash) = flash {
+        *flash = FlashGpuJob::Hide;
+    }
+}
+
+pub(crate) fn flush_campaign_objectives_tess(
+    mut writer: gpu_list::HudTessWriter,
+    mut pass: ResMut<HudTessPass>,
+    mut raster: Query<
+        (&mut Node, &mut crate::gpu_list::GpuListLatch),
+        With<crate::campaign_objectives::CampaignObjectivesRaster>,
+    >,
+) {
+    let _body = gpu_list::TessBody::open();
+    if !writer.is_ready() {
+        return;
+    }
+    let job = std::mem::take(&mut pass.campaign_objectives);
+    if let Ok((mut host, mut latch)) = raster.single_mut() {
+        writer.apply(job, &mut host, &mut latch);
+    }
 }

@@ -2,16 +2,16 @@ mod lifecycle;
 mod state;
 
 use super::{
-    ArrayKey, Binary, Callee, Fault, Frame, Global, Location, Op, Program, Thread, ThreadState,
-    Unary, Value, VecDeque, Waiter, WaiterKind,
+    ArrayKey, Binary, Callee, Fault, Frame, Global, Location, Op, Program, Thread, ThreadMode,
+    ThreadState, Unary, Value, VecDeque, Waiter, WaiterKind,
 };
-use bevy_ecs::entity::Entity;
-use bevy_ecs::prelude::{Resource, World};
+use bevy_ecs::prelude::World;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-pub(crate) use lifecycle::{copy_state, install, install_level, reset, reset_round};
-pub(crate) use state::{MatchScript, RoundScript};
+pub(crate) use lifecycle::{install, install_level, reset, reset_round};
+pub(crate) use state::MatchScript;
+pub use state::RoundScript;
 
 /// Instructions one resumed thread may run before it is killed as a runaway loop.
 /// Level startup runs in one frame and needs over a million on the larger maps.
@@ -39,17 +39,21 @@ pub(super) fn return_from(world: &mut World, function: &str, now: i64) -> usize 
         return 0;
     };
     let inside: Vec<_> = world
-        .query::<(Entity, &Thread)>()
-        .iter(world)
-        .filter_map(|(entity, thread)| {
+        .resource::<RoundScript>()
+        .threads
+        .iter()
+        .filter_map(|(serial, thread)| {
             let depth = thread.frames.iter().position(|f| f.function == function)?;
-            Some((entity, depth))
+            Some((*serial, depth))
         })
         .collect();
-    for &(entity, depth) in &inside {
-        let mut thread = world.entity_mut(entity).take::<Thread>().unwrap();
+    for &(serial, depth) in &inside {
+        let mut thread = take_thread(world, serial).unwrap();
         unwind(world, &mut thread, depth, now, false);
-        world.entity_mut(entity).insert(thread);
+        world
+            .resource_mut::<RoundScript>()
+            .threads
+            .insert(thread.serial, thread);
     }
     inside.len()
 }
@@ -73,7 +77,7 @@ fn deliver_pending(world: &mut World, thread: &mut Thread, now: i64) -> Result<(
     }
 }
 
-fn deliver_external(world: &mut World, now: i64) {
+pub(super) fn deliver_external(world: &mut World, now: i64) {
     let mut carrier = Thread {
         serial: u64::MAX,
         frames: Vec::new(),
@@ -173,9 +177,31 @@ pub(super) fn run_now(
     args: Vec<Value>,
     now: i64,
 ) -> Result<(), Fault> {
+    run_now_owned(world, name, receiver, args, now).map(|_| ())
+}
+
+pub(super) fn run_current_threads(world: &mut World, now: i64) {
+    if let Some(program) = world.resource::<RoundScript>().program.clone() {
+        run_ready(world, &program, now);
+    }
+}
+
+pub(super) fn engine_thread_alive(world: &World, serial: u64) -> bool {
+    let runtime = world.resource::<RoundScript>();
+    runtime.threads.contains_key(&serial) || runtime.suspended.contains(&serial)
+}
+
+pub(super) fn run_now_owned(
+    world: &mut World,
+    name: &str,
+    receiver: Value,
+    args: Vec<Value>,
+    now: i64,
+) -> Result<u64, Fault> {
     let (program, function, location) = entry(world, name)?;
     let mut thread = new_thread(world, &program, function, receiver, args)
         .map_err(|m| Fault::at(&location, m))?;
+    let serial = thread.serial;
     thread.state = ThreadState::Runnable;
     let budget = std::mem::replace(
         &mut world.resource_mut::<RoundScript>().budget,
@@ -186,11 +212,14 @@ pub(super) fn run_now(
     if thread.state == ThreadState::Complete {
         retire(&mut world.resource_mut::<RoundScript>(), thread.serial);
     } else {
-        world.spawn(thread);
+        world
+            .resource_mut::<RoundScript>()
+            .threads
+            .insert(thread.serial, thread);
     }
     match world.resource::<RoundScript>().fault.clone() {
         Some(fault) => Err(fault),
-        None => Ok(()),
+        None => Ok(serial),
     }
 }
 
@@ -204,7 +233,10 @@ fn spawn_thread(
     let thread = new_thread(world, program, function, receiver, args)?;
     let serial = thread.serial;
     world.resource_mut::<RoundScript>().spawned.push(serial);
-    world.spawn(thread);
+    world
+        .resource_mut::<RoundScript>()
+        .threads
+        .insert(thread.serial, thread);
     Ok(serial)
 }
 
@@ -220,6 +252,9 @@ pub(super) fn new_thread(
         .map(|value| copy_value(world, value))
         .collect::<Result<Vec<_>, _>>()?;
     let mut runtime = world.resource_mut::<RoundScript>();
+    if runtime.suspended_frames >= MAX_FRAMES {
+        return Err("script stack overflow (too many embedded function calls)".into());
+    }
     runtime.started = true;
     let serial = runtime.next_serial;
     runtime.next_serial = serial.checked_add(1).ok_or("thread identifier exhausted")?;
@@ -277,6 +312,36 @@ fn resume_suspended(world: &mut World, parent: &mut Thread, now: i64) -> Result<
     Ok(())
 }
 
+fn inherit_endons(world: &mut World, parent: &Thread, serial: u64) {
+    let mut runtime = world.resource_mut::<RoundScript>();
+    let mut inherited: Vec<_> = runtime
+        .waiters
+        .iter()
+        .filter_map(|waiter| {
+            if waiter.thread != parent.serial {
+                return None;
+            }
+            match waiter.kind {
+                WaiterKind::Endon { frame } => Some((
+                    frame,
+                    Waiter {
+                        receiver: waiter.receiver.clone(),
+                        name: waiter.name.clone(),
+                        thread: serial,
+                        kind: WaiterKind::Endon { frame: 0 },
+                    },
+                )),
+                _ => None,
+            }
+        })
+        .collect();
+    // Copy the current function's handlers before its enclosing calls' handlers.
+    inherited.sort_by_key(|(frame, _)| std::cmp::Reverse(*frame));
+    runtime
+        .waiters
+        .extend(inherited.into_iter().map(|(_, waiter)| waiter));
+}
+
 fn run_inline(
     world: &mut World,
     program: &Program,
@@ -295,7 +360,10 @@ fn run_inline(
     if child.state == ThreadState::Complete {
         retire(&mut runtime, child.serial);
     } else {
-        world.spawn(child);
+        world
+            .resource_mut::<RoundScript>()
+            .threads
+            .insert(child.serial, child);
     }
     parent.stack.push(Value::Undefined);
     resume_suspended(world, parent, now)
@@ -341,7 +409,7 @@ fn truth(value: &Value) -> Result<bool, String> {
     }
 }
 
-fn scalar(value: &Value) -> Option<f32> {
+pub(super) fn scalar(value: &Value) -> Option<f32> {
     match value {
         Value::Int(n) => Some(*n as f32),
         Value::Float(n) => Some(*n),
@@ -556,10 +624,14 @@ fn instruction(
     op: Op,
     now: i64,
 ) -> Result<(), String> {
-    let spawn = matches!(op, Op::Spawn(..) | Op::Indirect(_, _, true));
+    let spawn = match op {
+        Op::Spawn(_, _, _, mode) => Some(mode),
+        Op::Indirect(_, _, mode) => mode,
+        _ => None,
+    };
     let method = matches!(
         op,
-        Op::Call(_, _, true) | Op::Spawn(_, _, true) | Op::Indirect(_, true, _)
+        Op::Call(_, _, true) | Op::Spawn(_, _, true, _) | Op::Indirect(_, true, _)
     );
     match op {
         Op::Constant(value) => thread.stack.push(value),
@@ -632,6 +704,16 @@ fn instruction(
             let Value::Object(id) = receiver else {
                 return Err("array field requires an object".into());
             };
+            super::host::path_nodes::check_field_write(
+                world.resource::<RoundScript>(),
+                id,
+                &program.symbols[field as usize],
+            )?;
+            super::host::entities::check_native_array_write(
+                world.resource::<RoundScript>(),
+                id,
+                &program.symbols[field as usize],
+            )?;
             let value = world
                 .resource::<RoundScript>()
                 .objects
@@ -669,6 +751,20 @@ fn instruction(
                     None,
                 ),
                 Value::Object(id) => {
+                    if let ArrayKey::String(name) = &key {
+                        super::host::path_nodes::check_field_write(
+                            &runtime,
+                            *id,
+                            &name.symbol_key(),
+                        )?;
+                    }
+                    if let ArrayKey::String(name) = &key {
+                        super::host::entities::check_native_array_write(
+                            &runtime,
+                            *id,
+                            &name.symbol_key(),
+                        )?;
+                    }
                     let field = object_key(&mut runtime, key.clone())?;
                     (
                         runtime
@@ -725,6 +821,16 @@ fn instruction(
                     .cloned()
                     .unwrap_or(Value::Undefined),
                 Value::Object(id) => {
+                    if let ArrayKey::String(name) = &key
+                        && let Some(value) = super::host::entities::load_native_field(
+                            &runtime,
+                            id,
+                            &name.symbol_key(),
+                        )
+                    {
+                        thread.stack.push(value);
+                        return Ok(());
+                    }
                     let field = object_key(&mut runtime, key)?;
                     runtime
                         .objects
@@ -771,6 +877,23 @@ fn instruction(
                     }
                 }
                 Value::Object(id) => {
+                    if let ArrayKey::String(name) = &key {
+                        super::host::path_nodes::check_field_write(
+                            &runtime,
+                            id,
+                            &name.symbol_key(),
+                        )?;
+                    }
+                    if let ArrayKey::String(name) = &key
+                        && super::host::entities::store_native_field(
+                            &mut runtime,
+                            id,
+                            &name.symbol_key(),
+                            &value,
+                        )?
+                    {
+                        return Ok(());
+                    }
                     let field = object_key(&mut runtime, key)?;
                     let fields = runtime
                         .objects
@@ -812,7 +935,7 @@ fn instruction(
                 thread.frames.last_mut().unwrap().pc = pc;
             }
         }
-        Op::Call(_, argc, _) | Op::Spawn(_, argc, _) | Op::Indirect(argc, _, _) => {
+        Op::Call(_, argc, _) | Op::Spawn(_, argc, _, _) | Op::Indirect(argc, _, _) => {
             let base = thread
                 .stack
                 .len()
@@ -825,7 +948,7 @@ fn instruction(
                 .map(|value| copy_value(world, value))
                 .collect::<Result<Vec<_>, _>>()?;
             let callee = match op {
-                Op::Call(callee, _, _) | Op::Spawn(callee, _, _) => callee,
+                Op::Call(callee, _, _) | Op::Spawn(callee, _, _, _) => callee,
                 Op::Indirect(..) => match pop(thread)? {
                     Value::Function(id) => Callee::Script(id),
                     Value::Builtin(id) => Callee::Native(id),
@@ -844,9 +967,12 @@ fn instruction(
                 thread.frames.last().unwrap().receiver.clone()
             };
             match callee {
-                Callee::Script(function) if spawn => {
+                Callee::Script(function) if spawn.is_some() => {
                     frame_room(world, thread)?;
                     let child = new_thread(world, program, function as usize, receiver, args)?;
+                    if spawn == Some(ThreadMode::Child) {
+                        inherit_endons(world, thread, child.serial);
+                    }
                     run_inline(world, program, thread, child, now)?;
                 }
                 Callee::Script(function) => {
@@ -859,19 +985,43 @@ fn instruction(
                         receiver,
                     ));
                 }
-                Callee::Native(_) if spawn => {
+                Callee::Native(_) if spawn.is_some() => {
                     return Err("threading native calls is unsupported".into());
                 }
                 Callee::Native(index) => {
                     let native = world.resource::<RoundScript>().natives[index as usize];
                     let name = &program.natives[index as usize].name;
+                    let native = native.ok_or_else(|| format!("unimplemented native: {name}"))?;
+                    // Engine natives may synchronously enter script (for example an actor type).
+                    // Keep the caller's endons reachable until that callback returns.
+                    {
+                        let mut runtime = world.resource_mut::<RoundScript>();
+                        runtime.suspended.push(thread.serial);
+                        runtime.suspended_frames += thread.frames.len();
+                    }
                     // A defect in one builtin costs its caller an undefined result, not the match.
                     let value = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         native(world, &receiver, &args)
                     }))
-                    .unwrap_or_else(|_| Err("builtin panicked".into()))
-                    .map_err(|m| format!("{name}: {m}"))?;
+                    .unwrap_or_else(|_| Err("builtin panicked".into()));
+                    {
+                        let mut runtime = world.resource_mut::<RoundScript>();
+                        runtime.suspended.pop();
+                        runtime.suspended_frames -= thread.frames.len();
+                    }
+                    let value = match value {
+                        Ok(value) => value,
+                        Err(message) => {
+                            resume_suspended(world, thread, now)?;
+                            return if thread.state == ThreadState::Complete {
+                                Ok(())
+                            } else {
+                                Err(format!("{name}: {message}"))
+                            };
+                        }
+                    };
                     thread.stack.push(value);
+                    resume_suspended(world, thread, now)?;
                     deliver_pending(world, thread, now)?;
                     settle_owed_deaths(world, thread, now)?;
                 }
@@ -938,6 +1088,14 @@ fn instruction(
                     type_name(&receiver)
                 ));
             };
+            if let Some(value) = super::host::entities::load_native_field(
+                world.resource::<RoundScript>(),
+                id,
+                &program.symbols[field as usize],
+            ) {
+                thread.stack.push(value);
+                return Ok(());
+            }
             if let Some(client) = world.resource::<RoundScript>().player_client(id)
                 && let Some(value) = super::host::players::load_field(
                     world,
@@ -971,6 +1129,19 @@ fn instruction(
             let Value::Object(id) = receiver else {
                 return Err("native entity fields are not bound".into());
             };
+            super::host::path_nodes::check_field_write(
+                world.resource::<RoundScript>(),
+                id,
+                &program.symbols[field as usize],
+            )?;
+            if super::host::entities::store_native_field(
+                &mut world.resource_mut::<RoundScript>(),
+                id,
+                &program.symbols[field as usize],
+                &value,
+            )? {
+                return Ok(());
+            }
             if let Some(client) = world.resource::<RoundScript>().player_client(id)
                 && super::host::players::store_field(
                     world,
@@ -1100,29 +1271,11 @@ fn register(
     });
 }
 
-#[derive(Resource, Default)]
-struct ThreadIndex(std::collections::HashMap<u64, Entity>);
-
-fn find_thread(world: &mut World, serial: u64) -> Option<Entity> {
-    if let Some(entity) = world
-        .get_resource::<ThreadIndex>()
-        .and_then(|index| index.0.get(&serial).copied())
-        && world
-            .get::<Thread>(entity)
-            .is_some_and(|thread| thread.serial == serial)
-    {
-        return Some(entity);
-    }
-    let mut index = std::collections::HashMap::new();
-    let mut found = None;
-    for (entity, thread) in world.query::<(Entity, &Thread)>().iter(world) {
-        index.insert(thread.serial, entity);
-        if thread.serial == serial {
-            found = Some(entity);
-        }
-    }
-    world.insert_resource(ThreadIndex(index));
-    found
+fn take_thread(world: &mut World, serial: u64) -> Option<Thread> {
+    world
+        .resource_mut::<RoundScript>()
+        .threads
+        .swap_remove(&serial)
 }
 
 fn with_thread<R>(
@@ -1134,13 +1287,13 @@ fn with_thread<R>(
     if serial == current.serial {
         return Some(f(world, current, true));
     }
-    let entity = find_thread(world, serial)?;
-    let mut thread = world.entity_mut(entity).take::<Thread>().unwrap();
+    let mut thread = take_thread(world, serial)?;
     let result = f(world, &mut thread, false);
-    if thread.state == ThreadState::Complete {
-        world.despawn(entity);
-    } else {
-        world.entity_mut(entity).insert(thread);
+    if thread.state != ThreadState::Complete {
+        world
+            .resource_mut::<RoundScript>()
+            .threads
+            .insert(thread.serial, thread);
     }
     Some(result)
 }
@@ -1266,18 +1419,18 @@ fn notify(
     }
 }
 
-fn kill(world: &mut World, entity: Entity, serial: u64) {
-    world.despawn(entity);
+fn kill(world: &mut World, serial: u64) {
+    world
+        .resource_mut::<RoundScript>()
+        .threads
+        .swap_remove(&serial);
     retire(&mut world.resource_mut::<RoundScript>(), serial);
 }
 
 const HEAP_COLLECT_TICKS: u32 = 10;
 
-pub(crate) fn advance_scheduler(world: &mut World) {
+pub(crate) fn advance_scheduler(world: &mut World, animation_seconds: f32) {
     let request = world.resource::<crate::step::StepRequest>();
-    if !request.reason.advances_authority_world() {
-        return;
-    }
     let tick = request.tick;
     let runtime = world.resource::<RoundScript>();
     if runtime.fault.is_some() {
@@ -1303,21 +1456,48 @@ pub(crate) fn advance_scheduler(world: &mut World) {
     }
     world.resource_mut::<RoundScript>().last_tick = Some(tick);
     let now = i64::from(tick.0) * i64::from(crate::MATCH_TICK_MS);
+    if let Err(message) = super::host::actors::spatial::initialize_pending(world) {
+        world.resource_mut::<RoundScript>().fault = Some(Fault::at(
+            &Location {
+                module: "<engine>".into(),
+                function: "actor spatial initialization".into(),
+                line: 0,
+                column: 0,
+            },
+            message,
+        ));
+        return;
+    }
     super::host::mechanics::deliver_finished(world);
     deliver_external(world, now);
+    if let Err(message) = super::host::animations::advance(world, animation_seconds, now) {
+        world.resource_mut::<RoundScript>().fault = Some(Fault::at(
+            &Location {
+                module: "<engine>".into(),
+                function: "animation".into(),
+                line: 0,
+                column: 0,
+            },
+            message,
+        ));
+    }
+    if world.resource::<RoundScript>().fault.is_some() {
+        return;
+    }
     let doomed = threads_waiting_on_deleted(world);
     let dead: Vec<_> = if doomed.is_empty() {
         Vec::new()
     } else {
         world
-            .query::<(Entity, &Thread)>()
-            .iter(world)
-            .filter(|(_, thread)| doomed.contains(&thread.serial))
-            .map(|(entity, thread)| (entity, thread.serial))
+            .resource::<RoundScript>()
+            .threads
+            .values()
+            .filter(|thread| doomed.contains(&thread.serial))
+            .map(|thread| thread.serial)
             .collect()
     };
-    for (entity, serial) in dead {
-        kill(world, entity, serial);
+    for serial in dead {
+        kill(world, serial);
     }
     {
         let mut runtime = world.resource_mut::<RoundScript>();
@@ -1380,22 +1560,25 @@ fn run_ready(world: &mut World, program: &Program, now: i64) {
         let Some(serial) = next else {
             break;
         };
-        let Some(entity) = find_thread(world, serial) else {
+        let Some(thread) = world.resource::<RoundScript>().threads.get(&serial) else {
             continue;
         };
-        let receivers = entity_receivers(world, world.get::<Thread>(entity).unwrap());
+        let receivers = entity_receivers(world, thread);
         if any_deleted(world, &receivers) {
-            kill(world, entity, serial);
+            kill(world, serial);
             continue;
         }
-        let mut thread = world.entity_mut(entity).take::<Thread>().unwrap();
+        let mut thread = take_thread(world, serial).unwrap();
         thread.state = ThreadState::Runnable;
         world.resource_mut::<RoundScript>().budget = INSTRUCTION_BUDGET;
         execute(world, program, &mut thread, now);
         if thread.state == ThreadState::Complete {
-            kill(world, entity, serial);
+            kill(world, serial);
         } else {
-            world.entity_mut(entity).insert(thread);
+            world
+                .resource_mut::<RoundScript>()
+                .threads
+                .insert(thread.serial, thread);
         }
         if world.resource::<RoundScript>().fault.is_some() {
             break;
@@ -1513,7 +1696,9 @@ fn stack_effect(op: &Op) -> (usize, usize) {
         Op::StoreField(_) | Op::Await(_) | Op::Endon => (2, 0),
         Op::StoreIndex => (3, 0),
         Op::Vector => (3, 1),
-        Op::Call(_, argc, method) | Op::Spawn(_, argc, method) => (argc + usize::from(method), 1),
+        Op::Call(_, argc, method) | Op::Spawn(_, argc, method, _) => {
+            (argc + usize::from(method), 1)
+        }
         Op::Indirect(argc, method, _) => (argc + 1 + usize::from(method), 1),
         Op::Notify(argc) | Op::AwaitMatch(argc) => (argc + 2, 0),
         Op::Jump(_) | Op::EnsureLocalArray(_) | Op::FrameEnd | Op::Return => (0, 0),
@@ -1521,7 +1706,8 @@ fn stack_effect(op: &Op) -> (usize, usize) {
 }
 
 fn terminal(message: &str) -> bool {
-    message.starts_with("invalid IR")
+    message.starts_with("unimplemented native: ")
+        || message.starts_with("invalid IR")
         || message.contains("identifier exhausted")
         || message == "vehicle pool exhausted"
         || message.ends_with(": vehicle pool exhausted")
@@ -1551,20 +1737,12 @@ fn report(world: &mut World, fault: &Fault) {
     }
 }
 
-pub(crate) fn healthy(runtime: bevy_ecs::prelude::Res<RoundScript>) -> bool {
-    runtime.fault.is_none()
-}
-
-pub(crate) fn preflight(
-    world: &World,
-    tick: crate::Tick,
-    reason: crate::StepReason,
-) -> Result<(), Fault> {
+pub(crate) fn preflight(world: &World, tick: crate::Tick) -> Result<(), Fault> {
     let runtime = world.resource::<RoundScript>();
     if let Some(fault) = &runtime.fault {
         return Err(fault.clone());
     }
-    if reason.advances_authority_world() && runtime.last_tick.is_some_and(|last| last.0 >= tick.0) {
+    if runtime.last_tick.is_some_and(|last| last.0 >= tick.0) {
         return Err(Fault::at(
             &Location {
                 module: "<scheduler>".into(),
@@ -1575,7 +1753,7 @@ pub(crate) fn preflight(
             "authority script ticks must increase; restore the runtime before replaying",
         ));
     }
-    if reason.advances_authority_world() && (!runtime.started || runtime.program.is_none()) {
+    if !runtime.started || runtime.program.is_none() {
         return Err(Fault::at(
             &Location {
                 module: "<runtime>".into(),
@@ -1608,7 +1786,7 @@ fn allocate_array(world: &mut World) -> Result<Value, String> {
     Ok(Value::Array(id))
 }
 
-fn copy_value(world: &mut World, value: Value) -> Result<Value, String> {
+pub(super) fn copy_value(world: &mut World, value: Value) -> Result<Value, String> {
     fn copy(
         world: &mut World,
         value: Value,
@@ -1686,6 +1864,10 @@ impl RoundScript {
     /// Values held outside script objects by the engine side: they keep what
     /// they reference alive exactly like a script variable would.
     fn native_roots(&self, pending: &mut Vec<Value>) {
+        self.path_nodes.trace_values(pending);
+        for actor in self.actors.values() {
+            actor.goals.trace_values(pending);
+        }
         pending.extend(self.presented.values().flatten().cloned());
         for (receiver, _, args) in &self.pending_notifies {
             pending.push(receiver.clone());
@@ -1711,7 +1893,7 @@ impl RoundScript {
                 .iter()
                 .flat_map(|(_, _, args)| args.iter().cloned()),
         );
-        self.t5.roots(pending);
+        self.extensions.trace_values(pending);
     }
 }
 
@@ -1740,7 +1922,7 @@ fn collect_heap(world: &mut World) {
     for id in world.resource::<RoundScript>().entities.keys() {
         marks.reach(&Value::Object(*id));
     }
-    for thread in world.query::<&Thread>().iter(world) {
+    for thread in world.resource::<RoundScript>().threads.values() {
         thread.stack.iter().for_each(|value| marks.reach(value));
         for frame in &thread.frames {
             marks.reach(&frame.receiver);

@@ -43,10 +43,8 @@ pub fn spot_shadow_slot_plan(fast: bool, slot_index: u32, rand_zero: bool) -> Sp
     if !fast || slot_index > 1 {
         let clear = if !fast {
             slot_index == 0
-        } else if slot_index == 2 && rand_zero {
-            true
         } else {
-            false
+            slot_index == 2 && rand_zero
         };
         SpotShadowSlotPlan {
             render_target_id: GFX_SPOT_SHADOW_RT_SMALL,
@@ -354,13 +352,7 @@ pub fn spot_shadow_z_near(near_bias: f32) -> f32 {
 
 #[must_use]
 pub fn spot_shadow_tan_half_fov(cos: f32) -> f32 {
-    let c = if cos < SPOT_SHADOW_COS_CLAMP_MIN {
-        SPOT_SHADOW_COS_CLAMP_MIN
-    } else if cos > SPOT_SHADOW_COS_CLAMP_MAX {
-        SPOT_SHADOW_COS_CLAMP_MAX
-    } else {
-        cos
-    };
+    let c = cos.clamp(SPOT_SHADOW_COS_CLAMP_MIN, SPOT_SHADOW_COS_CLAMP_MAX);
     libm::sqrtf(1.0 - c * c) / c
 }
 
@@ -621,19 +613,16 @@ pub fn spot_shadow_link_primary_vis(
         let inside = d2 < r * r;
         let lit = if !inside {
             false
-        } else if light.light_type == crate::scene_light::GFX_LIGHT_TYPE_SPOT
-            && light.cos_half_fov_expanded > 0.0
-            && crate::cull::cull_point_from_cone_expanded(
-                light.origin,
-                light.direction,
-                light.cos_half_fov_expanded,
-                origin,
-                extra,
-            )
-        {
-            false
         } else {
-            true
+            !(light.light_type == crate::scene_light::GFX_LIGHT_TYPE_SPOT
+                && light.cos_half_fov_expanded > 0.0
+                && crate::cull::cull_point_from_cone_expanded(
+                    light.origin,
+                    light.direction,
+                    light.cos_half_fov_expanded,
+                    origin,
+                    extra,
+                ))
         };
         spot_shadow_primary_vis_write(words, bit, lit);
         light_index += 1;
@@ -682,19 +671,16 @@ pub fn spot_shadow_link_dyn_brush_vis(
         let inside = d2 < r * r;
         let lit = if !inside {
             false
-        } else if light.light_type == crate::scene_light::GFX_LIGHT_TYPE_SPOT
-            && light.cos_half_fov_expanded > 0.0
-            && crate::cull::cull_point_from_cone_expanded(
-                light.origin,
-                light.direction,
-                light.cos_half_fov_expanded,
-                origin,
-                extra,
-            )
-        {
-            false
         } else {
-            true
+            !(light.light_type == crate::scene_light::GFX_LIGHT_TYPE_SPOT
+                && light.cos_half_fov_expanded > 0.0
+                && crate::cull::cull_point_from_cone_expanded(
+                    light.origin,
+                    light.direction,
+                    light.cos_half_fov_expanded,
+                    origin,
+                    extra,
+                ))
         };
         spot_shadow_primary_vis_write(words, bit, lit);
         light_index += 1;

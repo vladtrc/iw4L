@@ -69,7 +69,7 @@ pub fn mark_box_surfaces(q: &mut MarkBoxSurfaces<'_>) -> MarkBoxSurfacesCensus {
             surf_bits: q.surf_bits,
             surf_bit_count,
             smodel_indexes: tree.smodel_indexes,
-            smodel_bits: q.smodel_bits.as_mut().map(|b| &mut **b),
+            smodel_bits: q.smodel_bits.as_deref_mut(),
             smodel_bit_count,
         };
         aabb_tree_set_sorted_span_bits(&mut span);

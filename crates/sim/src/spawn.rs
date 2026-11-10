@@ -72,11 +72,19 @@ impl Default for MatchBootstrap {
     }
 }
 
+static HOST_GAME_MODE: std::sync::OnceLock<GameModeKind> = std::sync::OnceLock::new();
+
+/// The launcher's `--gametype`, set once before the app starts.
+pub fn set_host_game_mode_kind(kind: GameModeKind) -> Result<(), &'static str> {
+    HOST_GAME_MODE
+        .set(kind)
+        .map_err(|_| "host game mode already set")
+}
+
 pub fn host_game_mode_kind() -> GameModeKind {
-    std::env::var("IW4L_GAMETYPE")
-        .ok()
-        .as_deref()
-        .and_then(GameModeKind::parse_ascii_ignore_case)
+    HOST_GAME_MODE
+        .get()
+        .copied()
         .unwrap_or(GameModeKind::FreeForAll)
 }
 
@@ -102,7 +110,7 @@ impl HostGameModeSelection {
         GameModeKind::parse_ascii_ignore_case(token).map(Self)
     }
 
-    pub fn from_env() -> Self {
+    pub fn launch_default() -> Self {
         Self(host_game_mode_kind())
     }
 
@@ -131,12 +139,10 @@ pub fn spawn_candidate_indices_for(
 ) -> Vec<usize> {
     if kind.is_team() && (client_state_team == TEAM_AXIS || client_state_team == TEAM_ALLIES) {
         let axis = client_state_team == TEAM_AXIS;
-        if use_start_spawns {
-            if let Some(start) = kind.team_start_classname(axis) {
-                let idx = filter_classname(spawns, |c| c == start);
-                if !idx.is_empty() {
-                    return idx;
-                }
+        if use_start_spawns && let Some(start) = kind.team_start_classname(axis) {
+            let idx = filter_classname(spawns, |c| c == start);
+            if !idx.is_empty() {
+                return idx;
             }
         }
         let grid = kind.team_grid_classnames(axis);
@@ -182,33 +188,10 @@ fn filter_classname(spawns: &[AuthoredSpawnPoint], pred: impl Fn(&str) -> bool) 
         .collect()
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SpawnReject {
-    NoAuthoredCandidates,
-    NoGroundHit,
-    StartSolid,
-    Occupied,
-    UnsupportedCoverage,
-    AllRejected,
-}
-
-impl SpawnReject {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::NoAuthoredCandidates => "no_authored_candidates",
-            Self::NoGroundHit => "no_ground_hit",
-            Self::StartSolid => "start_solid",
-            Self::Occupied => "occupied",
-            Self::UnsupportedCoverage => "unsupported_coverage",
-            Self::AllRejected => "all_rejected",
-        }
-    }
-}
-
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SpawnAttemptReport {
     pub tried: u32,
-    pub rejected: Vec<(usize, SpawnReject)>,
+    pub rejected: Vec<(usize, &'static str)>,
     pub accepted: Option<SpawnDecision>,
 }
 
@@ -246,9 +229,12 @@ impl CollisionBackend for SpawnClip<'_> {
     }
 }
 
-pub(crate) fn ground_spawn(world: &FrameWorld, feet: [f32; 3]) -> Result<[f32; 3], SpawnReject> {
+pub(crate) fn ground_spawn(world: &FrameWorld, feet: [f32; 3]) -> Result<[f32; 3], &'static str> {
+    if !feet.into_iter().all(f32::is_finite) {
+        return Err("non_finite_origin");
+    }
     if !world.has_world_clip() {
-        return Err(SpawnReject::UnsupportedCoverage);
+        return Err("unsupported_coverage");
     }
     let at_feet = world.trace_clip(feet, feet, PLAYER_MINS, PLAYER_MAXS, MASK_PLAYER_SOLID);
     if at_feet.startsolid != 0 || at_feet.allsolid != 0 {
@@ -267,9 +253,9 @@ pub(crate) fn ground_spawn(world: &FrameWorld, feet: [f32; 3]) -> Result<[f32; 3
     );
     if down.fraction >= 1.0 {
         return Err(if down.startsolid != 0 || down.allsolid != 0 {
-            SpawnReject::StartSolid
+            "start_solid"
         } else {
-            SpawnReject::NoGroundHit
+            "no_ground_hit"
         });
     }
     let landed = lerp3(raised, down_end, down.fraction);
@@ -280,15 +266,15 @@ pub(crate) fn ground_spawn(world: &FrameWorld, feet: [f32; 3]) -> Result<[f32; 3
     Ok(landed)
 }
 
-fn recover_spawn(world: &FrameWorld, origin: [f32; 3]) -> Result<[f32; 3], SpawnReject> {
+fn recover_spawn(world: &FrameWorld, origin: [f32; 3]) -> Result<[f32; 3], &'static str> {
     let fixed = SpawnClip(world)
         .correct_solid(origin, PLAYER_MINS, PLAYER_MAXS, MASK_PLAYER_SOLID)
-        .ok_or(SpawnReject::StartSolid)?;
+        .ok_or("start_solid")?;
     if fixed.trace.startsolid != 0 || fixed.trace.allsolid != 0 {
-        return Err(SpawnReject::StartSolid);
+        return Err("start_solid");
     }
     if !fixed.trace.fraction.is_finite() || fixed.trace.fraction >= 1.0 {
-        return Err(SpawnReject::NoGroundHit);
+        return Err("no_ground_hit");
     }
     Ok(fixed.origin)
 }
@@ -306,7 +292,7 @@ fn try_spawn_order(
         match ground_spawn(world, point.origin) {
             Ok(traced_origin) => {
                 if occupied(avoid, traced_origin) {
-                    report.rejected.push((source_index, SpawnReject::Occupied));
+                    report.rejected.push((source_index, "occupied"));
                     continue;
                 }
                 report.accepted = Some(SpawnDecision {
@@ -322,7 +308,7 @@ fn try_spawn_order(
         }
     }
     if report.accepted.is_none() && !report.rejected.is_empty() {
-        report.rejected.push((usize::MAX, SpawnReject::AllRejected));
+        report.rejected.push((usize::MAX, "all_rejected"));
     }
     report
 }
@@ -361,7 +347,7 @@ pub(crate) fn decide_forced_spawn(
                         }),
                     };
                 }
-                Ok(_) => refused_at = Some(SpawnReject::Occupied),
+                Ok(_) => refused_at = Some("occupied"),
                 Err(reason) => refused_at = Some(reason),
             }
             0
@@ -378,7 +364,7 @@ pub(crate) fn decide_forced_spawn(
     let mut report = if order.is_empty() {
         SpawnAttemptReport {
             tried: 0,
-            rejected: vec![(0, SpawnReject::NoAuthoredCandidates)],
+            rejected: vec![(0, "no_authored_candidates")],
             accepted: None,
         }
     } else {

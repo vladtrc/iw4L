@@ -6,7 +6,7 @@ use playerstate_iw4::PlayerState;
 
 use crate::frame::{
     FrameWorld, PayloadIndex, collect_dropped_items, collect_players, collect_projectiles,
-    collect_script_movers, install_state_entity, player_ref, spawn_payload_rows,
+    collect_script_movers, install_state_entity, player_ref,
 };
 use crate::gentity::ScriptMoverGentity;
 use crate::identities::ScriptModelId;
@@ -17,7 +17,6 @@ use crate::world::{ClientId, SimState, Tick};
 pub struct SimWorld {
     ecs: World,
     state_entity: Entity,
-    schedule: bevy_ecs::schedule::Schedule,
 }
 
 impl Default for SimWorld {
@@ -27,6 +26,7 @@ impl Default for SimWorld {
         ecs.entity_mut(state_entity).insert(PayloadIndex::default());
         install_state_entity(&mut ecs, state_entity);
         ecs.insert_resource(crate::LocalPlayerProfile::default());
+        ecs.init_resource::<crate::LocalKeyBindings>();
         ecs.insert_resource(crate::PersistentDataStore::default());
         ecs.init_resource::<crate::script::MatchScript>();
         ecs.insert_resource(crate::script::RoundScript::new(
@@ -34,35 +34,7 @@ impl Default for SimWorld {
         ));
         ecs.insert_resource(crate::script::Mechanics::default());
         ecs.insert_resource(crate::script::NativeRegistry::default());
-        Self {
-            ecs,
-            state_entity,
-            schedule: crate::step::schedule(),
-        }
-    }
-}
-
-impl Clone for SimWorld {
-    fn clone(&self) -> Self {
-        let mut ecs = World::new();
-        let state_entity = ecs.spawn((**self).clone()).id();
-        ecs.entity_mut(state_entity).insert(PayloadIndex::default());
-        install_state_entity(&mut ecs, state_entity);
-        spawn_payload_rows(
-            &mut ecs,
-            collect_players(&self.ecs),
-            collect_projectiles(&self.ecs),
-            collect_script_movers(&self.ecs),
-            collect_dropped_items(&self.ecs),
-        );
-        ecs.insert_resource(*self.ecs.resource::<crate::LocalPlayerProfile>());
-        ecs.insert_resource(self.ecs.resource::<crate::PersistentDataStore>().clone());
-        crate::script::copy_state(&self.ecs, &mut ecs);
-        Self {
-            ecs,
-            state_entity,
-            schedule: crate::step::schedule(),
-        }
+        Self { ecs, state_entity }
     }
 }
 
@@ -92,6 +64,48 @@ impl DerefMut for SimWorld {
 }
 
 impl SimWorld {
+    pub fn campaign_reload_request(&self) -> Option<crate::CampaignReloadRequest> {
+        self.ecs
+            .get_resource::<crate::campaign_reload::CampaignReload>()?
+            .request
+    }
+    pub fn prepare_campaign_checkpoint_load(
+        &self,
+    ) -> Result<crate::CampaignCheckpointLoad, String> {
+        crate::CampaignCheckpointLoad::prepare(&self.ecs)
+    }
+
+    /// Install into a freshly prepared map before starting its script entries.
+    /// The host must install the returned authority tick before releasing load hold.
+    pub fn install_campaign_checkpoint_load(
+        &mut self,
+        load: &crate::CampaignCheckpointLoad,
+    ) -> Result<Tick, String> {
+        load.install(&mut self.ecs)
+    }
+
+    /// Last committed in-process campaign save, available for a coordinated load.
+    pub fn committed_campaign_checkpoint(&self) -> Option<&crate::CampaignCheckpoint> {
+        self.ecs
+            .get_resource::<crate::campaign_checkpoint::SaveMemory>()?
+            .checkpoint()
+    }
+
+    /// Capture after a successful frame, when all script threads are parked.
+    pub fn capture_campaign_checkpoint(&self) -> Result<crate::CampaignCheckpoint, String> {
+        crate::CampaignCheckpoint::capture(&self.ecs)
+    }
+
+    /// Restore an in-process checkpoint from this map session. The caller must
+    /// reset its authority clock to the returned tick and retire client history,
+    /// queued input, and presentation from the abandoned timeline before stepping.
+    pub fn restore_campaign_checkpoint(
+        &mut self,
+        checkpoint: &crate::CampaignCheckpoint,
+    ) -> Result<Tick, String> {
+        checkpoint.restore(&mut self.ecs)
+    }
+
     pub fn validate_entity_lifetimes(&self) -> Result<(), String> {
         crate::frame::validate_entity_payloads(&self.ecs)
     }
@@ -113,7 +127,7 @@ impl SimWorld {
             .count();
         let runtime = self.ecs.resource::<crate::script::RoundScript>();
         format!(
-            "occupied_slots = {occupied}\nevent_holds = {held}\nprojectile_payloads = {}\nitem_payloads = {}\nmover_payloads = {}\nscript_objects = {}\nscript_defined_entities = {}\nentity_consistency = {:?}\nmap_glass = {:?}\n",
+            "occupied_slots = {occupied}\nevent_holds = {held}\nprojectile_payloads = {}\nitem_payloads = {}\nmover_payloads = {}\nscript_objects = {}\nscript_defined_entities = {}\nentity_consistency = {:?}\nmap_glass = {:?}\ncampaign_save = {}\n",
             collect_projectiles(&self.ecs).len(),
             collect_dropped_items(&self.ecs).len(),
             collect_script_movers(&self.ecs).len(),
@@ -124,7 +138,10 @@ impl SimWorld {
                 .filter(|id| runtime.script_is_defined(id))
                 .count(),
             self.validate_entity_lifetimes(),
-            self.content().map().glass
+            self.content().map().glass,
+            self.ecs
+                .get_resource::<crate::campaign_checkpoint::SaveMemory>()
+                .map_or_else(|| "inactive".into(), |saves| saves.summary())
         )
     }
 
@@ -154,8 +171,59 @@ impl SimWorld {
         self.ecs.insert_resource(profile);
     }
 
-    pub(crate) fn frame(&mut self) -> FrameWorld<'_> {
+    pub fn set_local_key_bindings(&mut self, bindings: crate::LocalKeyBindings) {
+        self.ecs.insert_resource(bindings);
+    }
+
+    pub fn local_key_bindings(&self) -> &crate::LocalKeyBindings {
+        self.ecs.resource::<crate::LocalKeyBindings>()
+    }
+
+    pub fn frame(&mut self) -> FrameWorld<'_> {
         FrameWorld::new(&mut self.ecs, self.state_entity)
+    }
+
+    pub fn input_program(&self) -> Option<&crate::input_program::InputProgramRun> {
+        self.ecs
+            .get_resource::<crate::input_program::InputProgramRun>()
+    }
+
+    pub fn input_program_owns(&self, client: ClientId) -> bool {
+        self.input_program()
+            .is_some_and(|run| run.actor(client).is_some())
+    }
+
+    pub fn install_input_program(
+        &mut self,
+        program: crate::input_program::InputProgram,
+    ) -> Result<(), String> {
+        self.install_input_ensemble(program, Vec::new())
+    }
+
+    pub fn install_input_ensemble(
+        &mut self,
+        program: crate::input_program::InputProgram,
+        mut actors: Vec<crate::input_program::InputProgram>,
+    ) -> Result<(), String> {
+        if self.input_program().is_some() {
+            return Err(
+                "input program already owns this match; reload the map for a new take".into(),
+            );
+        }
+        actors.sort_by_key(|actor| actor.client);
+        let mut owners = std::collections::BTreeSet::from([program.client]);
+        for actor in &actors {
+            if !owners.insert(actor.client) {
+                return Err("duplicate input program actor".into());
+            }
+        }
+        let mut run = crate::input_program::InputProgramRun::prepare(self, program)?;
+        run.actors = actors
+            .into_iter()
+            .map(|actor| crate::input_program::InputProgramRun::prepare(self, actor))
+            .collect::<Result<_, _>>()?;
+        self.ecs.insert_resource(run);
+        Ok(())
     }
 
     fn run(
@@ -163,9 +231,167 @@ impl SimWorld {
         tick: Tick,
         input: &TickInput,
         msec: i32,
-        reason: StepReason,
     ) -> Result<crate::TickResult, crate::script::Fault> {
-        crate::step::run_schedule(&mut self.ecs, &mut self.schedule, tick, input, msec, reason)
+        let resolved = if let Some(mut run) = self
+            .ecs
+            .remove_resource::<crate::input_program::InputProgramRun>()
+        {
+            // Ownership outlives capture, so a forgotten tape cannot grow logs forever.
+            let duration = std::iter::once(&run)
+                .chain(&run.actors)
+                .filter_map(|actor| actor.program.samples.last().map(|cmd| cmd.server_time))
+                .max()
+                .unwrap_or(0);
+            if run.start_tick.is_some_and(|start| {
+                i64::from(tick.0.saturating_sub(start.0)) * 50 > i64::from(duration) + 120_000
+            }) {
+                run.failure
+                    .get_or_insert("input program capture exceeded 120 seconds of postroll".into());
+            }
+            let life = self
+                .client_meta(run.program.client)
+                .map(|meta| meta.life_sequence);
+            let lifecycle = self
+                .client_meta(run.program.client)
+                .map(|meta| meta.lifecycle);
+            let player = self.player(run.program.client).copied();
+            let alternate = |mapped: u16, selected: u16| {
+                self.combat_facts_for(u32::from(mapped))
+                    .is_some_and(|facts| facts.alternate_weapon == u32::from(selected))
+            };
+            let mut resolved = run.input(
+                tick,
+                input,
+                msec,
+                crate::input_program::InputActorState {
+                    life,
+                    lifecycle,
+                    player: player.as_ref(),
+                },
+                alternate,
+            );
+            if run.failure.is_none() {
+                for actor in &mut run.actors {
+                    let life = self
+                        .client_meta(actor.program.client)
+                        .map(|meta| meta.life_sequence);
+                    let lifecycle = self
+                        .client_meta(actor.program.client)
+                        .map(|meta| meta.lifecycle);
+                    let player = self.player(actor.program.client).copied();
+                    resolved = actor.input(
+                        tick,
+                        &resolved,
+                        msec,
+                        crate::input_program::InputActorState {
+                            life,
+                            lifecycle,
+                            player: player.as_ref(),
+                        },
+                        alternate,
+                    );
+                    if let Some(error) = &actor.failure {
+                        run.failure = Some(format!("actor {}: {error}", actor.program.client.0));
+                        break;
+                    }
+                }
+            }
+            if run.failure.is_some() {
+                resolved.cmds.retain(|cmd| run.actor(cmd.client).is_none());
+                resolved
+                    .shot_samples
+                    .retain(|((id, _), _)| run.actor(*id).is_none());
+                resolved.actions.retain(|(id, _)| run.actor(*id).is_none());
+            }
+            self.ecs.insert_resource(run);
+            resolved
+        } else {
+            input.clone()
+        };
+        let result = crate::step::run_frame(&mut self.ecs, tick, &resolved, msec)?;
+        if self
+            .input_program()
+            .is_none_or(|run| run.start_tick.is_none() || run.failure.is_some())
+        {
+            return Ok(result);
+        }
+        let final_seats = self.script_seats();
+        let ended = matches!(self.ecs.resource_mut::<crate::script::RoundScript>().object_field(0,"gameended"), crate::script::Value::Int(n) if n!=0);
+        let score_limit = self
+            .ecs
+            .resource::<crate::script::MatchScript>()
+            .dvars
+            .get("ui_scorelimit")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(result.snapshot.meta.score_limit);
+        let scores = result
+            .snapshot
+            .meta
+            .clients
+            .iter()
+            .map(|(id, m)| (*id, m.score, m.kills, m.deaths))
+            .collect();
+        let match_state = crate::input_program::InputMatchState {
+            tick,
+            ended,
+            score_limit,
+            scores,
+        };
+        if let Some(mut run) = self
+            .ecs
+            .get_resource_mut::<crate::input_program::InputProgramRun>()
+            && run.start_tick.is_some()
+        {
+            if result
+                .snapshot
+                .meta
+                .script_dvars(run.program.client)
+                .int("iw4l_ui_scores")
+                .unwrap_or(0)
+                != 0
+                && let Some((_, ps)) = result
+                    .snapshot
+                    .players
+                    .iter()
+                    .find(|(id, _)| *id == run.program.client)
+            {
+                run.scoreboard_samples.push((tick, ps.origin));
+            }
+            if run.match_states.last().is_none_or(|last| {
+                last.ended != match_state.ended
+                    || last.score_limit != match_state.score_limit
+                    || last.scores != match_state.scores
+            }) {
+                run.match_states.push(match_state);
+            }
+            let seats: Vec<_> = final_seats
+                .iter()
+                .filter(|(_, seat)| seat.final_kill)
+                .map(|(client, seat)| (*client, seat.spectator_client, seat.length_ms))
+                .collect();
+            crate::input_program::observe_final_killcams(&mut run.final_killcams, tick, &seats);
+            run.events.extend(
+                result
+                    .snapshot
+                    .meta
+                    .journal
+                    .iter()
+                    .filter(|record| record.tick == tick)
+                    .cloned(),
+            );
+            let last_seq = run.pickups.last().map_or(0, |(_, pickup)| pickup.seq);
+            run.pickups.extend(
+                result
+                    .snapshot
+                    .meta
+                    .item_pickups
+                    .iter()
+                    .copied()
+                    .filter(|pickup| pickup.seq > last_seq)
+                    .map(|pickup| (tick, pickup)),
+            );
+        }
+        Ok(result)
     }
 
     pub fn visit_projectiles(&self, visit: impl FnMut(&crate::ProjectileState)) {
@@ -215,18 +441,12 @@ impl SimWorld {
         crate::script::set_dvar(&mut self.ecs, name, value);
     }
 
-    pub fn gsc_realm(&self) -> Option<crate::script::Realm> {
+    pub fn gsc_realm(&self) -> Option<crate::script::FamilyId> {
         self.ecs
             .resource::<crate::script::RoundScript>()
             .program
             .as_ref()
             .map(|program| program.rules())
-    }
-
-    pub fn gsc_program_fingerprint(&self) -> Option<[u8; 32]> {
-        self.ecs
-            .resource::<crate::script::RoundScript>()
-            .program_fingerprint()
     }
 
     pub fn set_script_archive_time(
@@ -327,6 +547,128 @@ impl SimWorld {
         player_ref(&self.ecs, id)
     }
 
+    pub fn prepare_input_actor(
+        &mut self,
+        id: ClientId,
+        p: &crate::input_program::InputActorPreparation,
+    ) -> Result<(), String> {
+        if self.input_program().is_some() || !self.cheats_enabled() || !self.is_running() {
+            return Err(
+                "cast preparation needs an active cheat authority before input programs".into(),
+            );
+        }
+        if !(0..=69).contains(&p.rank)
+            || !(0..=10).contains(&p.prestige)
+            || p.name.is_empty()
+            || p.name.len() > 15
+            || p.name.bytes().any(|b| b < 32)
+            || p.score < 0
+            || p.kills < 0
+            || p.deaths < 0
+        {
+            return Err("invalid cast identity or scoreboard".into());
+        }
+        if self
+            .client_meta(id)
+            .is_none_or(|m| m.lifecycle != crate::ClientLifecycle::Alive)
+        {
+            return Err("cast actor must be alive".into());
+        }
+        if let Some(streak) = &p.streak {
+            if streak.count > p.kills {
+                return Err("live streak cannot exceed total kills".into());
+            }
+            crate::script::host::players::validate_streak(&self.ecs, streak)?;
+        }
+        crate::script::host::players::prepare_card(&mut self.ecs, id.0, p.title, p.icon)?;
+        crate::script::host::players::prepare_round_stats(
+            &mut self.ecs,
+            id.0,
+            p.score,
+            p.kills,
+            p.deaths,
+        )?;
+        if let Some(streak) = &p.streak {
+            self.ecs
+                .get_resource_or_init::<crate::input_program::PendingInputStreaks>()
+                .0
+                .insert(id, streak.clone());
+        }
+        let mut frame = self.frame();
+        let meta = frame.client_meta_mut(id);
+        meta.name = entity_iw4::pack_client_state_name(&p.name);
+        meta.rank = p.rank;
+        meta.prestige = p.prestige;
+        meta.score = p.score;
+        meta.kills = p.kills;
+        meta.deaths = p.deaths;
+        Ok(())
+    }
+
+    pub fn input_actor_streak(&self, id: ClientId) -> crate::input_program::InputStreakState {
+        crate::script::host::players::streak_state(&self.ecs, id.0)
+    }
+
+    pub fn prepare_input_team_scores(&mut self, allies: i32, axis: i32) -> Result<(), String> {
+        if self.input_program().is_some()
+            || !self.cheats_enabled()
+            || !self.is_running()
+            || !matches!(
+                self.phase(),
+                crate::MatchPhase::Warmup | crate::MatchPhase::Playing
+            )
+        {
+            return Err(
+                "score preparation needs an active cheat authority before input programs".into(),
+            );
+        }
+        if !self.game_mode_kind().is_team() {
+            return Err("score preparation requires a team mode".into());
+        }
+        let limit = self
+            .ecs
+            .get_resource::<crate::script::MatchScript>()
+            .and_then(|script| script.dvars.get("ui_scorelimit"))
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(self.bootstrap_ref().score_limit);
+        if [allies, axis]
+            .iter()
+            .any(|&score| score < 0 || (limit > 0 && score >= limit))
+        {
+            return Err(
+                "prepared team scores must be nonnegative and below the score limit".into(),
+            );
+        }
+        crate::script::host::objectives::prepare_team_scores(&mut self.ecs, allies, axis)?;
+        self.objectives.scores = [0, axis, allies];
+        Ok(())
+    }
+
+    pub fn prepare_input_actor_health(&mut self, id: ClientId, health: i32) -> Result<(), String> {
+        if self.input_program().is_some() {
+            return Err("actor health must be prepared before installing input programs".into());
+        }
+        let mut frame = self.frame();
+        if !frame.cheats_enabled() || !frame.is_running() {
+            return Err("actor preparation needs an active authority with cheats".into());
+        }
+        if !(1..=100_000).contains(&health) {
+            return Err("actor health must be 1..100000".into());
+        }
+        if frame
+            .client_meta(id)
+            .is_none_or(|meta| meta.lifecycle != crate::ClientLifecycle::Alive)
+            || frame.player(id).is_none()
+        {
+            return Err("actor must be prepared alive".into());
+        }
+        frame.client_meta_mut(id).max_health = health;
+        let ps = frame.player_mut(id).expect("validated actor");
+        ps.max_health = health;
+        ps.health = health;
+        Ok(())
+    }
+
     pub fn visit_players(&self, visit: impl FnMut(ClientId, &PlayerState)) {
         crate::frame::visit_players(&self.ecs, visit);
     }
@@ -380,13 +722,17 @@ impl SimWorld {
             .ecs
             .get::<SimState>(self.state_entity)
             .expect("simulation state entity is missing its SimState component");
-        state.snapshot_with_dynamic_rows(
+        let mut snapshot = state.snapshot_with_dynamic_rows(
             tick,
             collect_players(&self.ecs),
             collect_projectiles(&self.ecs),
             collect_script_movers(&self.ecs),
             collect_dropped_items(&self.ecs),
-        )
+            crate::script::host::audio::eq_disabled_entities(&self.ecs),
+        );
+        snapshot.meta.campaign_dvars =
+            crate::script::host::natives::iw4::campaign_shared_dvars(&self.ecs);
+        snapshot
     }
 
     pub fn slow_motion(&self) -> Option<crate::ScriptSlowMotion> {
@@ -394,26 +740,6 @@ impl SimWorld {
             .resource::<crate::script::RoundScript>()
             .engine
             .slow_motion
-    }
-
-    pub fn adopt_snapshot(&mut self, snapshot: &Snapshot) -> crate::AdoptReport {
-        assert!(
-            self.gsc_program_fingerprint().is_none(),
-            "snapshot lacks GSC state; restore a full SimWorld checkpoint"
-        );
-        self.frame().adopt_snapshot(snapshot)
-    }
-
-    pub fn adopt_prediction_snapshot(
-        &mut self,
-        snapshot: &Snapshot,
-        local: ClientId,
-    ) -> crate::AdoptReport {
-        assert!(
-            self.gsc_program_fingerprint().is_none(),
-            "prediction snapshots cannot restore authority GSC state"
-        );
-        self.frame().adopt_prediction_snapshot(snapshot, local)
     }
 
     pub fn request_round_restart(&mut self) -> Result<(), String> {
@@ -448,34 +774,8 @@ impl SimWorld {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum StepReason {
-    #[default]
-    AuthorityFrame,
-
-    PredictNew,
-
-    Replay,
-}
-
-impl StepReason {
-    pub const fn advances_authority_world(self) -> bool {
-        matches!(self, Self::AuthorityFrame)
-    }
-
-    pub const fn is_replay(self) -> bool {
-        matches!(self, Self::Replay)
-    }
-}
-
-pub fn step(
-    world: &mut SimWorld,
-    tick: Tick,
-    input: &TickInput,
-    msec: i32,
-    reason: StepReason,
-) -> crate::TickResult {
-    try_step(world, tick, input, msec, reason)
+pub fn step(world: &mut SimWorld, tick: Tick, input: &TickInput, msec: i32) -> crate::TickResult {
+    try_step(world, tick, input, msec)
         .unwrap_or_else(|fault| panic!("GSC execution failed: {fault}"))
 }
 
@@ -484,7 +784,6 @@ pub fn try_step(
     tick: Tick,
     input: &TickInput,
     msec: i32,
-    reason: StepReason,
 ) -> Result<crate::TickResult, crate::script::Fault> {
-    world.run(tick, input, msec, reason)
+    world.run(tick, input, msec)
 }

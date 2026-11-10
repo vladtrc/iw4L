@@ -8,14 +8,12 @@ use hud_iw4::{
     default_mp_key_binding, draw_mantle_hint_layout, draw_mantle_hint_visible, hint_replace_bind,
     normalized_text_scale, ui_get_font_handle, ui_text_height, unbound_directive,
 };
-use net::{LocalPresentClient, PresentedSnapshot};
 
 use crate::chrome::ui_text_width;
 use crate::draw2d::{Draw2dCmd, Draw2dList, Draw2dOp, Draw2dProvenance, tessellate_fonts};
 use crate::font_overlay;
-use crate::gaps::{GapCause, HudPresentationGaps};
 use crate::gpu_list::{HudTessPass, TessJob};
-use crate::images::HudImages;
+use crate::images::HudImageLoader;
 
 const HUD_FULLSCREEN: &str = "hud_fullscreen";
 
@@ -40,19 +38,15 @@ fn bind_letter(strings: &PreparedLocalizedStrings) -> Option<String> {
     Some(unbound_directive(unbound, "+gostand"))
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn update_mantle_hint(
     surface: Res<crate::surface::Hud2dSurface>,
     catalog: Option<Res<MenuCatalog>>,
     strings: Option<Res<PreparedLocalizedStrings>>,
-    presented: Res<PresentedSnapshot>,
-    local: Res<LocalPresentClient>,
-    mut hud_images: ResMut<HudImages>,
-    mut images: ResMut<Assets<Image>>,
-    mut gaps: ResMut<HudPresentationGaps>,
+    presentation: net::LocalPresentation,
+    mut hud_images: HudImageLoader,
     mut pass: ResMut<HudTessPass>,
 ) {
-    let Some(ps) = presented.alive_player(local.0) else {
+    let Some(ps) = presentation.alive_player() else {
         hide(&mut pass);
         return;
     };
@@ -65,12 +59,12 @@ pub(crate) fn update_mantle_hint(
         return;
     }
     let Some(catalog) = catalog.as_ref() else {
-        gaps.raise(GapCause::NoFontCatalog);
+        diag::warn_once!(Ui, "MenuCatalog is not loaded; Font_s cannot be walked");
         hide(&mut pass);
         return;
     };
     let Some(menu) = catalog.get(HUD_FULLSCREEN) else {
-        gaps.raise(GapCause::MantleHintNoItem);
+        diag::warn_once!(Ui, "hud_fullscreen has no ownerDraw 80 item");
         hide(&mut pass);
         return;
     };
@@ -79,27 +73,31 @@ pub(crate) fn update_mantle_hint(
         .iter()
         .find(|it| it.owner_draw == CG_OWNERDRAW_MANTLE)
     else {
-        gaps.raise(GapCause::MantleHintNoItem);
+        diag::warn_once!(Ui, "hud_fullscreen has no ownerDraw 80 item");
         hide(&mut pass);
         return;
     };
 
     let Some(strings) = strings.as_ref() else {
-        gaps.raise(GapCause::NoStringTable);
+        diag::warn_once!(Ui, "no localized string table is loaded");
         hide(&mut pass);
         return;
     };
     let Some(template) = strings.0.text(PLATFORM_MANTLE) else {
-        gaps.raise(GapCause::LocalizedRowMissing {
-            key: PLATFORM_MANTLE.to_owned(),
-        });
+        diag::warn_once!(
+            Ui,
+            "key `{key}` has no row in the loaded language",
+            key = PLATFORM_MANTLE.to_owned()
+        );
         hide(&mut pass);
         return;
     };
     let Some(bind) = bind_letter(strings) else {
-        gaps.raise(GapCause::LocalizedRowMissing {
-            key: KEY_UNBOUND.to_owned(),
-        });
+        diag::warn_once!(
+            Ui,
+            "key `{key}` has no row in the loaded language",
+            key = KEY_UNBOUND.to_owned()
+        );
         hide(&mut pass);
         return;
     };
@@ -111,9 +109,11 @@ pub(crate) fn update_mantle_hint(
         item.text_scale,
     );
     let Some(font) = catalog.font(font_name) else {
-        gaps.raise(GapCause::FontMissing {
-            name: font_name.to_owned(),
-        });
+        diag::warn_once!(
+            Ui,
+            "catalog has no Font_s `{name}`",
+            name = font_name.to_owned()
+        );
         hide(&mut pass);
         return;
     };
@@ -142,17 +142,15 @@ pub(crate) fn update_mantle_hint(
     );
 
     let pic_ok = hud_images
-        .get(
-            crate::images::HUD_CHROME_NAMESPACE,
-            HINT_MANTLE_MATERIAL,
-            &mut images,
-        )
+        .load(crate::images::HUD_CHROME_NAMESPACE, HINT_MANTLE_MATERIAL)
         .is_some();
     if !pic_ok {
-        gaps.raise(GapCause::MantleHintImageMissing {
-            name: HINT_MANTLE_MATERIAL.to_owned(),
-            miss: hud_images.miss_reason(),
-        });
+        diag::warn_once!(
+            Ui,
+            "mantle hint image `{name}` is {miss}",
+            name = HINT_MANTLE_MATERIAL.to_owned(),
+            miss = hud_images.miss_reason()
+        );
         hide(&mut pass);
         return;
     }
@@ -209,20 +207,22 @@ pub(crate) fn update_mantle_hint(
     fonts.insert(font_name.to_owned(), font);
     let (quads, _) = tessellate_fonts(&list, &fonts);
     let tex_ok = hud_images
-        .get(
-            crate::images::HUD_CHROME_NAMESPACE,
-            &font_material,
-            &mut images,
-        )
+        .load(crate::images::HUD_CHROME_NAMESPACE, &font_material)
         .is_some();
     if quads.is_empty() || !tex_ok {
         if !tex_ok && !quads.is_empty() {
             let image = hud_images
                 .zone_image_name(&font_material)
                 .map(str::to_owned);
-            gaps.raise(GapCause::FontAtlasMissing {
-                material: font_material,
-                image,
+            diag::warn_once!(Ui, "{}", {
+                let material: String = font_material;
+                let image: Option<String> = image;
+                match image {
+                    Some(image) => {
+                        format!("font material `{material}` image `{image}` did not upload")
+                    }
+                    None => format!("font material `{material}` has no zone atlas"),
+                }
             });
         }
         hide(&mut pass);

@@ -2,7 +2,10 @@ use crate::spawn::{AuthoredSpawnPoint, MatchBootstrap};
 use crate::world::SimBrush;
 use weapon_iw4::WeaponCombatFacts;
 
-pub const CONTENT_DIGEST_SCHEME: u64 = 21;
+mod scene;
+pub(crate) use scene::digest as scene_geometry_digest;
+
+pub const CONTENT_DIGEST_SCHEME: u64 = 25;
 
 #[derive(Clone, Copy)]
 struct Digest(u64);
@@ -93,6 +96,7 @@ fn hash_combat(h: &mut Digest, combat: &[WeaponCombatFacts]) {
             weapon_iw4::EmptyReloadPolicy::Authored => 1,
         });
         h.i32(row.clip_size);
+        h.bool(row.clip_only);
         h.i32(row.start_ammo);
         h.i32(row.max_ammo);
         h.i32(row.ammo_index);
@@ -181,6 +185,32 @@ fn hash_weapon_admission(h: &mut Digest, runnable: &[bool], transition_groups: &
     h.u64(transition_groups.len() as u64);
     for &group in transition_groups {
         h.u32(group);
+    }
+}
+
+fn hash_weapon_script_facts(h: &mut Digest, content: &crate::SimWeaponContent) {
+    h.u64(content.weapon_thermal_scopes.len() as u64);
+    for &thermal in &content.weapon_thermal_scopes {
+        h.bool(thermal);
+    }
+    h.u64(content.weapon_items.len() as u64);
+    for item in &content.weapon_items {
+        h.bool(item.is_some());
+        if let Some(item) = item {
+            h.u32(item.alternate);
+            let ammo = item.ammo;
+            for value in [
+                ammo.clip_size,
+                ammo.total_min,
+                ammo.total_max,
+                ammo.clip_percent_min,
+                ammo.clip_percent_max,
+            ] {
+                h.i32(value);
+            }
+            h.bool(ammo.shared_ammo);
+            h.bool(ammo.allow_dual_wield);
+        }
     }
 }
 
@@ -358,32 +388,29 @@ fn hash_camouflage_slots(h: &mut Digest, slots: &[Vec<u8>]) {
 }
 
 pub fn content_digest(
-    combat: &[WeaponCombatFacts],
-    penetration: &[weapon_iw4::BulletPenFacts],
-    runnable: &[bool],
-    unlocks: &[Result<gamemode_iw4::progression::UnlockRequirement, String>],
-    ranks: &gamemode_iw4::progression::RankProgression,
-    transition_groups: &[u32],
-    camouflage_slots: &[Vec<u8>],
-    equipment: &[crate::EquipmentRuntimeFacts],
+    content: &crate::SimContent,
     bootstrap: &MatchBootstrap,
-    clip_brushes: &[SimBrush],
     script_models: &[crate::EntityCollisionCapabilities],
-    map_content: &asset_core::MapContentDefinition,
 ) -> u64 {
+    let weapon_content = content.weapons();
     let mut h = Digest::new();
     h.u64(CONTENT_DIGEST_SCHEME);
-    hash_combat(&mut h, combat);
-    hash_penetration(&mut h, penetration);
-    hash_weapon_admission(&mut h, runnable, transition_groups);
-    hash_camouflage_slots(&mut h, camouflage_slots);
-    hash_equipment(&mut h, equipment);
-    hash_unlocks(&mut h, unlocks);
-    hash_ranks(&mut h, ranks);
+    hash_combat(&mut h, &weapon_content.weapon_combat);
+    hash_weapon_script_facts(&mut h, weapon_content);
+    hash_penetration(&mut h, &weapon_content.bullet_pen);
+    hash_weapon_admission(
+        &mut h,
+        &weapon_content.weapon_runnable,
+        &weapon_content.weapon_transition_groups,
+    );
+    hash_camouflage_slots(&mut h, &weapon_content.weapon_camouflage_slots);
+    hash_equipment(&mut h, &weapon_content.equipment_runtime);
+    hash_unlocks(&mut h, &weapon_content.unlock_requirements);
+    hash_ranks(&mut h, &weapon_content.rank_progression);
     hash_class_catalog(&mut h);
     hash_spawns(&mut h, &bootstrap.spawns);
-    hash_collision(&mut h, clip_brushes);
-    hash_map_content(&mut h, map_content);
+    h.u64(content.geometry_digest());
+    hash_map_content(&mut h, content.map());
     hash_script_models(&mut h, script_models);
     h.finish()
 }
@@ -400,19 +427,11 @@ pub struct ContentComponents {
 }
 
 pub fn content_components(
-    combat: &[WeaponCombatFacts],
-    penetration: &[weapon_iw4::BulletPenFacts],
-    runnable: &[bool],
-    unlocks: &[Result<gamemode_iw4::progression::UnlockRequirement, String>],
-    ranks: &gamemode_iw4::progression::RankProgression,
-    transition_groups: &[u32],
-    camouflage_slots: &[Vec<u8>],
-    equipment: &[crate::EquipmentRuntimeFacts],
+    content: &crate::SimContent,
     bootstrap: &MatchBootstrap,
-    clip_brushes: &[SimBrush],
     script_models: &[crate::EntityCollisionCapabilities],
-    map_content: &asset_core::MapContentDefinition,
 ) -> ContentComponents {
+    let weapon_content = content.weapons();
     let component = |tag: u8| {
         let mut h = Digest::new();
         h.u64(CONTENT_DIGEST_SCHEME);
@@ -422,20 +441,25 @@ pub fn content_components(
 
     let mut map = component(b'M');
     hash_spawns(&mut map, &bootstrap.spawns);
-    hash_collision(&mut map, clip_brushes);
-    hash_map_content(&mut map, map_content);
+    map.u64(content.geometry_digest());
+    hash_map_content(&mut map, content.map());
 
     let mut models = component(b'D');
     hash_script_models(&mut models, script_models);
 
     let mut weapons = component(b'W');
-    hash_combat(&mut weapons, combat);
-    hash_penetration(&mut weapons, penetration);
-    hash_weapon_admission(&mut weapons, runnable, transition_groups);
-    hash_camouflage_slots(&mut weapons, camouflage_slots);
-    hash_equipment(&mut weapons, equipment);
-    hash_unlocks(&mut weapons, unlocks);
-    hash_ranks(&mut weapons, ranks);
+    hash_combat(&mut weapons, &weapon_content.weapon_combat);
+    hash_weapon_script_facts(&mut weapons, weapon_content);
+    hash_penetration(&mut weapons, &weapon_content.bullet_pen);
+    hash_weapon_admission(
+        &mut weapons,
+        &weapon_content.weapon_runnable,
+        &weapon_content.weapon_transition_groups,
+    );
+    hash_camouflage_slots(&mut weapons, &weapon_content.weapon_camouflage_slots);
+    hash_equipment(&mut weapons, &weapon_content.equipment_runtime);
+    hash_unlocks(&mut weapons, &weapon_content.unlock_requirements);
+    hash_ranks(&mut weapons, &weapon_content.rank_progression);
 
     let mut classes = component(b'C');
     hash_class_catalog(&mut classes);
@@ -472,7 +496,11 @@ fn hash_unlocks(
     }
 }
 
-fn hash_ranks(h: &mut Digest, ranks: &gamemode_iw4::progression::RankProgression) {
+fn hash_ranks(h: &mut Digest, ranks: &Option<gamemode_iw4::progression::RankProgression>) {
+    let Some(ranks) = ranks else {
+        h.u64(0);
+        return;
+    };
     h.u64(ranks.thresholds().len() as u64);
     for &(rank, xp) in ranks.thresholds() {
         h.u32(rank);

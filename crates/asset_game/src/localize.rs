@@ -4,14 +4,14 @@ use std::path::Path;
 use bevy::prelude::Resource;
 use fastfile_iw4::{AssetLinkSink, AssetType, Ptr, Result as ZoneResult, ZoneStream, load_zone};
 
-use crate::{ZoneGame, ZoneMemory, open_zone};
+use crate::{FamilyId, ZoneMemory, open_zone};
 
 #[derive(Clone, Debug, Default, Resource)]
 pub struct LocalizeCatalog {
     entries: HashMap<String, String>,
     raw_entries: HashMap<String, Vec<u8>>,
-    by_namespace: HashMap<(asset_core::AssetNamespace, String), String>,
-    raw_by_namespace: HashMap<(asset_core::AssetNamespace, String), Vec<u8>>,
+    by_namespace: HashMap<(asset_core::FamilyId, String), String>,
+    raw_by_namespace: HashMap<(asset_core::FamilyId, String), Vec<u8>>,
 }
 
 impl LocalizeCatalog {
@@ -24,7 +24,7 @@ impl LocalizeCatalog {
         self.entries.get(&key.to_uppercase()).map(String::as_str)
     }
 
-    pub fn text_in(&self, namespace: asset_core::AssetNamespace, key: &str) -> Option<&str> {
+    pub fn text_in(&self, namespace: asset_core::FamilyId, key: &str) -> Option<&str> {
         let key = key.to_uppercase();
         self.by_namespace
             .get(&(namespace, key.clone()))
@@ -54,11 +54,7 @@ impl LocalizeCatalog {
             .map(String::as_str)
     }
 
-    pub fn absorb_in_namespace(
-        &mut self,
-        namespace: asset_core::AssetNamespace,
-        other: LocalizeCatalog,
-    ) {
+    pub fn absorb_in_namespace(&mut self, namespace: asset_core::FamilyId, other: LocalizeCatalog) {
         for (name, text) in &other.entries {
             self.by_namespace
                 .entry((namespace, name.clone()))
@@ -95,7 +91,7 @@ impl LocalizeCatalog {
         }
     }
 
-    fn insert_bytes(&mut self, name: &str, value: &[u8]) {
+    pub fn insert_bytes(&mut self, name: &str, value: &[u8]) {
         if name.is_empty() {
             return;
         }
@@ -203,7 +199,7 @@ pub fn load_localize_catalog(path: &Path) -> Result<LocalizeCatalog, String> {
     let mut sink = LocalizeSink {
         sound: asset_audio::ZoneSoundCapture::claim_common(
             path,
-            asset_audio::ZoneGame::Iw4,
+            asset_audio::FamilyId::IW4,
             "localize",
         ),
         ..Default::default()
@@ -222,94 +218,6 @@ pub fn load_localize_catalog(path: &Path) -> Result<LocalizeCatalog, String> {
         );
     }
     Ok(sink.catalog)
-}
-
-pub fn load_localize_catalog_iw5(path: &Path) -> Result<LocalizeCatalog, String> {
-    let image = open_zone(path).map_err(|e| e.to_string())?;
-    let header = image.iw5_header().map_err(|e| e.to_string())?;
-    let mut memory = crate::Iw5ZoneMemory::for_header(&header);
-    let mut stream = memory.stream(&image.bytes).map_err(|e| e.to_string())?;
-    let mut sink = Iw5LocalizeSink {
-        sound: asset_audio::ZoneSoundCapture::claim_common(
-            path,
-            asset_audio::ZoneGame::Iw5,
-            "localize",
-        ),
-        ..Default::default()
-    };
-    let walk = fastfile_iw5::load_zone(&mut stream, &mut sink);
-    if let Some(sound) = sink.sound.take() {
-        sound.deposit(walk.as_ref().map(|_| ()).map_err(|e| e.to_string()));
-    }
-    if let Err(e) = walk {
-        diag::info!(
-            Zone,
-            "localize iw5: {} stopped ({} strings): {e}",
-            path.display(),
-            sink.catalog.len()
-        );
-    }
-    Ok(sink.catalog)
-}
-
-pub fn load_localize_catalog_t5(path: &Path) -> Result<LocalizeCatalog, String> {
-    let image = open_zone(path).map_err(|e| e.to_string())?;
-    let header = image.t5_header().map_err(|e| e.to_string())?;
-    let mut memory = crate::T5ZoneMemory::for_header(&header);
-    let mut stream = memory.stream(&image.bytes).map_err(|e| e.to_string())?;
-    let mut sink = T5LocalizeSink {
-        sound: asset_audio::ZoneSoundCapture::claim_common(
-            path,
-            asset_audio::ZoneGame::T5,
-            "localize",
-        ),
-        ..Default::default()
-    };
-    let walk = fastfile_t5::load_zone(&mut stream, &mut sink);
-    if let Some(sound) = sink.sound.take() {
-        sound.deposit(walk.as_ref().map(|_| ()).map_err(|e| e.to_string()));
-    }
-    if let Err(e) = walk {
-        diag::info!(
-            Zone,
-            "localize t5: {} stopped ({} strings): {e}",
-            path.display(),
-            sink.catalog.len()
-        );
-    }
-    Ok(sink.catalog)
-}
-
-pub fn load_localize_catalog_t6(path: &Path) -> Result<LocalizeCatalog, String> {
-    let image = asset_transport::open_t6_zone(path).map_err(|e| format!("{e:?}"))?;
-    let schema = fastfile_t6::schema::parse().map_err(|e| format!("T6 load plan: {e:?}"))?;
-    let (load, walked) = fastfile_t6::load_zone(&schema, &image.bytes, |_, _| true);
-    let text = |at: usize, header: &[u8]| {
-        let raw = u32::from_le_bytes(header.get(at..at + 4)?.try_into().ok()?);
-        let p = (raw != 0 && raw < 0xFFFF_FFFE).then(|| fastfile_t6::Ptr {
-            block: ((raw - 1) >> 29) as u8,
-            offset: (raw - 1) & 0x1FFF_FFFF,
-        })?;
-        load.blocks.cstr(p).ok()
-    };
-    let mut catalog = LocalizeCatalog::default();
-    for asset in &load.assets {
-        if asset.ty != fastfile_t6::AssetType::LocalizeEntry {
-            continue;
-        }
-        if let (Some(value), Some(name)) = (text(0, &asset.header), text(4, &asset.header)) {
-            catalog.insert_bytes(&String::from_utf8_lossy(name), value);
-        }
-    }
-    if let Err(e) = walked {
-        diag::info!(
-            Zone,
-            "localize t6: {} stopped ({} strings): {e:?}",
-            path.display(),
-            catalog.len()
-        );
-    }
-    Ok(catalog)
 }
 
 const LOCALIZE_CACHE_FORMAT: u32 = 3;
@@ -396,6 +304,14 @@ impl LocalizeCatalog {
 }
 
 pub fn load_localize_catalog_in_lane(path: &Path) -> Result<LocalizeCatalog, String> {
+    let family = asset_transport::zone_game_for_path(path).ok_or_else(|| {
+        format!(
+            "localization path has no installed family: {}",
+            path.display()
+        )
+    })?;
+    let policy = localization_family(family)
+        .ok_or_else(|| format!("no localization loader for {}", family.as_str()))?;
     let key = localize_cache_key(path);
     if let Some(hit) = cached_localize_catalog(key.as_deref()) {
         return Ok(hit);
@@ -407,12 +323,7 @@ pub fn load_localize_catalog_in_lane(path: &Path) -> Result<LocalizeCatalog, Str
     if let Some(hit) = cached_localize_catalog(key.as_deref()) {
         return Ok(hit);
     }
-    let catalog = match asset_transport::zone_game_for_path(path) {
-        Some(ZoneGame::Iw4) | None => load_localize_catalog(path),
-        Some(ZoneGame::Iw5) => load_localize_catalog_iw5(path),
-        Some(ZoneGame::T5) => load_localize_catalog_t5(path),
-        Some(ZoneGame::T6) => load_localize_catalog_t6(path),
-    }?;
+    let catalog = (policy.load)(path)?;
     if let Some(key) = &key
         && let Err(error) = asset_transport::cache_put("localize", key, &catalog.cache_encode())
     {
@@ -425,159 +336,127 @@ fn cached_localize_catalog(key: Option<&str>) -> Option<LocalizeCatalog> {
     LocalizeCatalog::cache_decode(&asset_transport::cache_get("localize", key?)?)
 }
 
-#[derive(Default)]
-struct Iw5LocalizeSink {
-    catalog: LocalizeCatalog,
-    walked: usize,
-    sound: Option<asset_audio::ZoneSoundCapture>,
-}
-
-impl fastfile_iw5::AssetLinkSink for Iw5LocalizeSink {
-    fn loaded(
-        &mut self,
-        s: &fastfile_iw5::ZoneStream<'_>,
-        ty: fastfile_iw5::AssetType,
-        slot: fastfile_iw5::Ptr,
-        insert_slot: Option<fastfile_iw5::Ptr>,
-    ) -> fastfile_iw5::Result<()> {
-        if let Some(sound) = self.sound.as_mut() {
-            sound.iw5_loaded(s, ty, slot, insert_slot);
-        }
-        Ok(())
-    }
-
-    fn alias(
-        &mut self,
-        ty: fastfile_iw5::AssetType,
-        slot: fastfile_iw5::Ptr,
-        target: fastfile_iw5::Ptr,
-    ) -> fastfile_iw5::Result<()> {
-        if let Some(sound) = self.sound.as_mut() {
-            sound.iw5_alias(ty, slot, target);
-        }
-        Ok(())
-    }
-
-    fn capture_localize(&mut self, name: &str, value: &[u8]) -> fastfile_iw5::Result<()> {
-        self.catalog.insert_bytes(name, value);
-        Ok(())
-    }
-
-    fn capture_raw_file(
-        &mut self,
-        name: &str,
-        data: &[u8],
-        zlib_compressed: bool,
-    ) -> fastfile_iw5::Result<()> {
-        if let Some(sound) = self.sound.as_mut() {
-            sound.raw_file(name, data, zlib_compressed);
-        }
-        Ok(())
-    }
-
-    asset_audio::forward_iw5_sound!();
-}
-
-impl fastfile_iw5::AssetSink for Iw5LocalizeSink {
-    fn set_script_strings(&mut self, _strings: fastfile_iw5::ScriptStrings) {}
-
-    fn load_asset(
-        &mut self,
-        s: &mut fastfile_iw5::ZoneStream<'_>,
-        _index: usize,
-        ty: fastfile_iw5::AssetType,
-        slot: fastfile_iw5::Ptr,
-    ) -> fastfile_iw5::Result<()> {
-        fastfile_iw5::load_asset_at_observed(s, ty, slot, self)?;
-        self.walked += 1;
-        Ok(())
-    }
-}
-
-#[derive(Default)]
-struct T5LocalizeSink {
-    catalog: LocalizeCatalog,
-    walked: usize,
-    sound: Option<asset_audio::ZoneSoundCapture>,
-}
-
-impl fastfile_t5::AssetLinkSink for T5LocalizeSink {
-    fn loaded(
-        &mut self,
-        _s: &fastfile_t5::ZoneStream<'_>,
-        _ty: fastfile_t5::AssetType,
-        _slot: fastfile_t5::Ptr,
-        _insert_slot: Option<fastfile_t5::Ptr>,
-    ) -> fastfile_t5::Result<()> {
-        Ok(())
-    }
-
-    fn alias(
-        &mut self,
-        _ty: fastfile_t5::AssetType,
-        _slot: fastfile_t5::Ptr,
-        _target: fastfile_t5::Ptr,
-    ) -> fastfile_t5::Result<()> {
-        Ok(())
-    }
-
-    fn capture_localize(&mut self, name: &str, value: &[u8]) -> fastfile_t5::Result<()> {
-        self.catalog.insert_bytes(name, value);
-        Ok(())
-    }
-
-    fn capture_raw_file(
-        &mut self,
-        name: &str,
-        data: &[u8],
-        zlib_compressed: bool,
-    ) -> fastfile_t5::Result<()> {
-        if let Some(sound) = self.sound.as_mut() {
-            sound.raw_file(name, data, zlib_compressed);
-        }
-        Ok(())
-    }
-
-    asset_audio::forward_t5_sound!();
-}
-
-impl fastfile_t5::AssetSink for T5LocalizeSink {
-    fn set_script_strings(&mut self, _strings: fastfile_t5::ScriptStrings) {}
-
-    fn load_asset(
-        &mut self,
-        s: &mut fastfile_t5::ZoneStream<'_>,
-        _index: usize,
-        ty: fastfile_t5::AssetType,
-        slot: fastfile_t5::Ptr,
-    ) -> fastfile_t5::Result<()> {
-        fastfile_t5::load_asset_at_observed(s, ty, slot, self)?;
-        self.walked += 1;
-        Ok(())
-    }
-}
-
 pub const MP_LOCALIZED_ZONES: &[&str] = &[
     "localized_code_post_gfx_mp",
     "localized_common_mp",
     "localized_ui_mp",
 ];
 
-pub fn load_mp_localized_strings(
-    games: &crate::GamesRoot,
+pub type LocalizationLoader = fn(&Path) -> Result<LocalizeCatalog, String>;
+pub type LocalizationPlanner =
+    fn(&asset_transport::GamesRoot, &Path, Option<&str>) -> Result<LocalizationSources, String>;
+#[derive(Clone, Copy)]
+pub struct LocalizationFamily {
+    pub load: LocalizationLoader,
+    pub plan: LocalizationPlanner,
+    /// Lower values claim unqualified keys first; ties use family token order.
+    pub priority: u16,
+}
+pub const REFERENCE_LOCALIZATION_FAMILY: LocalizationFamily = LocalizationFamily {
+    load: load_localize_catalog,
+    plan: reference_localization_plan,
+    priority: 0,
+};
+fn reference_localization_plan(
+    root: &asset_transport::GamesRoot,
+    zone_ff: &Path,
+    _language: Option<&str>,
+) -> Result<LocalizationSources, String> {
+    let mut plan = LocalizationSources::default();
+    for name in MP_LOCALIZED_ZONES {
+        match asset_transport::find_runtime_zone(root, zone_ff, name) {
+            Ok(found) => plan.files.push(found),
+            Err(error) => plan.gaps.push(format!(
+                "localize: {name} missing ({error}) — its keys will report as gaps"
+            )),
+        }
+    }
+    Ok(plan)
+}
+#[derive(Default, Debug)]
+pub struct LocalizationSources {
+    pub files: Vec<asset_transport::ZoneFile>,
+    /// Missing optional filenames, retained for consumers such as UI preparation.
+    pub gaps: Vec<String>,
+}
+#[derive(Default)]
+pub struct LocalizationFamilies(std::collections::BTreeMap<FamilyId, LocalizationFamily>);
+impl LocalizationFamilies {
+    pub fn register(&mut self, id: FamilyId, policy: LocalizationFamily) {
+        assert!(
+            self.0.insert(id, policy).is_none(),
+            "duplicate localization family"
+        );
+    }
+}
+static FAMILIES: std::sync::OnceLock<LocalizationFamilies> = std::sync::OnceLock::new();
+pub fn install_localization_families(families: LocalizationFamilies) -> Result<(), &'static str> {
+    FAMILIES
+        .set(families)
+        .map_err(|_| "localization families already installed")
+}
+pub fn localization_family(id: FamilyId) -> Option<&'static LocalizationFamily> {
+    FAMILIES.get()?.0.get(&id)
+}
+pub fn localization_families() -> impl Iterator<Item = (FamilyId, &'static LocalizationFamily)> {
+    let mut policies: Vec<_> = FAMILIES
+        .get()
+        .into_iter()
+        .flat_map(|f| f.0.iter())
+        .map(|(id, policy)| (*id, policy))
+        .collect();
+    policies.sort_by_key(|(id, policy)| (policy.priority, *id));
+    policies.into_iter()
+}
+
+#[derive(Default, Debug)]
+pub struct LocalizationPlan {
+    pub sources: Vec<(FamilyId, asset_transport::ZoneFile)>,
+    pub report: Vec<String>,
+}
+pub fn plan_localization(
+    root: &asset_transport::GamesRoot,
+    zone_ff: &Path,
+    language: Option<&str>,
+) -> LocalizationPlan {
+    let mut plan = LocalizationPlan::default();
+    for (namespace, family) in localization_families() {
+        match (family.plan)(root, zone_ff, language) {
+            // The world pass counts discovered sources; per-file gaps remain for UI callers.
+            Ok(found) => plan
+                .sources
+                .extend(found.files.into_iter().map(|found| (namespace, found))),
+            Err(error) => plan.report.push(format!("localize gap: {error}")),
+        }
+    }
+    plan
+}
+
+pub fn load_localized_strings_for_zone(
+    games: &asset_transport::GamesRoot,
     zone: &str,
 ) -> Result<LocalizeCatalog, String> {
-    let zone_ff = crate::find_zone_file(games, zone)?;
+    let anchor = asset_transport::find_zone_file(games, zone)?;
+    let namespace = asset_transport::zone_game_for_path(&anchor.path).ok_or_else(|| {
+        format!(
+            "localization path has no installed family: {}",
+            anchor.path.display()
+        )
+    })?;
+    let policy = localization_family(namespace)
+        .ok_or_else(|| format!("no localization loader for {}", namespace.as_str()))?;
     let mut catalog = LocalizeCatalog::default();
-    for name in MP_LOCALIZED_ZONES {
-        match crate::find_zone_for_tree(&zone_ff.path, name) {
-            Ok(found) => match load_localize_catalog(&found.path) {
-                Ok(part) => catalog.absorb(part),
-                Err(e) => diag::warn!(Zone, "localize: {name} failed to load ({e})"),
-            },
-            Err(e) => diag::warn!(
+    let plan = (policy.plan)(games, &anchor.path, None)?;
+    for gap in plan.gaps {
+        diag::warn!(Zone, "{gap}");
+    }
+    for found in plan.files {
+        match load_localize_catalog_in_lane(&found.path) {
+            Ok(part) => catalog.absorb_in_namespace(namespace, part),
+            Err(error) => diag::warn!(
                 Zone,
-                "localize: {name} missing ({e}) — its keys will report as gaps"
+                "localize: {} failed to load ({error})",
+                found.zone_name
             ),
         }
     }

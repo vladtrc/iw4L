@@ -8,7 +8,7 @@ use crate::nav::{self, NavGraph, PathError};
 use crate::observation::{
     BotEvent, BotObservation, Contact, KnowledgeSource, ModeObjective, ObjectiveAction, TeamRole,
 };
-use crate::query::{QueryResult, QuerySubsystem, SightSample, WalkSample, WorldQuery};
+use crate::query::{QueryResult, SightSample, WalkSample, WorldQuery};
 use crate::task::{ActionStage, Decision, SwitchReason, Task, TaskKind};
 use crate::weapon::WeaponSkill;
 
@@ -33,8 +33,6 @@ const FIGHT_SCAN_MAX_AGE_TICKS: u32 = 8;
 /// A committed position is abandoned if the engagement has not resolved by
 /// then, so a stale goal cannot outlive its fight.
 const FIGHT_COMMIT_MAX_AGE_TICKS: u32 = 60;
-/// Commanded movement without displacement for this long is a stuck bot.
-const STUCK_TICKS: u32 = 40;
 
 #[derive(Clone, Debug)]
 pub struct HostController {
@@ -115,25 +113,6 @@ impl HostController {
         self.decision
     }
 
-    pub fn route_stats(&self) -> nav::RouteStats {
-        self.route_work.stats()
-    }
-
-    /// Slices the live route request has waited, and its longest run without
-    /// granted progress. `(0, 0)` when nothing is pending.
-    pub fn route_age(&self) -> (u32, u32) {
-        self.route_work.live_age()
-    }
-
-    /// A bot with a movement task that has not moved. Holding, interacting and
-    /// waiting to respawn are not navigation failures.
-    pub fn stuck(&self, tick: u32) -> bool {
-        matches!(
-            self.intent.move_mode,
-            MoveMode::Walk | MoveMode::Drop | MoveMode::BreakGlass
-        ) && tick.saturating_sub(self.progress_tick) >= STUCK_TICKS
-    }
-
     /// The enemy this bot has committed to, for perception to refresh before it
     /// spends the same allowance looking for new ones. `None` when the bot is
     /// not fighting.
@@ -175,7 +154,6 @@ impl HostController {
         astar_budget: &mut u32,
         dt_ms: i32,
     ) -> UserCmd {
-        world.enter(QuerySubsystem::Execution);
         let key = nav.map(|g| (g.generation, g.digest, g.schema, g.hull));
         if self.nav_key != key {
             self.nav_key = key;
@@ -230,7 +208,6 @@ impl HostController {
             self.intent.sprint = false;
             self.intent.use_button = false;
             if let Some(goal) = self.intent.move_goal {
-                world.enter(QuerySubsystem::Tactical);
                 let eye = obs.eye();
                 // Try several body-height points on the obstructed corridor.
                 for height in [obs.self_state.view_height.max(40.0), 40.0, 20.0] {
@@ -747,7 +724,6 @@ impl HostController {
         }
         // Perception can see a head over cover while the chest is occluded.
         // Aim only at a point validated by the weapon trace, not sight alone.
-        world.enter(QuerySubsystem::Tactical);
         let mut aim_at = aim_at;
         let mut shot = world.shot_ray(obs.eye(), aim_at, obs.self_state.id);
         if matches!(
@@ -791,16 +767,22 @@ impl HostController {
         );
         let range = dist2(obs.self_state.origin, target.origin).sqrt();
         let hold = self.hold_range(obs);
-        let (move_mode, path, move_goal) = self.fight_position(
-            obs,
-            world,
-            nav,
-            astar_budget,
-            aim_at,
-            target,
-            shot,
-            range <= hold,
-        );
+        let in_hold = range <= hold;
+        let (move_mode, path, move_goal) = if shot.is_err() {
+            (
+                MoveMode::Hold,
+                PathOutcome::BudgetExhausted,
+                Some(obs.self_state.origin),
+            )
+        } else if in_hold && shot_allowed(shot, target.id) {
+            (
+                MoveMode::Hold,
+                PathOutcome::Clear,
+                Some(obs.self_state.origin),
+            )
+        } else {
+            self.reposition_for_fight(obs, world, nav, astar_budget, aim_at, target)
+        };
         if matches!(
             path,
             PathOutcome::Unreachable | PathOutcome::Blocked | PathOutcome::IncompleteGraph
@@ -879,7 +861,6 @@ impl HostController {
     ) -> BotIntent {
         let aim_at = [target.origin[0], target.origin[1], target.origin[2] + 48.0];
         let away = away_from(obs.self_state.origin, target.origin, 192.0);
-        world.enter(QuerySubsystem::Tactical);
         let fire = self.authorize_fire(
             self.aggression > self.self_preserve
                 && obs.tick >= self.reaction_until
@@ -908,8 +889,7 @@ impl HostController {
     /// range and the approach from outside it end at the same committed support:
     /// the bot moves to a place it can shoot from, never to the enemy's own
     /// coordinates, which change with every observation.
-    #[allow(clippy::too_many_arguments)]
-    fn fight_position(
+    fn reposition_for_fight(
         &mut self,
         obs: &BotObservation,
         world: &mut impl WorldQuery,
@@ -917,21 +897,12 @@ impl HostController {
         astar_budget: &mut u32,
         aim_at: [f32; 3],
         contact: Contact,
-        shot: QueryResult<SightSample>,
-        in_hold: bool,
     ) -> (MoveMode, PathOutcome, Option<[f32; 3]>) {
         let here = obs.self_state.origin;
         let target = contact.origin;
         let target_id = contact.id;
-        world.enter(QuerySubsystem::Tactical);
-        if shot.is_err() {
-            return (MoveMode::Hold, PathOutcome::BudgetExhausted, Some(here));
-        }
-        // Already in range with a line of fire: this is the position.
-        if in_hold && shot_allowed(shot, target_id) {
-            return (MoveMode::Hold, PathOutcome::Clear, Some(here));
-        }
         let hold = self.hold_range(obs);
+        let in_hold = dist2(here, target).sqrt() <= hold;
         // The engagement, not the two exact coordinates: a threat that shifts a
         // little leaves the committed position standing. The bot's own position
         // is deliberately absent — walking to the position it chose must not
@@ -1221,7 +1192,6 @@ impl HostController {
                 }
             }
         }
-        world.enter(QuerySubsystem::Execution);
         while let Some(step) = self.committed.first().copied() {
             let tolerance = if self.committed.len() == 1 && self.decision.objective.is_some() {
                 4.0
@@ -1248,6 +1218,17 @@ impl HostController {
         let Some(step) = self.committed.first().copied() else {
             return (MoveMode::Hold, PathOutcome::Clear, Some(from));
         };
+        if step.kind == nav::TraversalKind::Portal {
+            return match world.portal_waypoint(step.entry, step.position) {
+                Some(through) => (MoveMode::Walk, PathOutcome::Clear, Some(through)),
+                None => {
+                    self.committed.clear();
+                    self.route_goal = None;
+                    self.route_work.cancel();
+                    (MoveMode::Hold, PathOutcome::Blocked, Some(step.entry))
+                }
+            };
+        }
         let sample = if step.kind == nav::TraversalKind::Drop {
             nav::drop_clear(world, from, step.position)
         } else {

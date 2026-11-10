@@ -1,13 +1,12 @@
 use crate::media::LiveGain;
 use asset_audio::ChannelKey;
-use asset_core::AssetNamespace;
+use asset_core::FamilyId;
 use bevy::prelude::*;
 use frame::ScopeApp;
 use std::{collections::HashMap, sync::Arc};
 
 #[derive(Resource, Default)]
 pub(crate) struct ScriptAudioMix {
-    epoch: u64,
     pub(crate) gain: LiveGain,
 }
 
@@ -18,12 +17,6 @@ impl ScriptAudioMix {
             to,
             duration.max(0) as u64 * u64::from(crate::render_core::SAMPLE_RATE) / 1000,
         );
-    }
-    pub(crate) fn reset_epoch(&mut self, epoch: u64) {
-        if self.epoch != epoch {
-            self.epoch = epoch;
-            self.gain.set(1.0);
-        }
     }
 }
 
@@ -43,16 +36,16 @@ impl Default for ChannelGroup {
 
 #[derive(Resource)]
 pub(crate) struct ChannelAudioMix {
-    epoch: u64,
-    groups: HashMap<(AssetNamespace, u8), ChannelGroup>,
-    selected: HashMap<AssetNamespace, u8>,
+    groups: HashMap<(FamilyId, u8), ChannelGroup>,
+    selected: HashMap<FamilyId, u8>,
     gains: Arc<HashMap<ChannelKey, LiveGain>>,
     pending: std::collections::VecDeque<sim::ScriptAudioCommand>,
 }
 
-fn channel_groups() -> HashMap<(AssetNamespace, u8), ChannelGroup> {
-    AssetNamespace::ALL
-        .into_iter()
+fn channel_groups() -> HashMap<(FamilyId, u8), ChannelGroup> {
+    asset_audio::audio_families()
+        .iter()
+        .map(|(id, _)| id)
         .flat_map(|namespace| {
             (0..4).map(move |priority| {
                 (
@@ -70,15 +63,16 @@ fn channel_groups() -> HashMap<(AssetNamespace, u8), ChannelGroup> {
 impl Default for ChannelAudioMix {
     fn default() -> Self {
         Self {
-            epoch: 0,
             groups: channel_groups(),
-            selected: AssetNamespace::ALL
-                .into_iter()
+            selected: asset_audio::audio_families()
+                .iter()
+                .map(|(id, _)| id)
                 .map(|namespace| (namespace, 0))
                 .collect(),
             gains: Arc::new(
-                AssetNamespace::ALL
-                    .into_iter()
+                asset_audio::audio_families()
+                    .iter()
+                    .map(|(id, _)| id)
                     .flat_map(|namespace| {
                         (0..64).map(move |id| (ChannelKey { namespace, id }, LiveGain::default()))
                     })
@@ -93,21 +87,8 @@ impl ChannelAudioMix {
     pub(crate) fn bindings(&self) -> Arc<HashMap<ChannelKey, LiveGain>> {
         self.gains.clone()
     }
-    pub(crate) fn reset_epoch(&mut self, epoch: u64) {
-        if self.epoch != epoch {
-            self.epoch = epoch;
-            self.groups = channel_groups();
-            self.selected = AssetNamespace::ALL
-                .into_iter()
-                .map(|namespace| (namespace, 0))
-                .collect();
-            self.pending.clear();
-            for gain in self.gains.values() {
-                gain.set(1.0);
-            }
-        }
-    }
-    fn apply(&self, namespace: AssetNamespace, frame: u64, fade_ms: i32) {
+
+    fn apply(&self, namespace: FamilyId, frame: u64, fade_ms: i32) {
         let frames = fade_ms.max(0) as u64 * u64::from(crate::render_core::SAMPLE_RATE) / 1000;
         let selected = self.selected[&namespace];
         let group = &self.groups[&(namespace, selected)];
@@ -119,14 +100,7 @@ impl ChannelAudioMix {
                 .fade(frame, *goal, frames);
         }
     }
-    fn set(
-        &mut self,
-        namespace: AssetNamespace,
-        frame: u64,
-        priority: u8,
-        goals: &[f32],
-        fade_ms: i32,
-    ) {
+    fn set(&mut self, namespace: FamilyId, frame: u64, priority: u8, goals: &[f32], fade_ms: i32) {
         let group = self
             .groups
             .get_mut(&(namespace, priority))
@@ -143,7 +117,7 @@ impl ChannelAudioMix {
             self.apply(namespace, frame, fade_ms);
         }
     }
-    fn deactivate(&mut self, namespace: AssetNamespace, frame: u64, priority: u8, fade_ms: i32) {
+    fn deactivate(&mut self, namespace: FamilyId, frame: u64, priority: u8, fade_ms: i32) {
         self.groups
             .get_mut(&(namespace, priority))
             .expect("validated script mix priority")
@@ -165,11 +139,9 @@ fn update_channel_mix(
     bank: Option<Res<crate::SoundBank>>,
     namespace: Option<Res<crate::ambient::SoundBankNamespace>>,
     local: Option<Res<net::LocalPresentClient>>,
-    epoch: Option<Res<net::EntityEventCursor>>,
     runtime: Res<crate::AudioRuntime>,
 ) {
     let now = runtime.audio_frame();
-    mix.reset_epoch(crate::backend::presentation_epoch(epoch.as_deref()));
     for event in events.read() {
         if event.0.target().is_some() {
             mix.pending.push_back(event.0.clone());
@@ -236,8 +208,8 @@ fn update_channel_mix(
 }
 
 pub(crate) fn register(app: &mut App) {
-    app.scoped::<ScriptAudioMix>(frame::MatchScope::Live)
-        .scoped::<ChannelAudioMix>(frame::MatchScope::Live)
+    app.scoped::<ScriptAudioMix>(frame::Timeline::Live)
+        .scoped::<ChannelAudioMix>(frame::Timeline::Live)
         .add_systems(
             Update,
             update_channel_mix

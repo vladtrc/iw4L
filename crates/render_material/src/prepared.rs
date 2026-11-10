@@ -246,7 +246,7 @@ pub struct PreparedPass {
 }
 
 impl PreparedArgBelts {
-    fn from_pass(material: &RuntimeMaterial, pass_index: u8, pass: &RuntimePass) -> Option<Self> {
+    fn from_pass(material: &RuntimeMaterial, pass: &RuntimePass) -> Option<Self> {
         let prim = usize::from(pass.per_prim_arg_count);
         let obj = usize::from(pass.per_obj_arg_count);
         let stable = usize::from(pass.stable_arg_count);
@@ -254,29 +254,17 @@ impl PreparedArgBelts {
             return None;
         }
         Some(Self {
-            per_prim: PreparedArgSlice::bind_local(material, pass_index, &pass.arguments[..prim]),
-            per_obj: PreparedArgSlice::bind_local(
-                material,
-                pass_index,
-                &pass.arguments[prim..prim + obj],
-            ),
-            stable: PreparedArgSlice::bind_local(
-                material,
-                pass_index,
-                &pass.arguments[prim + obj..],
-            ),
+            per_prim: PreparedArgSlice::bind_local(material, &pass.arguments[..prim]),
+            per_obj: PreparedArgSlice::bind_local(material, &pass.arguments[prim..prim + obj]),
+            stable: PreparedArgSlice::bind_local(material, &pass.arguments[prim + obj..]),
         })
     }
 }
 
 impl PreparedArgSlice {
-    fn bind_local(
-        material: &RuntimeMaterial,
-        pass_index: u8,
-        args: &[RuntimeArgumentBinding],
-    ) -> Self {
+    fn bind_local(material: &RuntimeMaterial, args: &[RuntimeArgumentBinding]) -> Self {
         Self {
-            local: prebind_local_slice(material, pass_index, args),
+            local: prebind_local_slice(material, args),
             code: pack_code_args(args),
         }
     }
@@ -558,7 +546,7 @@ fn prepare_one_material(
     let Some(entries) = material.state_bits_entry.as_ref() else {
         return PreparedMaterial { tech };
     };
-    for slot in 0..TECHNIQUE_SLOT_COUNT {
+    for (slot, tech_entry) in tech[..TECHNIQUE_SLOT_COUNT].iter_mut().enumerate() {
         let tech_type = TechType(u8::try_from(slot).unwrap_or(u8::MAX));
         let Some(technique) = set.technique(tech_type) else {
             continue;
@@ -591,8 +579,7 @@ fn prepare_one_material(
                     }
                 }
             }
-            let pass_index_u8 = u8::try_from(pass_index).unwrap_or(u8::MAX);
-            let belts = PreparedArgBelts::from_pass(material, pass_index_u8, pass);
+            let belts = PreparedArgBelts::from_pass(material, pass);
             let mut local_banks = [const { None }; VERTEX_TYPE_COUNT];
             if let Some(belts) = belts.as_ref() {
                 for (vertex_type, lens) in bank_lens.iter().copied().enumerate() {
@@ -620,7 +607,7 @@ fn prepare_one_material(
         }
         if !passes.is_empty() {
             let code_sampler_mask = code_sampler_mask_from_passes(&passes);
-            tech[slot] = Some(PreparedTechnique {
+            (*tech_entry) = Some(PreparedTechnique {
                 source_selection: technique.source_selection,
                 flags: technique.flags,
                 passes,
@@ -724,7 +711,6 @@ fn bind_local_argument(
 
 fn prebind_local_slice(
     material: &RuntimeMaterial,
-    _pass_index: u8,
     args: &[RuntimeArgumentBinding],
 ) -> Vec<Option<ExecutableArgumentBinding>> {
     let n = args.len();

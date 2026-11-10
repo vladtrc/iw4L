@@ -172,7 +172,7 @@ pub fn pack_obituary_event_parm(
     let pack_mod = match means_of_death {
         0xf => weap_class != 9,
         8 => weap_type != 3,
-        9 | 10 | 0xb | 0xc => true,
+        9..=0xc => true,
         _ => false,
     };
     if pack_mod {

@@ -15,11 +15,12 @@ use bevy::render::render_resource::binding_types::{
     sampler, storage_buffer_read_only, texture_2d, texture_3d, texture_cube, uniform_buffer_sized,
 };
 use bevy::render::render_resource::{
-    BindGroupLayoutDescriptor, Buffer, BufferDescriptor, BufferUsages, ColorTargetState,
-    ColorWrites, CompareFunction, DepthBiasState, DepthStencilState, Face, FrontFace,
-    MultisampleState, PipelineCache, PolygonMode, PrimitiveState, SamplerBindingType, ShaderStages,
-    SpecializedRenderPipelines, TextureFormat, TextureSampleType, TextureView,
-    TextureViewDescriptor, VertexAttribute, VertexFormat, VertexStepMode,
+    BindGroup, BindGroupEntry, BindGroupLayoutDescriptor, Buffer, BufferDescriptor,
+    BufferInitDescriptor, BufferUsages, ColorTargetState, ColorWrites, CompareFunction,
+    DepthBiasState, DepthStencilState, Face, FrontFace, MultisampleState, PipelineCache,
+    PolygonMode, PrimitiveState, SamplerBindingType, ShaderStages, SpecializedRenderPipelines,
+    TextureFormat, TextureSampleType, TextureView, TextureViewDescriptor, VertexAttribute,
+    VertexFormat, VertexStepMode,
 };
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery};
 use bevy::render::view::{ExtractedView, Msaa, ViewTarget};
@@ -45,7 +46,7 @@ use super::gpu_prepare::{
     ConstantPackRefusal, PassConstantBuffers, overlay_packed_code_on_banks, split_bind_layout,
 };
 use super::gpu_resources::{
-    RuntimeProgramPortGpuExt, RuntimeUploadedImageRegistry, SamplerTable, TextureBindRefusal,
+    RuntimeUploadedImageRegistry, SamplerTable, TextureBindRefusal, TextureImageTables,
     UploadedTextureBind, padded_upload_len, write_buffer_padded,
 };
 use super::shadowmap_spot_gpu::{
@@ -67,11 +68,9 @@ use super::texture_table::{
     self, ExactTextureTable, SceneTextureTables, ShadowTextureTable, TableEpoch,
     TextureTableRefusal,
 };
-use crate::diag::render_frame_diag::{
-    GPU_SPAN_COLOUR, GPU_SPAN_EMISSIVE, GPU_SPAN_FLOATZ, GPU_SPAN_SPOT, GPU_SPAN_SUN,
-};
+use crate::diag::render_frame_diag::{GPU_SPAN_COLOUR, GPU_SPAN_SPOT, GPU_SPAN_SUN};
 use asset_iw4::{D3DCMP_ALWAYS, D3DCMP_EQUAL, D3DCMP_LESS, D3DCMP_LESSEQUAL};
-use render_backend::{MaterialExecView, MaterialRunExecutor, PlaceLanes};
+use render_backend::{MaterialExecView, MaterialRunExecutor};
 use render_frame::{BspCameraLane, RetainedDrawItem, RetainedDrawKind, SmodelPretessRange};
 use render_frame::{
     FrameProduct, FrameProductKind, FrameProductStatus, PackedFrontendLists, SunShadowPartition,
@@ -96,21 +95,21 @@ mod publication;
 use publication::ExtractedColourRefs;
 pub use publication::{
     ExtractedStaticGeometry, InstalledRenderWorld, PublishedRenderFrame, RenderFrameData,
-    RenderWorldData,
+    RenderWorldData, StaticGeometryIdentity, surface_bounds,
 };
 
 mod encode;
+pub(super) mod portal_scene;
 mod shadow_encode;
 mod shadow_prepare;
-use shadow_prepare::{
-    ResidentShadowStaticDraws, ShadowSubmitScratch, ShadowmapSpotArena, ShadowmapSunArena,
-};
+pub(super) use shadow_prepare::ShadowSubmitScratch;
+use shadow_prepare::{ResidentShadowStaticDraws, ShadowmapSpotArena, ShadowmapSunArena};
 mod geometry;
 use geometry::ExactColourGeometry;
 mod indirect;
 mod pipeline;
 mod prepare_camera;
-use prepare_camera::ColourSubmitScratch;
+pub(super) use prepare_camera::ColourSubmitScratch;
 mod diagnostics;
 mod record;
 pub(super) use diagnostics::ExactColourSubmitCensus;
@@ -121,16 +120,62 @@ mod smodel_skinned;
 
 pub use pipeline::cached_lighting_port_variant;
 
+#[derive(bevy::ecs::system::SystemParam)]
+struct SkinningDispatch<'w> {
+    skin: ResMut<'w, skinning::SkinGpu>,
+    pending: ResMut<'w, bevy::render::renderer::PendingCommandBuffers>,
+    support: Res<'w, crate::SkinSupport>,
+    failure: ResMut<'w, render_scene::SkinFailure>,
+}
+
+impl SkinningDispatch<'_> {
+    fn run(
+        &mut self,
+        jobs: &[render_frame::skinning::PackedSkinJob],
+        output: &residency::GpuStream,
+        device: &RenderDevice,
+    ) {
+        let skinned = self.skin.dispatch(
+            jobs,
+            output.buffer(),
+            output.len(),
+            device,
+            &mut self.pending,
+            self.support.resident_budget,
+        );
+        let limits = device.limits();
+        if self.failure.reason.is_none() {
+            self.failure.reason = skinned.as_ref().err().copied();
+        }
+        self.support.report(
+            render_frame::skinning::SkinBatchLimits {
+                storage_bytes: limits.max_storage_buffer_binding_size,
+                buffer_bytes: limits.max_buffer_size,
+                storage_alignment: u64::from(limits.min_storage_buffer_offset_alignment),
+                uniform_alignment: u64::from(limits.min_uniform_buffer_offset_alignment),
+                dispatch_groups: limits.max_compute_workgroups_per_dimension,
+            },
+            self.skin.device_generation(),
+        );
+        let skinned = skinned.unwrap_or_else(|_| skinning::Skinned::default());
+        perf::counter!("skin_jobs", "iw4l.render", skinned.jobs as f64);
+        perf::counter!("skin_vertices", "iw4l.render", skinned.vertices as f64);
+        perf::counter!(
+            "skin_resident_bytes",
+            "iw4l.render",
+            self.skin.resident_bytes() as f64
+        );
+    }
+}
+
 fn upload_exact_geometry(
     frame: Res<PublishedRenderFrame>,
     mut geometry: ResMut<ExactColourGeometry>,
     mut smodel_cache_gpu: ResMut<SmodelCacheGpu>,
     mut census: ResMut<ExactColourSubmitCensus>,
-    mut skin: ResMut<skinning::SkinGpu>,
-    mut pending: ResMut<bevy::render::renderer::PendingCommandBuffers>,
+    mut skinning: SkinningDispatch,
     device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
-    support: Res<crate::SkinSupport>,
 ) {
     let result = geometry::upload_exact_geometry(
         &frame,
@@ -139,32 +184,7 @@ fn upload_exact_geometry(
         &device,
         &queue,
     );
-    let skinned = skin.dispatch(
-        &frame.skin_jobs,
-        geometry.xmodel.vertex.buffer(),
-        geometry.xmodel.vertex.len(),
-        &device,
-        &queue,
-        &mut pending,
-        support.resident_budget,
-    );
-    let limits = device.limits();
-    support.report(
-        frame.world_generation,
-        render_frame::skinning::SkinBatchLimits {
-            storage_bytes: limits.max_storage_buffer_binding_size,
-            buffer_bytes: limits.max_buffer_size,
-            storage_alignment: u64::from(limits.min_storage_buffer_offset_alignment),
-            uniform_alignment: u64::from(limits.min_uniform_buffer_offset_alignment),
-            dispatch_groups: limits.max_compute_workgroups_per_dimension,
-        },
-        skin.device_generation(),
-        skinned.as_ref().err().copied(),
-    );
-    let skinned = skinned.unwrap_or_default();
-    perf::Counter::CounterSkinJobs.emit(skinned.jobs as f64);
-    perf::Counter::CounterSkinVertices.emit(skinned.vertices as f64);
-    perf::Counter::CounterSkinResidentBytes.emit(skin.resident_bytes() as f64);
+    skinning.run(&frame.skin_jobs, &geometry.xmodel.vertex, &device);
     if let Some(kind) = result.code_mesh_gpu_kind {
         census.preparation.code_mesh_gpu_kind = Some(kind);
     }
@@ -198,28 +218,29 @@ struct ExactColourPortGpu {
     textures_layout: BindGroupLayoutDescriptor,
     vertex_buffers: Vec<VertexBufferLayout>,
     cached_source: Option<Arc<str>>,
+    clipped_sources: [std::sync::OnceLock<Arc<d3d9_sm3::PassWgsl>>; 4],
     cached_vertex_buffers: Vec<VertexBufferLayout>,
     port: super::AdmittedExactPort,
 }
 
 mod constants;
 use constants::{
-    ArenaDirty, ArenaPack, GpuConstantArena, append_constant_span, resolve_arena_base,
-    upload_packed_arena,
+    ArenaDirty, ArenaPack, GpuConstantArena, PackedArenaUpdate, PlacedConstants,
+    append_constant_span, resolve_arena_base,
 };
 
 mod binding;
-use binding::{
-    BoundTextureKey, ColourBindingLanes, ExactColourBindingCache, ExactShadowBindingCache,
-};
+use binding::{BoundTextureKey, ColourBindingLanes};
+pub(super) use binding::{ExactColourBindingCache, ExactShadowBindingCache};
 
 #[derive(Resource, Default)]
-struct ExactPipelineKickCache {
+pub(super) struct ExactPipelineKickCache {
     current: Vec<ExactPipelineSlot>,
     scheduled: HashSet<ExactColourPipelineKey>,
     generation: Option<MaterialGenerationId>,
     views: Vec<(TextureFormat, u32)>,
     demand_revision: u64,
+    portal_mode: Option<d3d9_sm3::ExitClipMode>,
 }
 
 #[derive(Resource, Default)]
@@ -240,11 +261,13 @@ pub(super) struct ExactColourPipelineKey {
 
     pub(super) port: PortId,
 
-    cached_lighting: bool,
+    pub(super) cached_lighting: bool,
 
     mark_mesh: bool,
 
     forward_z: bool,
+    portal_stencil: bool,
+    pub(super) exit_clip: Option<d3d9_sm3::ExitClipMode>,
 }
 
 fn exact_colour_target_format(target: TextureFormat, srgb_write: bool) -> TextureFormat {
@@ -330,21 +353,51 @@ fn exact_pipeline_plan(
     };
     let depth_to_colour = port.port.abi().depth_to_colour;
     let cached_lighting = key.cached_lighting && port.cached_source.is_some();
-    let source = match (cached_lighting, port.cached_source.as_ref()) {
-        (true, Some(cached)) => ExactModuleSource::CachedLighting(cached.clone()),
-        _ => ExactModuleSource::Port(port.port.shared_module()),
+    let source = if let Some(mode) = key.exit_clip {
+        let index = usize::from(mode == d3d9_sm3::ExitClipMode::FragmentDiscard) * 2
+            + usize::from(cached_lighting);
+        let module = port.clipped_sources[index]
+            .get_or_init(|| {
+                let mut module = port
+                    .port
+                    .lowering
+                    .lower_exit_clip(port.port.abi(), mode)
+                    .expect("admitted material supports exit clipping");
+                if cached_lighting {
+                    let location = cached_lighting_location(port.port.abi())
+                        .expect("cached lighting location");
+                    let register = lighting_texcoord_register(port.port.abi())
+                        .expect("cached lighting register");
+                    module.source =
+                        inject_cached_lighting_attribute(&module.source, location, Some(&register))
+                            .expect("clipped cached lighting signature");
+                }
+                Arc::new(module)
+            })
+            .clone();
+        ExactModuleSource::Clipped(module)
+    } else {
+        match (cached_lighting, port.cached_source.as_ref()) {
+            (true, Some(cached)) => ExactModuleSource::CachedLighting(cached.clone()),
+            _ => ExactModuleSource::Port(port.port.shared_module()),
+        }
     };
+    let effect_depth = !key.forward_z;
+    let mut fragment_entry = exact_fragment_entry(
+        key.target,
+        key.forward_z,
+        depth_to_colour,
+        key.state0.alpha_test,
+    );
+    if effect_depth {
+        fragment_entry.push_str("_effect_depth");
+    }
     let plan = ExactPipelinePlan {
         label: format!(
             "iw4_exact_colour/{:016x}/{}",
             key.port.vertex_program_hash, key.port.vertex_type
         ),
-        fragment_entry: exact_fragment_entry(
-            key.target,
-            key.forward_z,
-            depth_to_colour,
-            key.state0.alpha_test,
-        ),
+        fragment_entry,
         vertex_buffers: if cached_lighting && !port.cached_vertex_buffers.is_empty() {
             port.cached_vertex_buffers.clone()
         } else {
@@ -357,28 +410,46 @@ fn exact_pipeline_plan(
             }
             buffers
         },
-        targets: vec![Some(ColorTargetState {
-            format: key.target,
+        targets: {
+            let mut targets = vec![Some(ColorTargetState {
+                format: key.target,
 
-            blend: if key.target == TextureFormat::R32Float {
-                None
-            } else {
-                key.state0.blend.blend_state()
-            },
-            write_mask: if key.target == TextureFormat::R32Float && depth_to_colour {
-                ColorWrites::RED
-            } else if key.target == TextureFormat::R32Float {
-                key.state0.colour_writes() & ColorWrites::RED
-            } else {
-                key.state0.colour_writes()
-            },
-        })],
+                blend: if key.target == TextureFormat::R32Float {
+                    None
+                } else {
+                    key.state0.blend.blend_state()
+                },
+                write_mask: if key.target == TextureFormat::R32Float && depth_to_colour {
+                    ColorWrites::RED
+                } else if key.target == TextureFormat::R32Float {
+                    key.state0.colour_writes() & ColorWrites::RED
+                } else {
+                    key.state0.colour_writes()
+                },
+            })];
+            if effect_depth {
+                targets.push(Some(ColorTargetState {
+                    format: floatz::EFFECT_DEPTH_FORMAT,
+                    blend: None,
+                    write_mask: if key.state1.depth_write {
+                        ColorWrites::RED
+                    } else {
+                        ColorWrites::empty()
+                    },
+                }));
+            }
+            targets
+        },
         primitive: exact_primitive_state(key.state0.cull, key.state0.line_fill),
         depth_stencil: DepthStencilState {
             format: key.depth_format,
             depth_write_enabled: Some(key.state1.depth_write),
             depth_compare,
-            stencil: super::scene_depth::stencil_state(key.state1.stencil),
+            stencil: if key.portal_stencil {
+                portal_scene::material_stencil(key.state1.stencil)
+            } else {
+                super::scene_depth::stencil_state(key.state1.stencil)
+            },
             bias: if key.forward_z {
                 polygon_offset_bias_forward_z(key.state1.polyoffset_level)
             } else {
@@ -391,6 +462,9 @@ fn exact_pipeline_plan(
         },
         constants_layout: registry.bind_group_layout(device, &port.constants_layout),
         textures_layout: registry.bind_group_layout(device, &port.textures_layout),
+        exit_clip_layout: key
+            .exit_clip
+            .map(|_| portal_scene::exit_plane_layout(device)),
     };
     (source, plan)
 }
@@ -473,6 +547,7 @@ fn polygon_offset_bias_forward_z(level: u8) -> DepthBiasState {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum GpuSubmitRefusal {
+    PortalSliceCameraMissing,
     NoExactPort {
         pair: RuntimeShaderPair,
     },
@@ -582,7 +657,7 @@ fn colour_census_ms(start: Option<Instant>) -> Option<f32> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct WorldPretessKey {
-    world_generation: frame::WorldStamp,
+    world_products: frame::WorldProducts,
     geometry_generation: MaterialGenerationId,
     world_run_revision: u64,
     colour_world: u64,
@@ -688,12 +763,12 @@ fn world_pretess_key(
     light: &FrameProduct,
     emissive: &FrameProduct,
     run_surfs: &[u16],
-    world_generation: frame::WorldStamp,
+    world_products: frame::WorldProducts,
     geometry_generation: MaterialGenerationId,
     world_run_revision: u64,
 ) -> WorldPretessKey {
     WorldPretessKey {
-        world_generation,
+        world_products,
         geometry_generation,
         world_run_revision,
         colour_world: expanded_world_id(colour, run_surfs),
@@ -718,13 +793,7 @@ struct CameraPrepareState {
     exec_refusals: BTreeMap<(&'static str, &'static str), u32>,
     unsupported_state: UnsupportedStateCensus,
     bsp_submit_refused_surfaces: [u32; 4],
-    pnr_smodel_mats: BTreeMap<String, u32>,
-    pnr_world_mats: BTreeMap<String, u32>,
-    pnr_smodel_ps: BTreeMap<String, u32>,
-    pnr_world_ps: BTreeMap<String, u32>,
-    pnr_smodel_keys: HashSet<u64>,
-    pnr_world_keys: HashSet<u64>,
-    pnr_ports: HashSet<PortId>,
+    pipeline_wait: PipelineWaitCensus,
     bind_smodel_mats: BTreeMap<String, u32>,
     last_markmesh_refusal: Option<GpuSubmitRefusal>,
     last_markmesh_exec_skip: Option<&'static str>,
@@ -840,28 +909,6 @@ pub fn colour_ports_static(
         && extracted_port_len > 0
 }
 
-pub fn colour_world_smodel_static(
-    (gpu_world_generation, gpu_world_products): (frame::WorldStamp, frame::WorldProducts),
-    gpu_world_verts: usize,
-    gpu_world_indices: usize,
-    gpu_world_layer: usize,
-    gpu_smodel_verts: usize,
-    gpu_smodel_indices: usize,
-    (cpu_world_generation, cpu_world_products): (frame::WorldStamp, frame::WorldProducts),
-    cpu_world_verts: usize,
-    cpu_world_indices: usize,
-    cpu_world_layer: usize,
-    cpu_smodel_verts: usize,
-    cpu_smodel_indices: usize,
-) -> bool {
-    (gpu_world_generation == cpu_world_generation || gpu_world_products.same_as(cpu_world_products))
-        && gpu_world_verts == cpu_world_verts
-        && gpu_world_indices == cpu_world_indices
-        && gpu_world_layer == cpu_world_layer
-        && gpu_smodel_verts == cpu_smodel_verts
-        && gpu_smodel_indices == cpu_smodel_indices
-}
-
 fn is_viewmodel_colour_draw(kind: &RetainedDrawKind, key: u64) -> bool {
     depth_range_type_for_draw(kind, key) == GFX_DEPTH_RANGE_VIEWMODEL
 }
@@ -885,8 +932,8 @@ fn retain_camera_draws_with_sun_content(
 ) -> u32 {
     let mut held = 0u32;
     prepared.retain(|draw| {
-        if sun_shadow_content_missing(sun_recorded, draw.binds_sun_shadow)
-            || (draw.binds_spot_shadow && !spot_recorded)
+        if sun_shadow_content_missing(sun_recorded, draw.shadow_dependencies.sun)
+            || (draw.shadow_dependencies.spot && !spot_recorded)
         {
             held = held.saturating_add(1);
             false
@@ -976,75 +1023,91 @@ pub struct FocusedOwnerSubmitState {
     emitted_frame_id: u64,
 }
 
-pub fn emit_focused_owner_submit(
-    products: &ExtractedRenderFrameProducts,
-    state: &mut FocusedOwnerSubmitState,
-    material_context: Option<(&[String], &super::gpu_resources::RuntimeImageHandles)>,
-    tables: Option<(&RuntimeMaterialCatalog, &PreparedMaterialTable)>,
-    terminal: &'static str,
-    prepared_surfaces: u32,
-    prepared_passes: u32,
-    drawn_passes: u32,
-) {
-    let Some(focus) = products.0.focus() else {
-        return;
-    };
-    if state.emitted_frame_id == products.0.frame_id {
-        return;
-    }
-    let mut product_surfaces = 0u32;
-    let mut execution_ready_surfaces = 0u32;
-    let mut materials = BTreeSet::new();
-    let mut material_textures = BTreeSet::new();
-    if let Some(object_id) = focus.object_id {
-        for product in [
-            products.0.product(FrameProductKind::Colour),
-            products.0.product(FrameProductKind::Light),
-            products.0.product(FrameProductKind::Emissive),
-        ] {
-            for (index, item) in product.ordered_draws.iter().enumerate() {
-                if drawsurf_object_id(item.key) != object_id {
-                    continue;
-                }
-                product_surfaces = product_surfaces.saturating_add(1);
-                let resolved = tables.and_then(|(catalog, prepared)| {
-                    let tech = product.draw_tech.get(index).copied()?;
-                    prepared_draw_technique(
-                        catalog,
-                        prepared,
-                        render_material::MaterialDrawKey::new(item.key, item.material_rank)
-                            .with_material_id(item.material_id),
-                        tech,
-                    )
-                    .ok()
-                });
-                execution_ready_surfaces =
-                    execution_ready_surfaces.saturating_add(u32::from(resolved.is_some()));
-                let ordinal = world_material_sorted(item.key);
-                let material = material_context
-                    .and_then(|(names, _)| names.get(usize::from(ordinal)))
-                    .map_or_else(|| ordinal.to_string(), |name| format!("{ordinal}:{name}"));
-                materials.insert(material);
-                if let Some((_, prepared_tech)) = resolved {
-                    for (pass_index, pass) in prepared_tech.passes.iter().enumerate() {
-                        let Some(local) = pass.local_samplers.as_ref() else {
-                            continue;
-                        };
-                        for lane in &local.lanes {
-                            let image_index = lane.texture.image.0 as usize;
-                            let image = material_context.map_or_else(String::new, |(_, images)| {
-                                let image_name = images
-                                    .material_names
-                                    .get(image_index)
-                                    .map(String::as_str)
-                                    .unwrap_or("<out-of-range>");
-                                let retained = images
-                                    .material_images
-                                    .get(image_index)
-                                    .is_some_and(Option::is_some);
-                                format!(",image_name={image_name},retained={}", u8::from(retained))
-                            });
-                            material_textures.insert(format!(
+pub struct FocusedOwnerSubmitReport {
+    pub terminal: &'static str,
+    pub prepared_surfaces: u32,
+    pub prepared_passes: u32,
+    pub drawn_passes: u32,
+}
+
+impl FocusedOwnerSubmitState {
+    pub fn emit(
+        &mut self,
+        products: &ExtractedRenderFrameProducts,
+        material_context: Option<(&[String], &super::gpu_resources::RuntimeImageHandles)>,
+        tables: Option<(&RuntimeMaterialCatalog, &PreparedMaterialTable)>,
+        report: FocusedOwnerSubmitReport,
+    ) {
+        let FocusedOwnerSubmitReport {
+            terminal,
+            prepared_surfaces,
+            prepared_passes,
+            drawn_passes,
+        } = report;
+
+        let Some(focus) = products.0.focus() else {
+            return;
+        };
+        if self.emitted_frame_id == products.0.frame_id {
+            return;
+        }
+        let mut product_surfaces = 0u32;
+        let mut execution_ready_surfaces = 0u32;
+        let mut materials = BTreeSet::new();
+        let mut material_textures = BTreeSet::new();
+        if let Some(object_id) = focus.object_id {
+            for product in [
+                products.0.product(FrameProductKind::Colour),
+                products.0.product(FrameProductKind::Light),
+                products.0.product(FrameProductKind::Emissive),
+            ] {
+                for (index, item) in product.ordered_draws.iter().enumerate() {
+                    if drawsurf_object_id(item.key) != object_id {
+                        continue;
+                    }
+                    product_surfaces = product_surfaces.saturating_add(1);
+                    let resolved = tables.and_then(|(catalog, prepared)| {
+                        let tech = product.draw_tech.get(index).copied()?;
+                        prepared_draw_technique(
+                            catalog,
+                            prepared,
+                            render_material::MaterialDrawKey::new(item.key, item.material_rank)
+                                .with_material_id(item.material_id),
+                            tech,
+                        )
+                        .ok()
+                    });
+                    execution_ready_surfaces =
+                        execution_ready_surfaces.saturating_add(u32::from(resolved.is_some()));
+                    let ordinal = world_material_sorted(item.key);
+                    let material = material_context
+                        .and_then(|(names, _)| names.get(usize::from(ordinal)))
+                        .map_or_else(|| ordinal.to_string(), |name| format!("{ordinal}:{name}"));
+                    materials.insert(material);
+                    if let Some((_, prepared_tech)) = resolved {
+                        for (pass_index, pass) in prepared_tech.passes.iter().enumerate() {
+                            let Some(local) = pass.local_samplers.as_ref() else {
+                                continue;
+                            };
+                            for lane in &local.lanes {
+                                let image_index = lane.texture.image.0 as usize;
+                                let image =
+                                    material_context.map_or_else(String::new, |(_, images)| {
+                                        let image_name = images
+                                            .material_names
+                                            .get(image_index)
+                                            .map(String::as_str)
+                                            .unwrap_or("<out-of-range>");
+                                        let retained = images
+                                            .material_images
+                                            .get(image_index)
+                                            .is_some_and(Option::is_some);
+                                        format!(
+                                            ",image_name={image_name},retained={}",
+                                            u8::from(retained)
+                                        )
+                                    });
+                                material_textures.insert(format!(
                                 "material={ordinal},pass={pass_index},register={},name_hash=0x{:08x},image={},semantic={},sampler=0x{:02x}{image}",
                                 lane.register,
                                 lane.name_hash,
@@ -1052,54 +1115,73 @@ pub fn emit_focused_owner_submit(
                                 lane.texture.semantic,
                                 lane.texture.sampler_state,
                             ));
+                            }
                         }
                     }
                 }
             }
         }
+        let materials =
+            (!materials.is_empty()).then(|| materials.into_iter().collect::<Vec<_>>().join(";"));
+        let material_textures = (!material_textures.is_empty())
+            .then(|| material_textures.into_iter().collect::<Vec<_>>().join(";"));
+        let outcome = if focus.outcome == "planned_empty" {
+            "planned_empty"
+        } else if focus.outcome != "planned" {
+            "plan_refused"
+        } else if terminal != "complete" {
+            terminal
+        } else if product_surfaces == 0 {
+            "product_missing"
+        } else if execution_ready_surfaces == 0 {
+            "material_refused"
+        } else if execution_ready_surfaces < product_surfaces {
+            "material_partial"
+        } else if prepared_surfaces == 0 {
+            "gpu_prepare_refused"
+        } else if prepared_surfaces < execution_ready_surfaces {
+            "gpu_prepare_partial"
+        } else if drawn_passes == 0 {
+            "draw_refused"
+        } else if drawn_passes < prepared_passes {
+            "draw_partial"
+        } else {
+            "drawn"
+        };
+        perf::instant!("render_owner_submit", "iw4l.render", |ctx| {
+            let (frame_id, owner_kind, owner_id, object_id, materials, material_textures): (
+                u64,
+                &str,
+                u32,
+                Option<u16>,
+                Option<&str>,
+                Option<&str>,
+            ) = (
+                products.0.frame_id,
+                "script_model",
+                focus.owner_id,
+                focus.object_id,
+                materials.as_deref(),
+                material_textures.as_deref(),
+            );
+            ctx.arg("frame_id", frame_id as i64);
+            ctx.arg("owner_kind", owner_kind);
+            ctx.arg("owner_id", i64::from(owner_id));
+            ctx.arg("object_id", object_id.map(i64::from));
+            ctx.arg("outcome", outcome);
+            ctx.arg("materials", materials);
+            ctx.arg("material_textures", material_textures);
+            ctx.arg("product_surfaces", i64::from(product_surfaces));
+            ctx.arg(
+                "execution_ready_surfaces",
+                i64::from(execution_ready_surfaces),
+            );
+            ctx.arg("prepared_surfaces", i64::from(prepared_surfaces));
+            ctx.arg("prepared_passes", i64::from(prepared_passes));
+            ctx.arg("drawn_passes", i64::from(drawn_passes));
+        });
+        self.emitted_frame_id = products.0.frame_id;
     }
-    let materials =
-        (!materials.is_empty()).then(|| materials.into_iter().collect::<Vec<_>>().join(";"));
-    let material_textures = (!material_textures.is_empty())
-        .then(|| material_textures.into_iter().collect::<Vec<_>>().join(";"));
-    let outcome = if focus.outcome == "planned_empty" {
-        "planned_empty"
-    } else if focus.outcome != "planned" {
-        "plan_refused"
-    } else if terminal != "complete" {
-        terminal
-    } else if product_surfaces == 0 {
-        "product_missing"
-    } else if execution_ready_surfaces == 0 {
-        "material_refused"
-    } else if execution_ready_surfaces < product_surfaces {
-        "material_partial"
-    } else if prepared_surfaces == 0 {
-        "gpu_prepare_refused"
-    } else if prepared_surfaces < execution_ready_surfaces {
-        "gpu_prepare_partial"
-    } else if drawn_passes == 0 {
-        "draw_refused"
-    } else if drawn_passes < prepared_passes {
-        "draw_partial"
-    } else {
-        "drawn"
-    };
-    perf::render_owner_submit(
-        products.0.frame_id,
-        "script_model",
-        focus.owner_id,
-        focus.object_id,
-        outcome,
-        materials.as_deref(),
-        material_textures.as_deref(),
-        product_surfaces,
-        execution_ready_surfaces,
-        prepared_surfaces,
-        prepared_passes,
-        drawn_passes,
-    );
-    state.emitted_frame_id = products.0.frame_id;
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1201,7 +1283,7 @@ fn smodel_pretess_submit_refusal(
         .checked_add(range.count)
         .and_then(|end| usize::try_from(end).ok());
     if range.count == 0
-        || range.count % 3 != 0
+        || !range.count.is_multiple_of(3)
         || end.is_none_or(|end| end > extracted.world.smodel_pretess_indices.len())
     {
         return Err(GpuSubmitRefusal::SmodelCacheIndicesMissing { cache_index });
@@ -1227,8 +1309,26 @@ enum ExactTessBind {
     Glass,
 }
 
+#[derive(Clone, Copy)]
+struct PreparedDrawSource {
+    input_vertex_type: u8,
+    world_pretess: bool,
+    tess: ExactTessBind,
+    start: u32,
+    count: u32,
+    vertex_type: u8,
+    smc_stream_off: u64,
+    bsp_kind: Option<BspCameraLane>,
+    bsp_run_first: u16,
+    bsp_first_surf: u16,
+    bsp_surf_count: u16,
+}
+
 #[derive(Clone)]
 struct PreparedExactDraw {
+    slice_clip: Option<Arc<BindGroup>>,
+    slice_world: Option<[f64; 4]>,
+    aperture_world: Option<render_frame::PortalEntityAperture>,
     pipeline: ExactPipelineSlot,
     port: PortId,
 
@@ -1261,12 +1361,20 @@ struct PreparedExactDraw {
 
     bsp_counted: bool,
 
-    binds_sun_shadow: bool,
-
-    binds_spot_shadow: bool,
+    shadow_dependencies: ShadowProductDependencies,
 
     indirect_arg: Option<u32>,
     arena_lane: u8,
+
+    /// Unfolded view plus one; zero is a camera-only draw.
+    portal_tag: u8,
+}
+
+impl PreparedExactDraw {
+    /// The first instance is the unmodified constant-arena row.
+    fn first_instance(&self) -> Option<u32> {
+        self.constant_base
+    }
 }
 
 fn bsp_draw_source(kind: &RetainedDrawKind) -> (Option<BspCameraLane>, u16, u16, u16) {
@@ -1311,6 +1419,7 @@ fn submit_refusal_family(kind: &RetainedDrawKind, viewmodel: bool) -> &'static s
 
 fn submit_refusal_class(cause: &GpuSubmitRefusal) -> &'static str {
     match cause {
+        GpuSubmitRefusal::PortalSliceCameraMissing => "PortalSliceCameraMissing",
         GpuSubmitRefusal::NoExactPort { .. } => "NoExactPort",
         GpuSubmitRefusal::ConstantPack(_) => "ConstantPack",
         GpuSubmitRefusal::TextureBind(_) => "TextureBind",
@@ -1414,7 +1523,7 @@ impl DrawRefusalCensus {
 
 fn material_refusal_class(cause: &MaterialRefusal) -> &'static str {
     match cause {
-        MaterialRefusal::SortedMaterialTableMissing { .. } => "SortedMaterialTableMissing",
+        MaterialRefusal::SortedMaterialTableMissing => "SortedMaterialTableMissing",
         MaterialRefusal::SortedMaterialOrdinalOutOfRange { .. } => {
             "SortedMaterialOrdinalOutOfRange"
         }
@@ -1463,7 +1572,7 @@ pub fn dump_sorted_material_names(catalog: &RuntimeMaterialCatalog) -> Vec<Strin
                     .unwrap_or_else(|| format!("id{}", id.0))
             })
             .collect(),
-        RuntimeSortedMaterialTable::Missing { .. } | RuntimeSortedMaterialTable::BuildFailed(_) => {
+        RuntimeSortedMaterialTable::Missing | RuntimeSortedMaterialTable::BuildFailed(_) => {
             Vec::new()
         }
     }
@@ -1510,54 +1619,87 @@ fn rank_pair_map(map: &BTreeMap<(&'static str, &'static str), u32>, take: usize)
     )
 }
 
-fn record_pipeline_not_ready(
-    kind: &RetainedDrawKind,
-    viewmodel: bool,
-    key: u64,
-    execution: &MaterialExecution,
-    extracted: ExtractedColourRefs<'_>,
-    smodel_mats: &mut BTreeMap<String, u32>,
-    world_mats: &mut BTreeMap<String, u32>,
-    smodel_ps: &mut BTreeMap<String, u32>,
-    world_ps: &mut BTreeMap<String, u32>,
-    smodel_keys: &mut HashSet<u64>,
-    world_keys: &mut HashSet<u64>,
-    ports: &mut HashSet<PortId>,
-) {
-    let family = submit_refusal_family(kind, viewmodel);
-    let ordinal = world_material_sorted(key);
-    let name = extracted
-        .world
-        .sorted_material_names
-        .get(usize::from(ordinal))
-        .cloned()
-        .unwrap_or_else(|| format!("ord{ordinal}"));
-    let ps = execution
-        .pass(0)
-        .map(|pass| {
-            extracted
-                .world
-                .shader_program_names
-                .get(pass.shader_pair.pixel.asset_slot as usize)
-                .and_then(|slot| slot.clone())
-                .unwrap_or_else(|| format!("{:016x}", pass.port.pixel_program_hash))
-        })
-        .unwrap_or_else(|| "<no pass>".to_owned());
-    for pass in execution.iter_passes() {
-        ports.insert(pass.port);
+#[derive(Default)]
+struct PipelineWaitCensus {
+    smodel_mats: BTreeMap<String, u32>,
+    world_mats: BTreeMap<String, u32>,
+    smodel_ps: BTreeMap<String, u32>,
+    world_ps: BTreeMap<String, u32>,
+    smodel_keys: HashSet<u64>,
+    world_keys: HashSet<u64>,
+    ports: HashSet<PortId>,
+}
+
+impl PipelineWaitCensus {
+    fn record(
+        &mut self,
+        kind: &RetainedDrawKind,
+        viewmodel: bool,
+        key: u64,
+        execution: &MaterialExecution,
+        extracted: ExtractedColourRefs<'_>,
+    ) {
+        let smodel_mats = &mut self.smodel_mats;
+        let world_mats = &mut self.world_mats;
+        let smodel_ps = &mut self.smodel_ps;
+        let world_ps = &mut self.world_ps;
+        let smodel_keys = &mut self.smodel_keys;
+        let world_keys = &mut self.world_keys;
+        let ports = &mut self.ports;
+
+        let family = submit_refusal_family(kind, viewmodel);
+        let ordinal = world_material_sorted(key);
+        let name = extracted
+            .world
+            .sorted_material_names
+            .get(usize::from(ordinal))
+            .cloned()
+            .unwrap_or_else(|| format!("ord{ordinal}"));
+        let ps = execution
+            .pass(0)
+            .map(|pass| {
+                extracted
+                    .world
+                    .shader_program_names
+                    .get(pass.shader_pair.pixel.asset_slot as usize)
+                    .and_then(|slot| slot.clone())
+                    .unwrap_or_else(|| format!("{:016x}", pass.port.pixel_program_hash))
+            })
+            .unwrap_or_else(|| "<no pass>".to_owned());
+        for pass in execution.iter_passes() {
+            ports.insert(pass.port);
+        }
+        match family {
+            "smodel" => {
+                *smodel_mats.entry(name).or_default() += 1;
+                *smodel_ps.entry(ps).or_default() += 1;
+                smodel_keys.insert(key);
+            }
+            "world" => {
+                *world_mats.entry(name).or_default() += 1;
+                *world_ps.entry(ps).or_default() += 1;
+                world_keys.insert(key);
+            }
+            _ => {}
+        }
     }
-    match family {
-        "smodel" => {
-            *smodel_mats.entry(name).or_default() += 1;
-            *smodel_ps.entry(ps).or_default() += 1;
-            smodel_keys.insert(key);
+
+    fn absorb(&mut self, next: Self) {
+        for (key, n) in next.smodel_mats {
+            *self.smodel_mats.entry(key).or_default() += n;
         }
-        "world" => {
-            *world_mats.entry(name).or_default() += 1;
-            *world_ps.entry(ps).or_default() += 1;
-            world_keys.insert(key);
+        for (key, n) in next.world_mats {
+            *self.world_mats.entry(key).or_default() += n;
         }
-        _ => {}
+        for (key, n) in next.smodel_ps {
+            *self.smodel_ps.entry(key).or_default() += n;
+        }
+        for (key, n) in next.world_ps {
+            *self.world_ps.entry(key).or_default() += n;
+        }
+        self.smodel_keys.extend(next.smodel_keys);
+        self.world_keys.extend(next.world_keys);
+        self.ports.extend(next.ports);
     }
 }
 
@@ -1567,13 +1709,40 @@ fn execution_binds_code_texture(execution: &MaterialExecution, index: u32) -> bo
         .any(|pass| pass.code_samplers.iter().any(|lane| lane.index == index))
 }
 
+#[derive(Clone, Copy)]
+struct ShadowProductDependencies {
+    sun: bool,
+    spot: bool,
+}
+
+impl ShadowProductDependencies {
+    const NONE: Self = Self {
+        sun: false,
+        spot: false,
+    };
+
+    fn merge(&mut self, other: Self) {
+        self.sun |= other.sun;
+        self.spot |= other.spot;
+    }
+
+    fn from_execution(execution: &MaterialExecution) -> Self {
+        Self {
+            sun: execution_binds_code_texture(execution, CODE_TEXTURE_SHADOWMAP_SUN),
+            spot: execution_binds_code_texture(execution, CODE_TEXTURE_SHADOWMAP_SPOT),
+        }
+    }
+}
+
 fn identity_placement_kind(kind: &RetainedDrawKind) -> bool {
     match *kind {
-        RetainedDrawKind::World { .. }
-        | RetainedDrawKind::CodeMesh { .. }
+        RetainedDrawKind::CodeMesh { .. }
         | RetainedDrawKind::MarkMesh { .. }
         | RetainedDrawKind::Glass { .. } => true,
-        RetainedDrawKind::Smodel {
+        RetainedDrawKind::World {
+            world_from_local, ..
+        }
+        | RetainedDrawKind::Smodel {
             world_from_local, ..
         }
         | RetainedDrawKind::XModel {
@@ -1586,6 +1755,7 @@ fn identity_placement_kind(kind: &RetainedDrawKind) -> bool {
 #[derive(Default)]
 struct RunPackCache {
     serial: u64,
+    exit_clip: Option<d3d9_sm3::ExitClipMode>,
     passes: Vec<Option<Arc<PassConstantBuffers>>>,
 
     pipelines: Vec<Option<(usize, ExactPipelineSlot)>>,
@@ -1628,8 +1798,9 @@ fn intern_packed_bank<E>(
 }
 
 impl RunPackCache {
-    fn begin(&mut self, serial: u64, pass_len: usize) {
-        if self.serial != serial {
+    fn begin(&mut self, serial: u64, pass_len: usize, exit_clip: Option<d3d9_sm3::ExitClipMode>) {
+        if self.serial != serial || self.exit_clip != exit_clip {
+            self.exit_clip = exit_clip;
             self.serial = serial;
             self.passes.clear();
             self.pipelines.clear();
@@ -1714,14 +1885,17 @@ impl ExactPrepare<'_> {
         let spot_shadow_select = self.spot_shadow_select;
         let device = self.device;
         let resolve = |table: &mut ExactTextureTable| -> Result<Arc<[u32]>, GpuSubmitRefusal> {
-            let textures = port_gpu
-                .port
-                .resolve_uploaded_texture_binds(
+            let images = TextureImageTables::new(
+                &extracted.world.image_handles,
+                extracted.world.generation,
+                uploaded,
+            )
+            .map_err(GpuSubmitRefusal::TextureBind)?;
+            let textures = images
+                .resolve(
+                    &port_gpu.port,
                     executable,
                     surface,
-                    &extracted.world.image_handles,
-                    extracted.world.generation,
-                    uploaded,
                     sampler_table,
                     spot_shadow_select,
                 )
@@ -1768,6 +1942,8 @@ fn texture_slot_words(
 
 #[derive(Default)]
 struct PrepareCost {
+    source_build_n: u32,
+    source_reuse_n: u32,
     pack_seed_n: u32,
     pack_walk_n: u32,
     tex_bind_hit_n: u32,
@@ -1791,6 +1967,10 @@ enum PrepareTextureTables<'a> {
 }
 
 struct ExactPrepare<'a> {
+    portal_view: Option<u8>,
+    slice_plane: Option<[f64; 4]>,
+    instance: u16,
+    slice_groups: HashMap<[u32; 28], Arc<BindGroup>>,
     extracted: ExtractedColourRefs<'a>,
     geometry: &'a ExactColourGeometry,
 
@@ -1830,6 +2010,8 @@ impl PrepareCost {
         }
     }
     fn absorb(&mut self, other: Self) {
+        self.source_build_n = self.source_build_n.saturating_add(other.source_build_n);
+        self.source_reuse_n = self.source_reuse_n.saturating_add(other.source_reuse_n);
         self.pack_seed_n = self.pack_seed_n.saturating_add(other.pack_seed_n);
         self.pack_walk_n = self.pack_walk_n.saturating_add(other.pack_walk_n);
         self.tex_bind_hit_n = self.tex_bind_hit_n.saturating_add(other.tex_bind_hit_n);
@@ -1976,7 +2158,7 @@ struct WorldPackedRowMeta {
 
 impl WorldPackedSurf<'_> {
     fn world_surf(&self) -> Option<u16> {
-        self.world_surf.or_else(|| match self.item.kind {
+        self.world_surf.or(match self.item.kind {
             RetainedDrawKind::World { surf, .. } => Some(surf),
             _ => None,
         })
@@ -2052,6 +2234,7 @@ impl PreparedColourRow<'_> {
             bsp_kind,
             bsp_run_first,
             setup_key_changed,
+            brush_model,
             ..
         } = self.item.kind
         else {
@@ -2069,8 +2252,12 @@ impl PreparedColourRow<'_> {
                 ),
                 setup_key_changed: setup_key_changed && surf == first_surf,
                 world_from_local: Mat4::IDENTITY,
+                brush_model,
             },
-            None => RetainedDrawKind::world_with_pose(surf, world_from_local),
+            None => match brush_model {
+                Some(model) => RetainedDrawKind::brush_world(surf, model, world_from_local),
+                None => RetainedDrawKind::world_with_pose(surf, world_from_local),
+            },
         };
         Some(item)
     }
@@ -2315,6 +2502,8 @@ fn exact_draw_run_continues(prev: &PreparedExactDraw, next: &PreparedExactDraw) 
         && prev.pipeline == next.pipeline
         && prev.port == next.port
         && same_packed_constants(prev, next)
+        && prev.portal_tag == next.portal_tag
+        && prev.slice_clip.as_ref().map(|g| g.id()) == next.slice_clip.as_ref().map(|g| g.id())
         && same_texture_slots(prev, next)
         && prev.depth_min == next.depth_min
         && prev.depth_max == next.depth_max
@@ -2443,8 +2632,8 @@ fn coalesce_exact_draws(draws: &mut Vec<PreparedExactDraw>) {
                 draws[i].count = draws[i].count.saturating_add(count);
                 draws[i].bsp_surf_count = draws[i].bsp_surf_count.saturating_add(bsp_surf_count);
                 draws[i].bsp_counted |= bsp_counted;
-                draws[i].binds_sun_shadow |= draws[read].binds_sun_shadow;
-                draws[i].binds_spot_shadow |= draws[read].binds_spot_shadow;
+                let dependencies = draws[read].shadow_dependencies;
+                draws[i].shadow_dependencies.merge(dependencies);
             }
             None => {
                 if len != read {
@@ -2473,27 +2662,12 @@ fn append_with_rollback<T, E>(
 }
 
 impl ExactPrepare<'_> {
-    fn prepare_ready_hit(
+    fn prepare_draw_source(
         &mut self,
-        item: &RetainedDrawItem,
-        execution: &MaterialExecution,
-        run_serial: u64,
-        place_code: Option<PlaceLanes<'_>>,
-        surface: super::SurfaceSamplerInputs,
+        kind: RetainedDrawKind,
+        input_vertex_type: u8,
         target: ExactPrepareTarget,
-        binds_sun_shadow: bool,
-        binds_spot_shadow: bool,
-        out: &mut Vec<PreparedExactDraw>,
-    ) -> Result<usize, GpuSubmitRefusal> {
-        let after_scene_resolve = matches!(self.textures, PrepareTextureTables::SceneShared(_))
-            && (item.camera_region == Some(asset_iw4::CAMERA_REGION_EMISSIVE)
-                || matches!(item.kind, RetainedDrawKind::CodeMesh { .. })
-                || matches!(item.kind, RetainedDrawKind::Glass { .. })
-                || matches!(item.kind, RetainedDrawKind::MarkMesh { glass: true, .. })
-                || execution_binds_code_texture(execution, CODE_TEXTURE_RESOLVED_POST_SUN)
-                || execution_binds_code_texture(execution, CODE_TEXTURE_FLOATZ));
-        let kind = item.kind;
-        let key = item.key;
+    ) -> Result<PreparedDrawSource, GpuSubmitRefusal> {
         let (tess, start, count, vertex_type) = match kind {
             RetainedDrawKind::World { surf, .. } => {
                 if let Some(cause) = self.extracted.world.static_geometry.world_vertex_refusal {
@@ -2516,7 +2690,7 @@ impl ExactPrepare<'_> {
                         },
                     ));
                 }
-                (ExactTessBind::World, start, count, execution.vertex_type)
+                (ExactTessBind::World, start, count, input_vertex_type)
             }
             RetainedDrawKind::Smodel {
                 surface,
@@ -2748,7 +2922,140 @@ impl ExactPrepare<'_> {
         };
 
         let (bsp_kind, bsp_run_first, bsp_first_surf, bsp_surf_count) = bsp_draw_source(&kind);
-        self.run_pack.begin(run_serial, execution.pass_count());
+        Ok(PreparedDrawSource {
+            input_vertex_type,
+            world_pretess: target.use_world_pretess,
+            tess,
+            start,
+            count,
+            vertex_type,
+            smc_stream_off,
+            bsp_kind,
+            bsp_run_first,
+            bsp_first_surf,
+            bsp_surf_count,
+        })
+    }
+
+    fn prepare_ready_hit(
+        &mut self,
+        item: &RetainedDrawItem,
+        executor: &MaterialRunExecutor,
+        target: ExactPrepareTarget,
+        source_cache: &mut Option<PreparedDrawSource>,
+        dependencies: ShadowProductDependencies,
+        out: &mut Vec<PreparedExactDraw>,
+    ) -> Result<usize, GpuSubmitRefusal> {
+        let execution = executor.execution();
+        let run_serial = executor.run_serial();
+        let place_code = executor.place();
+        let surface = item.surface_samplers;
+        let after_scene_resolve = matches!(self.textures, PrepareTextureTables::SceneShared(_))
+            && (item.camera_region == Some(asset_iw4::CAMERA_REGION_EMISSIVE)
+                || matches!(item.kind, RetainedDrawKind::CodeMesh { .. })
+                || matches!(item.kind, RetainedDrawKind::Glass { .. })
+                || matches!(item.kind, RetainedDrawKind::MarkMesh { glass: true, .. })
+                || execution_binds_code_texture(execution, CODE_TEXTURE_RESOLVED_POST_SUN)
+                || execution_binds_code_texture(execution, CODE_TEXTURE_FLOATZ));
+        let kind = item.kind;
+        let key = item.key;
+        let source = if let Some(source) = source_cache.as_ref().filter(|source| {
+            source.input_vertex_type == execution.vertex_type
+                && source.world_pretess == target.use_world_pretess
+        }) {
+            self.cost.source_reuse_n = self.cost.source_reuse_n.saturating_add(1);
+            *source
+        } else {
+            let source = self.prepare_draw_source(kind, execution.vertex_type, target)?;
+            self.cost.source_build_n = self.cost.source_build_n.saturating_add(1);
+            *source_cache = Some(source);
+            source
+        };
+        let PreparedDrawSource {
+            tess,
+            start,
+            count,
+            vertex_type,
+            smc_stream_off,
+            bsp_kind,
+            bsp_run_first,
+            bsp_first_surf,
+            bsp_surf_count,
+            ..
+        } = source;
+
+        let slice_clip = if !target.forward_z
+            && let Some(plane) = self.slice_plane
+        {
+            let planes = self
+                .portal_view
+                .and_then(|tag| {
+                    portal_scene::entity_slice_planes(
+                        &self.extracted.frame.exec_frame,
+                        tag,
+                        plane,
+                        match kind {
+                            RetainedDrawKind::XModel {
+                                portal_aperture, ..
+                            } => portal_aperture,
+                            _ => None,
+                        },
+                    )
+                })
+                .ok_or(GpuSubmitRefusal::PortalSliceCameraMissing)?;
+            let key = std::array::from_fn(|i| planes[i / 4][i % 4].to_bits());
+            Some(Arc::clone(self.slice_groups.entry(key).or_insert_with(
+                || {
+                    let buffer = self.device.create_buffer_with_data(&BufferInitDescriptor {
+                        label: Some("portal entity slice"),
+                        contents: bytemuck::cast_slice(&planes),
+                        usage: BufferUsages::UNIFORM,
+                    });
+                    Arc::new(self.device.create_bind_group(
+                        Some("portal entity slice"),
+                        &portal_scene::exit_plane_layout(self.device),
+                        &[BindGroupEntry {
+                            binding: 0,
+                            resource: buffer.as_entire_binding(),
+                        }],
+                    ))
+                },
+            )))
+        } else {
+            None
+        };
+        let exit_clip = if target.forward_z {
+            self.slice_plane
+                .map(|_| portal_scene::exit_clip_mode(self.device))
+        } else if slice_clip.is_some() {
+            Some(portal_scene::exit_clip_mode(self.device))
+        } else {
+            self.portal_view
+                .and_then(|tag| tag.checked_sub(1).map(|view| (tag, view)))
+                .and_then(|(tag, view)| {
+                    self.extracted
+                        .frame
+                        .exec_frame
+                        .world_cameras
+                        .get(view as usize)
+                        .and_then(Option::as_ref)
+                        .and_then(|c| c.exit_plane_clip)
+                        .map(|_| tag)
+                })
+                .and_then(|tag| {
+                    let mode = portal_scene::exit_clip_mode(self.device);
+                    if mode == d3d9_sm3::ExitClipMode::FragmentDiscard
+                        && portal_scene::exit_class(self.extracted, tag, &kind)
+                            == portal_scene::ExitClass::Inside
+                    {
+                        None
+                    } else {
+                        Some(mode)
+                    }
+                })
+        };
+        self.run_pack
+            .begin(run_serial, execution.pass_count(), exit_clip);
         append_with_rollback(out, |out| {
             for (pass_index, executable) in execution.iter_passes().enumerate() {
                 debug_assert_eq!(
@@ -2766,7 +3073,7 @@ impl ExactPrepare<'_> {
                             },
                         )?;
                         let host_state = GfxPassState::from_prepared(executable.state);
-                        let state0 = host_state.apply_change_state_0_host(AlphaMode::Opaque, false);
+                        let state0 = host_state.apply_change_state_0_host(false);
                         let state1 = host_state.apply_change_state_1_host();
                         let color = exact_colour_target_format(target.color, state0.srgb_write);
                         let key = ExactColourPipelineKey {
@@ -2780,6 +3087,8 @@ impl ExactPrepare<'_> {
                             mark_mesh: tess == ExactTessBind::MarkMesh
                                 && vertex_type == asset_iw4::vertex_decl::PACKED_VERTEX_TYPE,
                             forward_z: target.forward_z,
+                            portal_stencil: !target.forward_z && self.portal_view.unwrap_or(0) != 0,
+                            exit_clip,
                         };
 
                         let Some(pipeline) = self.registry.slot(&key) else {
@@ -2802,57 +3111,73 @@ impl ExactPrepare<'_> {
                 // light and object. Its unplaced banks belong to the material run.
                 let unplaced_shadow = matches!(self.textures, PrepareTextureTables::Shadow { .. })
                     && place_code.is_none();
-                let (constants, constant_base) =
-                    if identity_placement_kind(&kind) || unplaced_shadow {
-                        let constants = self
-                            .run_pack
-                            .pack(pass_index, &port_gpu.port, executable, &mut self.cost)
-                            .map_err(GpuSubmitRefusal::ConstantPack)?;
-                        match self.arena.as_deref_mut() {
-                            Some(arena) => (None, Some(arena.base_for(&constants, &texture_slots))),
-                            None => (Some(constants), None),
-                        }
-                    } else if let Some(arena) = self.arena.as_deref_mut() {
-                        let overlay = place_code.and_then(|c| c.pass(pass_index)).unwrap_or(&[]);
-                        let (base, interned) = arena
-                            .append_hit(
-                                &port_gpu.port,
-                                executable,
+                let (constants, constant_base) = if identity_placement_kind(&kind)
+                    || unplaced_shadow
+                {
+                    let constants = self
+                        .run_pack
+                        .pack(pass_index, &port_gpu.port, executable, &mut self.cost)
+                        .map_err(GpuSubmitRefusal::ConstantPack)?;
+                    match self.arena.as_deref_mut() {
+                        Some(arena) => (None, Some(arena.base_for(&constants, &texture_slots))),
+                        None => (Some(constants), None),
+                    }
+                } else if let Some(arena) = self.arena.as_deref_mut() {
+                    let overlay = place_code.and_then(|c| c.pass(pass_index)).unwrap_or(&[]);
+                    let (base, interned) = arena
+                        .append_hit(
+                            &port_gpu.port,
+                            executable,
+                            &texture_slots,
+                            PlacedConstants {
                                 overlay,
-                                &texture_slots,
-                                key,
-                                pass_index as u32,
-                            )
-                            .map_err(GpuSubmitRefusal::ConstantPack)?;
-                        if interned {
-                            self.cost.note_intern_hit();
-                        } else {
-                            self.cost.note_intern_miss();
-                            self.cost.note_pack_seed(true);
-                        }
-                        (None, Some(base))
+                                drawsurf_key: key,
+                                execution_pass_index: pass_index as u32,
+                                placement_domain: (u32::from(self.portal_view.unwrap_or(0)) << 16)
+                                    | u32::from(self.instance),
+                            },
+                        )
+                        .map_err(GpuSubmitRefusal::ConstantPack)?;
+                    if interned {
+                        self.cost.note_intern_hit();
                     } else {
-                        let mut packed = port_gpu
-                            .port
-                            .pack_hit(executable)
-                            .map_err(GpuSubmitRefusal::ConstantPack)?;
-                        if let Some(overlay) = place_code.and_then(|c| c.pass(pass_index)) {
-                            overlay_packed_code_on_banks(
-                                &mut packed.vertex,
-                                &mut packed.pixel,
-                                overlay,
-                            )
-                            .map_err(GpuSubmitRefusal::ConstantPack)?;
-                        }
-                        self.cost.note_pack_seed(executable.local_banks.is_some());
-                        (Some(Arc::new(packed)), None)
-                    };
+                        self.cost.note_intern_miss();
+                        self.cost.note_pack_seed(true);
+                    }
+                    (None, Some(base))
+                } else {
+                    let mut packed = port_gpu
+                        .port
+                        .pack_hit(executable)
+                        .map_err(GpuSubmitRefusal::ConstantPack)?;
+                    if let Some(overlay) = place_code.and_then(|c| c.pass(pass_index)) {
+                        overlay_packed_code_on_banks(
+                            &mut packed.vertex,
+                            &mut packed.pixel,
+                            overlay,
+                        )
+                        .map_err(GpuSubmitRefusal::ConstantPack)?;
+                    }
+                    self.cost.note_pack_seed(executable.local_banks.is_some());
+                    (Some(Arc::new(packed)), None)
+                };
+                let portal_tag = self
+                    .portal_view
+                    .unwrap_or_else(|| portal_draw_tag(&self.extracted.frame.exec_frame, &kind));
                 let (depth_min, depth_max) = if target.forward_z {
                     (0.0, 1.0)
                 } else {
                     reverse_z_viewport_depth(depth_range_type_for_draw(&kind, key))
                 };
                 out.push(PreparedExactDraw {
+                    slice_clip: slice_clip.clone(),
+                    slice_world: self.slice_plane,
+                    aperture_world: match kind {
+                        RetainedDrawKind::XModel {
+                            portal_aperture, ..
+                        } => portal_aperture,
+                        _ => None,
+                    },
                     after_scene_resolve,
                     pipeline,
                     port: executable.port,
@@ -2874,11 +3199,11 @@ impl ExactPrepare<'_> {
                     bsp_first_surf,
                     bsp_surf_count,
                     bsp_counted: bsp_kind.is_some() && pass_index == 0,
-                    binds_sun_shadow,
-                    binds_spot_shadow,
+                    shadow_dependencies: dependencies,
 
                     indirect_arg: None,
                     arena_lane: 0,
+                    portal_tag,
                 });
             }
             Ok(())
@@ -2890,16 +3215,11 @@ fn texture_table_layout(pipeline: &ExactColourPipeline) -> Option<&BindGroupLayo
     pipeline.ports.first().map(|port| &port.textures_layout)
 }
 
-fn upload_constant_arena(
+fn prepare_constant_bases<'a>(
     draws: &mut [PreparedExactDraw],
     packed: &mut ArenaPack,
-    arena: &mut GpuConstantArena,
-    pipeline: &ExactColourPipeline,
-    registry: &ExactPipelineRegistry,
-    device: &RenderDevice,
-    queue: &RenderQueue,
-    label: &'static str,
-) -> (u32, usize, usize) {
+    pipeline: &'a ExactColourPipeline,
+) -> Option<&'a BindGroupLayoutDescriptor> {
     for draw in draws.iter_mut() {
         if draw.constant_base.is_none()
             && let Some(ref constants) = draw.constants
@@ -2913,14 +3233,11 @@ fn upload_constant_arena(
             *base = resolve_arena_base(*base, reserved_rows);
         }
     }
-    let layout = if arena.bind_group.is_none() {
-        draws
-            .iter()
-            .find_map(|draw| pipeline.get(draw.port).map(|port| &port.constants_layout))
-    } else {
-        None
-    };
-    packed.upload(arena, layout, registry, device, queue, label)
+    // Upload may replace the backing buffer and invalidate an existing bind
+    // group. Supply its layout even when that group is valid before upload.
+    draws
+        .iter()
+        .find_map(|draw| pipeline.get(draw.port).map(|port| &port.constants_layout))
 }
 
 pub(super) fn register(app: &mut App) {
@@ -2929,8 +3246,6 @@ pub(super) fn register(app: &mut App) {
         return;
     };
     render_app
-        .init_resource::<InstalledRenderWorld>()
-        .init_resource::<PublishedRenderFrame>()
         .init_resource::<ExactColourGeometry>()
         .init_resource::<skinning::SkinGpu>()
         .init_resource::<super::resolved_scene::ResolvedScene>()
@@ -2987,3 +3302,50 @@ pub(super) fn register(app: &mut App) {
             ),
         );
 }
+
+/// The atlas world tag of a draw (`render_frame::PortalView::surface_tag`):
+/// its world plus one, or 0 for a draw of no world.
+pub(super) fn portal_draw_tag(
+    frame: &render_frame::MaterialExecFrame,
+    kind: &RetainedDrawKind,
+) -> u8 {
+    frame.portal.as_ref().map_or(0, |view| match *kind {
+        RetainedDrawKind::World { surf, .. } => view.surface_tag(u32::from(surf)),
+        RetainedDrawKind::Smodel {
+            owner_world_from_local,
+            ..
+        } => view.point_tag(owner_world_from_local.w_axis.truncate().to_array()),
+        RetainedDrawKind::XModel {
+            world_from_local, ..
+        } => view.point_tag(world_from_local.w_axis.truncate().to_array()),
+        _ => 0,
+    })
+}
+
+/// Distinct unfolded views may draw the same physical world more than once.
+pub(super) fn portal_draw_tags(
+    frame: &render_frame::MaterialExecFrame,
+    kind: &RetainedDrawKind,
+    run_surfaces: &[u16],
+    key: u64,
+) -> Vec<u8> {
+    if is_viewmodel_colour_draw(kind, key) {
+        return vec![0];
+    }
+    let tag = portal_draw_tag(frame, kind);
+    match (frame.portal.as_ref(), tag.checked_sub(1)) {
+        (Some(view), Some(world)) => view
+            .draw_views(usize::from(world))
+            .into_iter()
+            .filter(|&tag| {
+                view.visibility
+                    .get(usize::from(tag - 1))
+                    .and_then(Option::as_ref)
+                    .is_some_and(|visible| visible.admits(kind, run_surfaces))
+            })
+            .collect(),
+        _ => vec![0],
+    }
+}
+
+pub use portal_scene::exit_clip_mode;

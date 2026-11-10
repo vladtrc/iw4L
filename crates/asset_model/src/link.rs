@@ -51,12 +51,12 @@ pub fn stamp_xmodel_material_edges(
 ) {
     let n = keys.len().max(authored.len());
     edges.resize(n, AssetEdge::Absent);
-    for i in 0..n {
+    for (i, edges_entry) in edges[..n].iter_mut().enumerate() {
         let hint = keys.get(i).and_then(Option::as_ref);
         let authored_slot = authored.get(i).copied().flatten().is_some()
             || hint.is_some_and(|key| !key.name.is_empty());
         if !authored_slot {
-            edges[i] = AssetEdge::Absent;
+            (*edges_entry) = AssetEdge::Absent;
             continue;
         }
         let index = hint.and_then(|key| materials.material_index_by_key(key));
@@ -77,9 +77,9 @@ pub fn stamp_xmodel_material_edges(
                     name: material.name.to_string(),
                 });
             }
-            edges[i] = AssetEdge::bind(index, materials.zone_of(index.order()));
+            (*edges_entry) = AssetEdge::bind(index, materials.zone_of(index.order()));
         } else {
-            edges[i] = AssetEdge::Unresolved(AssetEdgeReason::CatalogMiss);
+            (*edges_entry) = AssetEdge::Unresolved(AssetEdgeReason::CatalogMiss);
         }
     }
 }

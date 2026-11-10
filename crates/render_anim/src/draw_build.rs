@@ -6,16 +6,64 @@ use render_material::{RuntimeMaterialCatalog, SortedMaterialOrdinal};
 use render_scene::{SmodelPassMaterial, WorldModelLightingAtlas};
 
 use crate::anim::fpv_pose::PosedModelSurface;
+use crate::anim::remote_body::RemoteBodySkinnedItem;
 use crate::draw::{
     BODY_PACKED_UNAVAILABLE, DynEntAssetDraw, DynEntDrawPlan, FPV_PACKED_EMPTY_PLAN,
-    FPV_PACKED_UNAVAILABLE, FpvDrawPlan, ItemDrawPlan, MissileDrawPlan, RemoteBodyDrawPlan,
-    RemoteBodySurfaceDraw, ScriptModelAssetDraw, ScriptModelDrawPlan, stamp_plan_geometry,
-    topology_fingerprint,
+    FPV_PACKED_UNAVAILABLE, FpvDrawPlan, ItemDrawPlan, MergedModelRows, MissileDrawPlan,
+    RemoteBodyDrawPlan, RemoteBodySurfaceDraw, ScriptModelAssetDraw, ScriptModelDrawPlan,
+    stamp_plan_geometry, topology_fingerprint,
 };
 
 pub const XMODEL_PACKED_UNAVAILABLE: &str =
     "xmodel merge GfxPackedVertex missing or count-mismatched; decoded float is not packed VB";
 pub const XMODEL_PACKED_EMPTY_PLAN: &str = "xmodel plan has no vertices";
+
+impl MergedModelRows {
+    pub fn append_posed(
+        &mut self,
+        surfaces: &[PosedModelSurface],
+        materials: &[Option<SmodelPassMaterial>],
+    ) -> Vec<(u32, u32)> {
+        let mut packed_ok = self.vertices.is_empty()
+            || matches!(
+                self.packed_vertices,
+                asset_world::PackedVertexPayload::Iw4(_)
+            );
+        let mut packed = match std::mem::take(&mut self.packed_vertices) {
+            asset_world::PackedVertexPayload::Iw4(rows) => rows,
+            asset_world::PackedVertexPayload::Unavailable { .. } => Vec::new(),
+        };
+        let mut rows = Vec::new();
+        for (surface, material) in surfaces.iter().zip(materials) {
+            let Some(material) = material else { continue };
+            let before = self.vertices.len();
+            let Some(range) = append_mesh(&surface.mesh, &mut self.vertices, &mut self.indices)
+            else {
+                continue;
+            };
+            if packed_ok && surface.packed_vertices.len() == self.vertices.len() - before {
+                packed.extend_from_slice(&surface.packed_vertices);
+            } else {
+                packed_ok = false;
+                packed.clear();
+            }
+            rows.push((
+                self.surface_ranges.len() as u32,
+                self.materials.len() as u32,
+            ));
+            self.surface_ranges.push(range);
+            self.materials.push(material.clone());
+        }
+        self.packed_vertices = install_retained_packed(
+            packed_ok,
+            packed,
+            self.vertices.len(),
+            XMODEL_PACKED_EMPTY_PLAN,
+            XMODEL_PACKED_UNAVAILABLE,
+        );
+        rows
+    }
+}
 
 pub fn body_lit_pass_material(
     lighting: &WorldModelLightingAtlas,
@@ -179,14 +227,12 @@ pub fn append_remote_body_cpu_blob(
 
 pub fn push_remote_body_cpu_draw(
     plan: &mut RemoteBodyDrawPlan,
-    index_start: u32,
-    index_count: u32,
-    world_from_local: Mat4,
+    (index_start, index_count): (u32, u32),
+    item: &RemoteBodySkinnedItem,
     lighting_handle: u32,
     scene_light_index: u8,
     reflection_probe_index: u8,
     material: u32,
-    scene_entnum: Option<u32>,
 ) {
     if lighting_handle == 0 || index_count == 0 {
         return;
@@ -196,11 +242,11 @@ pub fn push_remote_body_cpu_draw(
     plan.draws.push(RemoteBodySurfaceDraw {
         surface: range_idx,
         material,
-        world_from_local,
+        world_from_local: item.world_from_local,
         lighting_handle,
         scene_light_index,
         reflection_probe_index,
-        scene_entnum,
+        scene_entnum: Some(item.client),
     });
 }
 
@@ -219,62 +265,16 @@ pub fn append_script_model_asset(
     surfaces: &[PosedModelSurface],
     materials: &[Option<SmodelPassMaterial>],
 ) -> usize {
-    let mut asset_surfaces = Vec::new();
-
-    let vertices_empty = plan.vertices.is_empty();
-    let mut packed_ok = vertices_empty
-        || matches!(
-            plan.packed_vertices,
-            asset_world::PackedVertexPayload::Iw4(_)
-        );
-    let mut packed = match std::mem::replace(
-        &mut plan.packed_vertices,
-        asset_world::PackedVertexPayload::Unavailable {
-            source_layout: XMODEL_PACKED_UNAVAILABLE,
-        },
-    ) {
-        asset_world::PackedVertexPayload::Iw4(rows) => rows,
-        asset_world::PackedVertexPayload::Unavailable { .. } => Vec::new(),
-    };
-    for (surface, material) in surfaces.iter().zip(materials) {
-        let Some(material) = material else { continue };
-        let before = plan.vertices.len();
-        let Some((start, count)) =
-            append_mesh(&surface.mesh, &mut plan.vertices, &mut plan.indices)
-        else {
-            continue;
-        };
-        let decoded = plan.vertices.len() - before;
-        if packed_ok && surface.packed_vertices.len() == decoded {
-            packed.extend_from_slice(&surface.packed_vertices);
-        } else {
-            packed_ok = false;
-            packed.clear();
-        }
-        let surface_index = plan.surface_ranges.len() as u32;
-        plan.surface_ranges.push((start, count));
-        let material_index = plan.materials.len() as u32;
-        plan.materials.push(material.clone());
-        asset_surfaces.push((surface_index, material_index));
-    }
+    let surfaces = plan.rows.append_posed(surfaces, materials);
     plan.assets.push(ScriptModelAssetDraw {
         key,
         dobj_state,
         camera_lods,
-        surfaces: asset_surfaces,
+        surfaces,
     });
-    plan.packed_vertices = install_retained_packed(
-        packed_ok,
-        packed,
-        plan.vertices.len(),
-        XMODEL_PACKED_EMPTY_PLAN,
-        XMODEL_PACKED_UNAVAILABLE,
-    );
-
     plan.revisions.bump_surfaces();
-    let topology = topology_fingerprint(&plan.indices, &plan.surface_ranges, plan.vertices.len());
     let rev = plan.revision;
-    plan.revision = stamp_plan_geometry(&mut plan.revisions, rev, topology);
+    plan.revision = stamp_plan_geometry(&mut plan.revisions, rev, plan.rows.topology());
     plan.assets.len() - 1
 }
 
@@ -296,15 +296,15 @@ pub fn overwrite_script_model_asset(
     if incoming.len() != asset.surfaces.len() {
         return false;
     }
-    let slots: Vec<(u32, u32)> = asset.surfaces.clone();
+    let rows = &mut plan.rows;
     let mut ranges = Vec::with_capacity(incoming.len());
-    for ((surface, _), &(surf_i, mat_i)) in incoming.iter().zip(&slots) {
-        let Some(&(index_start, count)) = plan.surface_ranges.get(surf_i as usize) else {
+    for ((surface, _), &(surf_i, mat_i)) in incoming.iter().zip(&asset.surfaces) {
+        let Some(&(index_start, count)) = rows.surface_ranges.get(surf_i as usize) else {
             return false;
         };
         let start = index_start as usize;
         let end = start.saturating_add(count as usize);
-        let Some(slice) = plan.indices.get(start..end) else {
+        let Some(slice) = rows.indices.get(start..end) else {
             return false;
         };
         let (Some(&vmin), Some(&vmax)) = (slice.iter().min(), slice.iter().max()) else {
@@ -329,16 +329,9 @@ pub fn overwrite_script_model_asset(
         if index_len != count as usize {
             return false;
         }
-        ranges.push((vmin as usize, n, mat_i as usize));
+        ranges.push((vmin as usize, n, mat_i as usize, positions));
     }
-    for ((base, n, mat_i), (surface, material)) in ranges.into_iter().zip(incoming.iter()) {
-        let Some(positions) = surface
-            .mesh
-            .attribute(Mesh::ATTRIBUTE_POSITION)
-            .and_then(f32x3)
-        else {
-            return false;
-        };
+    for ((base, n, mat_i, positions), (surface, material)) in ranges.into_iter().zip(&incoming) {
         let normals = surface
             .mesh
             .attribute(Mesh::ATTRIBUTE_NORMAL)
@@ -348,7 +341,7 @@ pub fn overwrite_script_model_asset(
             .mesh
             .attribute(Mesh::ATTRIBUTE_COLOR)
             .and_then(f32x4);
-        let Some(dst) = plan.vertices.get_mut(base..base + n) else {
+        let Some(dst) = rows.vertices.get_mut(base..base + n) else {
             return false;
         };
         for (i, vertex) in dst.iter_mut().enumerate() {
@@ -361,13 +354,13 @@ pub fn overwrite_script_model_asset(
                 uv0: uvs.and_then(|a| a.get(i).copied()).unwrap_or([0.0; 2]),
             };
         }
-        if let asset_world::PackedVertexPayload::Iw4(rows) = &mut plan.packed_vertices {
-            let Some(dst) = rows.get_mut(base..base + n) else {
+        if let asset_world::PackedVertexPayload::Iw4(packed) = &mut rows.packed_vertices {
+            let Some(dst) = packed.get_mut(base..base + n) else {
                 return false;
             };
             dst.copy_from_slice(&surface.packed_vertices);
         }
-        if let Some(slot) = plan.materials.get_mut(mat_i) {
+        if let Some(slot) = rows.materials.get_mut(mat_i) {
             *slot = (*material).clone();
         }
     }
@@ -384,16 +377,18 @@ pub fn retain_script_model_assets(plan: &mut ScriptModelDrawPlan, keep: &[bool])
     if keep.iter().all(|k| *k) {
         return;
     }
-    let packed_src = match &plan.packed_vertices {
+    let packed_src = match &plan.rows.packed_vertices {
         asset_world::PackedVertexPayload::Iw4(rows) => Some(rows.as_slice()),
         asset_world::PackedVertexPayload::Unavailable { .. } => None,
     };
     let mut next = ScriptModelDrawPlan::default();
 
-    next.vertices.reserve(plan.vertices.len());
-    next.indices.reserve(plan.indices.len());
-    next.surface_ranges.reserve(plan.surface_ranges.len());
-    next.materials.reserve(plan.materials.len());
+    next.rows.vertices.reserve(plan.rows.vertices.len());
+    next.rows.indices.reserve(plan.rows.indices.len());
+    next.rows
+        .surface_ranges
+        .reserve(plan.rows.surface_ranges.len());
+    next.rows.materials.reserve(plan.rows.materials.len());
     next.assets.reserve(plan.assets.len());
     let mut packed_dst = Vec::with_capacity(packed_src.map_or(0, <[_]>::len));
     let mut packed_ok = packed_src.is_some();
@@ -403,47 +398,46 @@ pub fn retain_script_model_assets(plan: &mut ScriptModelDrawPlan, keep: &[bool])
         }
         let mut new_surfaces = Vec::new();
         for &(surf_i, mat_i) in &asset.surfaces {
-            let Some(&(index_start, count)) = plan.surface_ranges.get(surf_i as usize) else {
+            let Some(&(index_start, count)) = plan.rows.surface_ranges.get(surf_i as usize) else {
                 continue;
             };
             let start = index_start as usize;
             let end = start.saturating_add(count as usize);
-            let Some(slice) = plan.indices.get(start..end) else {
+            let Some(slice) = plan.rows.indices.get(start..end) else {
                 continue;
             };
             let (vmin, vmax) = match (slice.iter().min(), slice.iter().max()) {
                 (Some(min), Some(max)) => (*min, *max),
                 _ => continue,
             };
-            let vbase = next.vertices.len() as u32;
+            let vbase = next.rows.vertices.len() as u32;
             for vi in vmin..=vmax {
-                let Some(vertex) = plan.vertices.get(vi as usize) else {
+                let Some(vertex) = plan.rows.vertices.get(vi as usize) else {
                     packed_ok = false;
                     packed_dst.clear();
                     break;
                 };
-                next.vertices.push(*vertex);
-                if packed_ok {
-                    if let Some(src) = packed_src {
-                        if let Some(row) = src.get(vi as usize) {
-                            packed_dst.push(*row);
-                        } else {
-                            packed_ok = false;
-                            packed_dst.clear();
-                        }
+                next.rows.vertices.push(*vertex);
+                if packed_ok && let Some(src) = packed_src {
+                    if let Some(row) = src.get(vi as usize) {
+                        packed_dst.push(*row);
+                    } else {
+                        packed_ok = false;
+                        packed_dst.clear();
                     }
                 }
             }
-            let index_start_new = next.indices.len() as u32;
-            next.indices
+            let index_start_new = next.rows.indices.len() as u32;
+            next.rows
+                .indices
                 .extend(slice.iter().map(|index| vbase + (*index - vmin)));
-            let surface_index = next.surface_ranges.len() as u32;
-            next.surface_ranges.push((index_start_new, count));
-            let Some(material) = plan.materials.get(mat_i as usize) else {
+            let surface_index = next.rows.surface_ranges.len() as u32;
+            next.rows.surface_ranges.push((index_start_new, count));
+            let Some(material) = plan.rows.materials.get(mat_i as usize) else {
                 continue;
             };
-            let material_index = next.materials.len() as u32;
-            next.materials.push(material.clone());
+            let material_index = next.rows.materials.len() as u32;
+            next.rows.materials.push(material.clone());
             new_surfaces.push((surface_index, material_index));
         }
         next.assets.push(ScriptModelAssetDraw {
@@ -453,10 +447,10 @@ pub fn retain_script_model_assets(plan: &mut ScriptModelDrawPlan, keep: &[bool])
             surfaces: new_surfaces,
         });
     }
-    next.packed_vertices = install_retained_packed(
+    next.rows.packed_vertices = install_retained_packed(
         packed_ok,
         packed_dst,
-        next.vertices.len(),
+        next.rows.vertices.len(),
         XMODEL_PACKED_EMPTY_PLAN,
         XMODEL_PACKED_UNAVAILABLE,
     );
@@ -469,9 +463,8 @@ pub fn retain_script_model_assets(plan: &mut ScriptModelDrawPlan, keep: &[bool])
     next.generation = plan.generation.wrapping_add(1);
     next.revision = plan.revision;
     next.revisions.bump_admission();
-    let topology = topology_fingerprint(&next.indices, &next.surface_ranges, next.vertices.len());
     let rev = next.revision;
-    next.revision = stamp_plan_geometry(&mut next.revisions, rev, topology);
+    next.revision = stamp_plan_geometry(&mut next.revisions, rev, next.rows.topology());
     *plan = next;
 }
 
@@ -480,50 +473,9 @@ pub fn append_missile_surfaces(
     surfaces: &[PosedModelSurface],
     materials: &[Option<SmodelPassMaterial>],
 ) -> Vec<(u32, u32)> {
-    let mut asset_surfaces = Vec::new();
-    let mut packed = match &plan.packed_vertices {
-        asset_world::PackedVertexPayload::Iw4(rows) => rows.clone(),
-        asset_world::PackedVertexPayload::Unavailable { .. } if plan.vertices.is_empty() => {
-            Vec::new()
-        }
-        asset_world::PackedVertexPayload::Unavailable { .. } => Vec::new(),
-    };
-    let mut packed_ok = plan.vertices.is_empty()
-        || matches!(
-            plan.packed_vertices,
-            asset_world::PackedVertexPayload::Iw4(_)
-        );
-    for (surface, material) in surfaces.iter().zip(materials) {
-        let Some(material) = material else { continue };
-        let before = plan.vertices.len();
-        let Some((start, count)) =
-            append_mesh(&surface.mesh, &mut plan.vertices, &mut plan.indices)
-        else {
-            continue;
-        };
-        let decoded = plan.vertices.len() - before;
-        if packed_ok && surface.packed_vertices.len() == decoded {
-            packed.extend_from_slice(&surface.packed_vertices);
-        } else {
-            packed_ok = false;
-            packed.clear();
-        }
-        let surface_index = plan.surface_ranges.len() as u32;
-        plan.surface_ranges.push((start, count));
-        let material_index = plan.materials.len() as u32;
-        plan.materials.push(material.clone());
-        asset_surfaces.push((surface_index, material_index));
-    }
-    plan.packed_vertices = install_retained_packed(
-        packed_ok,
-        packed,
-        plan.vertices.len(),
-        XMODEL_PACKED_EMPTY_PLAN,
-        XMODEL_PACKED_UNAVAILABLE,
-    );
-
+    let surfaces = plan.rows.append_posed(surfaces, materials);
     plan.revisions.bump_surfaces();
-    asset_surfaces
+    surfaces
 }
 
 pub fn append_item_surfaces(
@@ -531,50 +483,9 @@ pub fn append_item_surfaces(
     surfaces: &[PosedModelSurface],
     materials: &[Option<SmodelPassMaterial>],
 ) -> Vec<(u32, u32)> {
-    let mut asset_surfaces = Vec::new();
-    let mut packed = match &plan.packed_vertices {
-        asset_world::PackedVertexPayload::Iw4(rows) => rows.clone(),
-        asset_world::PackedVertexPayload::Unavailable { .. } if plan.vertices.is_empty() => {
-            Vec::new()
-        }
-        asset_world::PackedVertexPayload::Unavailable { .. } => Vec::new(),
-    };
-    let mut packed_ok = plan.vertices.is_empty()
-        || matches!(
-            plan.packed_vertices,
-            asset_world::PackedVertexPayload::Iw4(_)
-        );
-    for (surface, material) in surfaces.iter().zip(materials) {
-        let Some(material) = material else { continue };
-        let before = plan.vertices.len();
-        let Some((start, count)) =
-            append_mesh(&surface.mesh, &mut plan.vertices, &mut plan.indices)
-        else {
-            continue;
-        };
-        let decoded = plan.vertices.len() - before;
-        if packed_ok && surface.packed_vertices.len() == decoded {
-            packed.extend_from_slice(&surface.packed_vertices);
-        } else {
-            packed_ok = false;
-            packed.clear();
-        }
-        let surface_index = plan.surface_ranges.len() as u32;
-        plan.surface_ranges.push((start, count));
-        let material_index = plan.materials.len() as u32;
-        plan.materials.push(material.clone());
-        asset_surfaces.push((surface_index, material_index));
-    }
-    plan.packed_vertices = install_retained_packed(
-        packed_ok,
-        packed,
-        plan.vertices.len(),
-        XMODEL_PACKED_EMPTY_PLAN,
-        XMODEL_PACKED_UNAVAILABLE,
-    );
-
+    let surfaces = plan.rows.append_posed(surfaces, materials);
     plan.revisions.bump_surfaces();
-    asset_surfaces
+    surfaces
 }
 
 pub fn append_dynent_surfaces(
@@ -582,53 +493,9 @@ pub fn append_dynent_surfaces(
     surfaces: &[PosedModelSurface],
     materials: &[Option<SmodelPassMaterial>],
 ) -> Vec<(u32, u32)> {
-    let mut asset_surfaces = Vec::new();
-    let vertices_empty = plan.vertices.is_empty();
-    let mut packed_ok = vertices_empty
-        || matches!(
-            plan.packed_vertices,
-            asset_world::PackedVertexPayload::Iw4(_)
-        );
-    let mut packed = match std::mem::replace(
-        &mut plan.packed_vertices,
-        asset_world::PackedVertexPayload::Unavailable {
-            source_layout: XMODEL_PACKED_UNAVAILABLE,
-        },
-    ) {
-        asset_world::PackedVertexPayload::Iw4(rows) => rows,
-        asset_world::PackedVertexPayload::Unavailable { .. } => Vec::new(),
-    };
-    for (surface, material) in surfaces.iter().zip(materials) {
-        let Some(material) = material else { continue };
-        let before = plan.vertices.len();
-        let Some((start, count)) =
-            append_mesh(&surface.mesh, &mut plan.vertices, &mut plan.indices)
-        else {
-            continue;
-        };
-        let decoded = plan.vertices.len() - before;
-        if packed_ok && surface.packed_vertices.len() == decoded {
-            packed.extend_from_slice(&surface.packed_vertices);
-        } else {
-            packed_ok = false;
-            packed.clear();
-        }
-        let surface_index = plan.surface_ranges.len() as u32;
-        plan.surface_ranges.push((start, count));
-        let material_index = plan.materials.len() as u32;
-        plan.materials.push(material.clone());
-        asset_surfaces.push((surface_index, material_index));
-    }
-    plan.packed_vertices = install_retained_packed(
-        packed_ok,
-        packed,
-        plan.vertices.len(),
-        XMODEL_PACKED_EMPTY_PLAN,
-        XMODEL_PACKED_UNAVAILABLE,
-    );
-
+    let surfaces = plan.rows.append_posed(surfaces, materials);
     plan.revisions.bump_surfaces();
-    asset_surfaces
+    surfaces
 }
 
 pub fn append_dynent_asset(

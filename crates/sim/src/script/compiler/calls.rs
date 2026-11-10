@@ -1,5 +1,5 @@
 use super::{CallSite, Parser};
-use crate::script::{Callee, Fault, Namespace, Op, Value, normalize_module};
+use crate::script::{Callee, Fault, Namespace, Op, ThreadMode, Value, normalize_module};
 
 impl Parser {
     pub(super) fn arguments(&mut self) -> Result<usize, Fault> {
@@ -26,7 +26,11 @@ impl Parser {
             Ok(first.to_ascii_lowercase())
         }
     }
-    pub(super) fn invocation(&mut self, method: bool, spawn: bool) -> Result<(), Fault> {
+    pub(super) fn invocation(
+        &mut self,
+        method: bool,
+        spawn: Option<ThreadMode>,
+    ) -> Result<(), Fault> {
         let location = self.location();
         if self.eat("[") {
             self.expect("[")?;
@@ -40,7 +44,7 @@ impl Parser {
             let first = self.ident()?;
             let name = self.call_name(first)?;
             if method
-                && !spawn
+                && spawn.is_none()
                 && ["notify", "waittill", "waittillmatch", "endon"].contains(&name.as_str())
             {
                 self.expect("(")?;
@@ -78,16 +82,16 @@ impl Parser {
                 self.emit(Op::Constant(Value::Undefined));
             } else {
                 let site = match (spawn, method) {
-                    (true, _) => CallSite::Spawn,
-                    (false, true) => CallSite::Call(Namespace::Method),
-                    (false, false) => CallSite::Call(Namespace::Function),
+                    (Some(_), _) => CallSite::Spawn,
+                    (None, true) => CallSite::Call(Namespace::Method),
+                    (None, false) => CallSite::Call(Namespace::Function),
                 };
                 let callee = Callee::Unlinked(self.unlinked(name, site));
                 let argc = self.arguments()?;
                 self.code.push((
                     location,
-                    if spawn {
-                        Op::Spawn(callee, argc, method)
+                    if let Some(mode) = spawn {
+                        Op::Spawn(callee, argc, method, mode)
                     } else {
                         Op::Call(callee, argc, method)
                     },

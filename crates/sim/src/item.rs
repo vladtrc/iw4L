@@ -12,7 +12,7 @@ use weapon_iw4::{
 
 use crate::bullet_collision::{MASK_PLAYER_SOLID, PLAYER_MAXS, PLAYER_MINS};
 use crate::gentity::init_item_state;
-use crate::world::{ClientId, Tick, give_weapon_to_ps_akimbo, gsc_give_weapon_is_akimbo};
+use crate::world::{ClientId, Tick, gsc_give_weapon_is_akimbo};
 use crate::{ClientLifecycle, ItemPickupRecord};
 
 pub const G_MAX_DROPPED_WEAPONS: usize = 16;
@@ -45,6 +45,18 @@ pub struct DroppedItem {
     pub stock: i32,
     pub scavenger: bool,
     pub drop_seq: u32,
+    pub authored: bool,
+    pub dual_wield: bool,
+    pub alternate: Option<ItemWeaponAmmo>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ItemWeaponAmmo {
+    pub weapon: u32,
+    pub clip_r: i32,
+    pub clip_l: i32,
+    pub stock: i32,
+    pub dual_wield: bool,
 }
 
 pub fn random_unit(seed: &mut u32) -> f32 {
@@ -103,9 +115,10 @@ fn may_drop_weapon(world: &FrameWorld, ps: &PlayerState, weapon: u32) -> bool {
 
 fn take_player_weapon(ps: &mut PlayerState, weapon: u32) {
     let want = weapon as i32;
-    for slot in &mut ps.weapons {
+    for (index, slot) in ps.weapons.iter_mut().enumerate() {
         if *slot == want {
             *slot = 0;
+            ps.weapon_data[index * 5..index * 5 + 5].fill(0);
         }
     }
     if ps.weapon == weapon || ps.weapon_primary == weapon {
@@ -115,66 +128,64 @@ fn take_player_weapon(ps: &mut PlayerState, weapon: u32) {
     }
 }
 
-fn ammo_from_ps(world: &FrameWorld, ps: &PlayerState, weapon: u32) -> (i32, i32, i32) {
-    let Some(facts) = world.combat_facts_for(weapon) else {
-        return (0, 0, 0);
-    };
-    let clip_key = clip_table_key(facts.clip_index, weapon);
-    let ammo_key = ammo_table_key(facts.ammo_index, weapon);
-    (
-        get_clip_for_hand(&ps.ammoclip, clip_key, 0),
-        get_clip_for_hand(&ps.ammoclip, clip_key, 1),
-        get_ammo_not_in_clip(&ps.ammo, ammo_key),
-    )
-}
-
-fn set_ammo_on_ps(
-    world: &FrameWorld,
-    ps: &mut PlayerState,
-    weapon: u32,
+#[derive(Clone, Copy)]
+struct WeaponAmmo {
     clip_r: i32,
     clip_l: i32,
     stock: i32,
-) {
-    let Some(facts) = world.combat_facts_for(weapon) else {
-        return;
-    };
-    let clip_key = clip_table_key(facts.clip_index, weapon);
-    let ammo_key = ammo_table_key(facts.ammo_index, weapon);
-    if clip_key != 0 {
-        let _ = set_clip_for_hand(&mut ps.ammoclip, clip_key, 0, clip_r);
-        let _ = set_clip_for_hand(&mut ps.ammoclip, clip_key, 1, clip_l);
-    }
-    if ammo_key != 0 {
-        let _ = set_ammo_not_in_clip(&mut ps.ammo, ammo_key, stock);
-    }
 }
+impl WeaponAmmo {
+    fn from_player(world: &FrameWorld, ps: &PlayerState, weapon: u32) -> Self {
+        let Some(facts) = world.combat_facts_for(weapon) else {
+            return Self {
+                clip_r: 0,
+                clip_l: 0,
+                stock: 0,
+            };
+        };
+        let clip_key = clip_table_key(facts.clip_index, weapon);
+        let ammo_key = ammo_table_key(facts.ammo_index, weapon);
+        Self {
+            clip_r: get_clip_for_hand(&ps.ammoclip, clip_key, 0),
+            clip_l: get_clip_for_hand(&ps.ammoclip, clip_key, 1),
+            stock: get_ammo_not_in_clip(&ps.ammo, ammo_key),
+        }
+    }
+    fn pickup_new_to_player(self, world: &FrameWorld, ps: &mut PlayerState, weapon: u32) {
+        let Some(facts) = world.combat_facts_for(weapon) else {
+            return;
+        };
+        let previous = Self::from_player(world, ps, weapon);
+        Self {
+            clip_r: self.clip_r.min(facts.clip_size),
+            clip_l: self.clip_l.min(facts.clip_size),
+            stock: previous
+                .stock
+                .saturating_add(self.stock)
+                .min(facts.max_ammo),
+        }
+        .apply_to_player(world, ps, weapon);
+    }
 
-fn add_ammo_on_ps(
-    world: &FrameWorld,
-    ps: &mut PlayerState,
-    weapon: u32,
-    clip_r: i32,
-    clip_l: i32,
-    stock: i32,
-) {
-    let (have_r, have_l, have_stock) = ammo_from_ps(world, ps, weapon);
-
-    let Some(facts) = world.combat_facts_for(weapon) else {
-        return;
-    };
-    set_ammo_on_ps(
-        world,
-        ps,
-        weapon,
-        have_r,
-        have_l,
-        have_stock
-            .saturating_add(stock)
-            .saturating_add(clip_r)
-            .saturating_add(clip_l)
-            .min(facts.max_ammo),
-    );
+    fn apply_to_player(self, world: &FrameWorld, ps: &mut PlayerState, weapon: u32) {
+        let Self {
+            clip_r,
+            clip_l,
+            stock,
+        } = self;
+        let Some(facts) = world.combat_facts_for(weapon) else {
+            return;
+        };
+        let clip_key = clip_table_key(facts.clip_index, weapon);
+        let ammo_key = ammo_table_key(facts.ammo_index, weapon);
+        if clip_key != 0 {
+            let _ = set_clip_for_hand(&mut ps.ammoclip, clip_key, 0, clip_r);
+            let _ = set_clip_for_hand(&mut ps.ammoclip, clip_key, 1, clip_l);
+        }
+        if ammo_key != 0 {
+            let _ = set_ammo_not_in_clip(&mut ps.ammo, ammo_key, stock);
+        }
+    }
 }
 
 fn current_primary_weapon(world: &FrameWorld, ps: &PlayerState) -> u32 {
@@ -238,17 +249,42 @@ fn has_scavenger_perk(ps: &PlayerState) -> bool {
     (ps.perks[0] & PERK_SCAVENGER) != 0
 }
 
+enum DropPlacement {
+    Falling { pos: Trajectory, apos: Trajectory },
+    Resting { origin: [f32; 3], angles: [f32; 3] },
+}
+impl DropPlacement {
+    fn state(self, number: i32, weapon: u32, owner: i32) -> (entity_iw4::EntityState, bool) {
+        let (pos, apos, falling) = match self {
+            Self::Falling { pos, apos } => (pos, apos, true),
+            Self::Resting { origin, angles } => (
+                Trajectory {
+                    tr_type: TR_STATIONARY,
+                    tr_time: 0,
+                    tr_duration: 0,
+                    tr_delta: [0.; 3],
+                    tr_base: origin,
+                },
+                Trajectory {
+                    tr_type: TR_STATIONARY,
+                    tr_time: 0,
+                    tr_duration: 0,
+                    tr_delta: [0.; 3],
+                    tr_base: angles,
+                },
+                false,
+            ),
+        };
+        (init_item_state(number, weapon, pos, apos, owner), falling)
+    }
+}
+
 fn push_dropped_item(
     world: &mut FrameWorld,
     weapon: u32,
-    origin: [f32; 3],
-    pos: Trajectory,
-    apos: Trajectory,
+    placement: DropPlacement,
     owner: i32,
-    clip_r: i32,
-    clip_l: i32,
-    stock: i32,
-    falling: bool,
+    ammo: WeaponAmmo,
     scavenger: bool,
 ) -> i32 {
     let live: Vec<(i32, u32)> = world
@@ -257,6 +293,7 @@ fn push_dropped_item(
         .filter_map(|number| {
             world
                 .dropped_item_by_number(number)
+                .filter(|item| !item.authored)
                 .map(|item| (number, item.drop_seq))
         })
         .collect();
@@ -265,7 +302,7 @@ fn push_dropped_item(
         .map(|&(_, seq)| seq)
         .max()
         .map_or(0, |seq| seq.wrapping_add(1));
-    if world.dropped_item_count() >= G_MAX_DROPPED_WEAPONS {
+    if live.len() >= G_MAX_DROPPED_WEAPONS {
         let evicted_number =
             oldest_dropped_number(&live).expect("cap eviction requires an occupied dropped item");
         world
@@ -279,7 +316,13 @@ fn push_dropped_item(
             return ENTITYNUM_NONE;
         }
     };
-    let state = init_item_state(entnum, weapon, pos, apos, owner);
+    let (state, falling) = placement.state(entnum, weapon, owner);
+    let origin = state.tr_base;
+    let WeaponAmmo {
+        clip_r,
+        clip_l,
+        stock,
+    } = ammo;
     world.push_dropped_item(DroppedItem {
         state,
         origin,
@@ -289,6 +332,9 @@ fn push_dropped_item(
         stock,
         scavenger,
         drop_seq,
+        authored: false,
+        dual_wield: ammo.clip_l > 0 || gsc_give_weapon_is_akimbo(world.weapon_script_name(weapon)),
+        alternate: None,
     });
     entnum
 }
@@ -305,9 +351,7 @@ fn launch_dropped_from_ps(
     ps: &PlayerState,
     owner: i32,
     weapon: u32,
-    clip_r: i32,
-    clip_l: i32,
-    stock: i32,
+    ammo: WeaponAmmo,
     scavenger: bool,
 ) -> i32 {
     let mut seed = world.anim_event_seed();
@@ -330,9 +374,24 @@ fn launch_dropped_from_ps(
         tr_delta: [0.0; 3],
         tr_base: dropped_angles(world, weapon, ps.viewangles[1]),
     };
-    push_dropped_item(
-        world, weapon, origin, pos, apos, owner, clip_r, clip_l, stock, true, scavenger,
-    )
+    let number = push_dropped_item(
+        world,
+        weapon,
+        DropPlacement::Falling { pos, apos },
+        owner,
+        ammo,
+        scavenger,
+    );
+    preserve_dropped_model(world, number, ps, weapon);
+    number
+}
+
+fn preserve_dropped_model(world: &mut FrameWorld, number: i32, ps: &PlayerState, weapon: u32) {
+    if let Some(item) = world.dropped_item_mut_by_number(number) {
+        item.dual_wield = weapon_iw4::num_hands_for_held(&ps.weapons, &ps.weapon_data, weapon) > 1;
+        item.state.weapon_model =
+            weapon_iw4::weapon_model_for_held(&ps.weapons, &ps.weapon_data, weapon);
+    }
 }
 
 fn dropped_angles(world: &FrameWorld, weapon: u32, yaw: f32) -> [f32; 3] {
@@ -353,18 +412,8 @@ pub(crate) fn drop_weapon(
     if !ps.weapons.contains(&(weapon as i32)) || !may_drop_weapon(world, &ps, weapon) {
         return None;
     }
-    let (clip_r, clip_l, stock) = ammo_from_ps(world, &ps, weapon);
-    let number = launch_dropped_from_ps(
-        world,
-        tick,
-        &ps,
-        player.0 as i32,
-        weapon,
-        clip_r,
-        clip_l,
-        stock,
-        false,
-    );
+    let ammo = WeaponAmmo::from_player(world, &ps, weapon);
+    let number = launch_dropped_from_ps(world, tick, &ps, player.0 as i32, weapon, ammo, false);
     if number == ENTITYNUM_NONE {
         return None;
     }
@@ -381,7 +430,19 @@ pub(crate) fn drop_scavenger_item(
     weapon: u32,
 ) -> Option<i32> {
     let ps = world.player(player).copied()?;
-    let number = launch_dropped_from_ps(world, tick, &ps, player.0 as i32, weapon, 0, 0, 0, true);
+    let number = launch_dropped_from_ps(
+        world,
+        tick,
+        &ps,
+        player.0 as i32,
+        weapon,
+        WeaponAmmo {
+            clip_r: 0,
+            clip_l: 0,
+            stock: 0,
+        },
+        true,
+    );
     (number != ENTITYNUM_NONE).then_some(number)
 }
 
@@ -428,18 +489,31 @@ fn blocked_fall(
 }
 
 pub(crate) fn think_item_move(world: &mut FrameWorld, time_ms: i32, number: i32) {
-    if let Ok(entity) = world.entity_kernel().current_ref(number) {
-        if world
+    if let Ok(entity) = world.entity_kernel().current_ref(number)
+        && world
             .entity_kernel()
             .resolve(entity)
             .is_ok_and(|view| view.relations.parent.is_some())
-        {
-            return;
-        }
+    {
+        return;
     }
     let Some(item) = world.dropped_item_by_number(number) else {
         return;
     };
+    let mut item = item;
+    advance_item(&mut item, time_ms, |start, end, mins, maxs, mask| {
+        world.trace_clip(start, end, mins, maxs, mask)
+    });
+    if let Some(slot) = world.dropped_item_mut_by_number(number) {
+        *slot = item;
+    }
+}
+
+pub fn advance_item(
+    item: &mut DroppedItem,
+    time_ms: i32,
+    trace: impl Fn([f32; 3], [f32; 3], [f32; 3], [f32; 3], u32) -> trace_iw4::Trace,
+) {
     if !item.falling {
         return;
     }
@@ -452,11 +526,11 @@ pub(crate) fn think_item_move(world: &mut FrameWorld, time_ms: i32, number: i32)
     };
     let start = item.origin;
     let desired = evaluate_trajectory(&traj, time_ms);
-    let hit = world.trace_clip(start, desired, ITEM_MINS, ITEM_MAXS, MASK_PLAYER_SOLID);
+    let hit = trace(start, desired, ITEM_MINS, ITEM_MAXS, MASK_PLAYER_SOLID);
     let blocked = hit.startsolid != 0 || hit.fraction < 1.0;
     let mut outcome = blocked.then(|| blocked_fall(&traj, time_ms, start, &hit));
     if let Some(BlockedFall::Deflect(fall)) = &mut outcome {
-        let off = world.trace_clip(
+        let off = trace(
             hit.endpos,
             fall.tr_base,
             ITEM_MINS,
@@ -476,9 +550,6 @@ pub(crate) fn think_item_move(world: &mut FrameWorld, time_ms: i32, number: i32)
             }
         }
     }
-    let Some(item) = world.dropped_item_mut_by_number(number) else {
-        return;
-    };
     let Some(outcome) = outcome else {
         item.origin = desired;
         return;
@@ -547,8 +618,12 @@ fn try_touch_one(world: &mut FrameWorld, walker: ClientId) {
             let Some(facts) = world.combat_facts_for(weapon) else {
                 continue;
             };
-            let (_, _, stock) = ammo_from_ps(world, &ps, weapon);
-            if stock >= facts.max_ammo || item.stock + item.clip_r + item.clip_l <= 0 {
+            let WeaponAmmo { stock, .. } = WeaponAmmo::from_player(world, &ps, weapon);
+            if stock >= facts.max_ammo
+                || [item.stock, item.clip_r, item.clip_l]
+                    .iter()
+                    .all(|ammo| *ammo <= 0)
+            {
                 continue;
             }
         }
@@ -576,7 +651,12 @@ fn record_rejected_touches(world: &FrameWorld, walker: ClientId, ps: &PlayerStat
                 ITEM_MAXS,
             )
         {
-            perf::pickup_rejected(walker.0, number, ps.pm_type);
+            perf::instant!("pickup_rejected", "iw4l.sim", |ctx| {
+                let (picker, item, pm_type): (u32, i32, i32) = (walker.0, number, ps.pm_type);
+                ctx.arg("picker", i64::from(picker));
+                ctx.arg("item", i64::from(item));
+                ctx.arg("picker_pm_type", i64::from(pm_type));
+            });
         }
     }
 }
@@ -611,8 +691,15 @@ fn grab_number(world: &mut FrameWorld, walker: ClientId, number: i32) {
     };
     let picker_pm_type = ps.pm_type;
     let already_has = player_weapons_find_slot(&ps.weapons, weapon as i32) >= 0;
+    let current = current_primary_weapon(world, &ps);
+    let swaps = !already_has && current != 0 && primary_count(world, &ps) >= 2;
+    if !already_has && !swaps && !ps.weapons.contains(&0) {
+        return;
+    }
     let (taken, left) = if already_has {
-        let (_, _, have_stock) = ammo_from_ps(world, &ps, weapon);
+        let WeaponAmmo {
+            stock: have_stock, ..
+        } = WeaponAmmo::from_player(world, &ps, weapon);
         let room = world
             .combat_facts_for(weapon)
             .map_or(0, |facts| facts.max_ammo.saturating_sub(have_stock));
@@ -630,24 +717,25 @@ fn grab_number(world: &mut FrameWorld, walker: ClientId, number: i32) {
         world.despawn_dropped_item(number);
     }
     let mut swapped_entnum = ENTITYNUM_NONE;
-    let akimbo = world
-        .combat_facts_for(weapon)
-        .is_some_and(|facts| facts.dual_wield)
+    let akimbo = item.dual_wield
+        || world
+            .combat_facts_for(weapon)
+            .is_some_and(|facts| facts.dual_wield)
         || gsc_give_weapon_is_akimbo(world.weapon_script_name(weapon));
     if already_has {
         let mut next = ps;
-        weapon_iw4::latch_weapon_dual_wield(&next.weapons, &mut next.weapon_data, weapon, akimbo);
-        if next.weapon == weapon {
-            next.last_weapon_hand =
-                weapon_iw4::num_hands_for_held(&next.weapons, &next.weapon_data, weapon);
-        }
-        add_ammo_on_ps(world, &mut next, weapon, 0, 0, taken);
+        weapon_iw4::pickup_owned_ammo(
+            &mut next,
+            weapon,
+            world.combat_facts_for(weapon).as_ref(),
+            akimbo,
+            taken,
+        );
         if let Some(slot) = world.player_mut(walker) {
             *slot = next;
         }
     } else {
-        let current = current_primary_weapon(world, &ps);
-        if current != 0 && primary_count(world, &ps) >= 2 {
+        if swaps {
             swapped_entnum = drop_current_primary_at(
                 world,
                 walker,
@@ -657,55 +745,60 @@ fn grab_number(world: &mut FrameWorld, walker: ClientId, number: i32) {
             );
         }
         if let Some(mut next) = world.player(walker).copied() {
-            give_weapon_to_ps_akimbo(&mut next, weapon, akimbo);
-
-            if let Some(facts) = world.combat_facts_for(weapon) {
-                let hand = weapon_iw4::spawn_weapon_hand(weapon, &facts, true);
-                crate::combat::raise_given_weapon(&mut next, weapon, &hand);
-                next.weaponstate_primary = hand.weaponstate;
-                next.weapon_time = hand.weapon_time;
-                next.weapon_delay = hand.weapon_delay;
-                next.weap_anim = hand.weap_anim;
-                next.weaponstate_secondary = hand.weaponstate;
-                next.weapon_time_secondary = hand.weapon_time;
-                next.weapon_delay_secondary = hand.weapon_delay;
-                next.weap_anim_secondary = hand.weap_anim;
-            }
-            set_ammo_on_ps(
-                world,
-                &mut next,
+            // Acquisition and selection are distinct. The client selects a
+            // pickup it can cancel; an empty-handed picker is switched here.
+            crate::world::inventory_add_weapon(&mut next, weapon, akimbo);
+            weapon_iw4::set_weapon_model_for_held(
+                &next.weapons,
+                &mut next.weapon_data,
                 weapon,
-                item.clip_r,
-                item.clip_l,
-                item.stock,
+                item.state.weapon_model,
             );
+            WeaponAmmo {
+                clip_r: item.clip_r,
+                clip_l: item.clip_l,
+                stock: item.stock,
+            }
+            .pickup_new_to_player(world, &mut next, weapon);
+            if let Some(alt) = item.alternate {
+                WeaponAmmo {
+                    clip_r: alt.clip_r,
+                    clip_l: alt.clip_l,
+                    stock: alt.stock,
+                }
+                .pickup_new_to_player(world, &mut next, alt.weapon);
+            }
+            let empty_handed = next.weapon == 0;
             if let Some(slot) = world.player_mut(walker) {
                 *slot = next;
+            }
+            if empty_handed {
+                crate::script_player::switch_to_weapon(world, walker, weapon);
             }
         }
     }
     let next = world.player(walker).copied().expect("picker exists");
-    let (clip, _, stock) = ammo_from_ps(world, &next, weapon);
+    let WeaponAmmo {
+        clip_r: clip,
+        stock,
+        ..
+    } = WeaponAmmo::from_player(world, &next, weapon);
     {
         let meta = world.client_meta_mut(walker);
-        meta.ammo_by_weapon
-            .retain(|(id, _, _)| next.weapons.contains(&(*id as i32)));
-        meta.taped_mag_spent
-            .retain(|id| next.weapons.contains(&(*id as i32)));
-        meta.set_ammo(weapon, clip, stock);
-        meta.mirror_held_ammo(next.weapon);
+        meta.weapon_carry
+            .sync_pickup_ammo(&next, weapon, clip, stock);
     }
-    if !already_has {
+    if !already_has && next.weapon == 0 {
         let meta = world.client_meta_mut(walker);
-        meta.set_quick_reload_ready(weapon, true);
-        meta.weapon_shot_count = 0;
-        meta.burst_latch = false;
-        meta.burst_latch_secondary = false;
-        meta.rechamber_pending = false;
-        meta.rechamber_pending_secondary = false;
-        meta.pending_brass = [None; 2];
+        meta.weapon_carry.set_quick_reload_ready(weapon, true);
+        meta.weapon_carry.weapon_shot_count = 0;
+        meta.weapon_carry.burst_latch = false;
+        meta.weapon_carry.burst_latch_secondary = false;
+        meta.weapon_carry.rechamber_pending = false;
+        meta.weapon_carry.rechamber_pending_secondary = false;
+        meta.weapon_carry.pending_brass = [None; 2];
     }
-    world.item_pickups_mut().push(ItemPickupRecord {
+    world.record_item_pickup(ItemPickupRecord {
         picker: walker.0 as i32,
         weapon,
         from_entnum: item.state.number,
@@ -714,6 +807,7 @@ fn grab_number(world: &mut FrameWorld, walker: ClientId, number: i32) {
         stock: if already_has { taken } else { item.stock },
         swapped_entnum,
         picker_pm_type,
+        ..Default::default()
     });
     let tick = Tick((world.entity_kernel().level_time_ms() / 50) as u32);
     world.push_entity_event(
@@ -728,7 +822,9 @@ fn grab_number(world: &mut FrameWorld, walker: ClientId, number: i32) {
             ..Default::default()
         },
     );
-    perf::pickup(picker_pm_type);
+    perf::instant!("pickup", "iw4l.sim", |ctx| {
+        ctx.arg("picker_pm_type", i64::from(picker_pm_type));
+    });
 }
 
 fn grab_scavenger(world: &mut FrameWorld, walker: ClientId, number: i32) {
@@ -744,7 +840,7 @@ fn grab_scavenger(world: &mut FrameWorld, walker: ClientId, number: i32) {
     let picker_pm_type = ps.pm_type;
     let weapon = u32::try_from(item.state.index).unwrap_or(0);
     world.despawn_dropped_item(number);
-    world.item_pickups_mut().push(ItemPickupRecord {
+    world.record_item_pickup(ItemPickupRecord {
         picker: walker.0 as i32,
         weapon,
         from_entnum: item.state.number,
@@ -753,8 +849,11 @@ fn grab_scavenger(world: &mut FrameWorld, walker: ClientId, number: i32) {
         stock: 0,
         swapped_entnum: ENTITYNUM_NONE,
         picker_pm_type,
+        ..Default::default()
     });
-    perf::pickup(picker_pm_type);
+    perf::instant!("pickup", "iw4l.sim", |ctx| {
+        ctx.arg("picker_pm_type", i64::from(picker_pm_type));
+    });
 }
 
 fn drop_current_primary_at(
@@ -767,34 +866,17 @@ fn drop_current_primary_at(
     let Some(ps) = world.player(walker).copied() else {
         return ENTITYNUM_NONE;
     };
-    let (clip_r, clip_l, stock) = ammo_from_ps(world, &ps, weapon);
-    let pos = Trajectory {
-        tr_type: TR_STATIONARY,
-        tr_time: 0,
-        tr_duration: 0,
-        tr_delta: [0.0; 3],
-        tr_base: origin,
-    };
-    let apos = Trajectory {
-        tr_type: TR_STATIONARY,
-        tr_time: 0,
-        tr_duration: 0,
-        tr_delta: [0.0; 3],
-        tr_base: dropped_angles(world, weapon, angles[1]),
-    };
+    let ammo = WeaponAmmo::from_player(world, &ps, weapon);
+    let angles = dropped_angles(world, weapon, angles[1]);
     let entnum = push_dropped_item(
         world,
         weapon,
-        origin,
-        pos,
-        apos,
+        DropPlacement::Resting { origin, angles },
         walker.0 as i32,
-        clip_r,
-        clip_l,
-        stock,
-        false,
+        ammo,
         false,
     );
+    preserve_dropped_model(world, entnum, &ps, weapon);
     if entnum == ENTITYNUM_NONE {
         return ENTITYNUM_NONE;
     }
@@ -828,7 +910,7 @@ fn projectile_pickup_ammo(
     walker: ClientId,
     ps: &PlayerState,
     projectile: &crate::ProjectileState,
-) -> Option<(i32, i32, i32)> {
+) -> Option<WeaponAmmo> {
     let weapon = projectile.weapon;
     if !ps.weapons.contains(&(weapon as i32)) {
         return None;
@@ -848,15 +930,31 @@ fn projectile_pickup_ammo(
     {
         return None;
     }
-    let (clip, left, stock) = ammo_from_ps(world, ps, weapon);
+    let WeaponAmmo {
+        clip_r: clip,
+        clip_l: left,
+        stock,
+    } = WeaponAmmo::from_player(world, ps, weapon);
     if facts.ballistic_blade {
         if ps.weapon != weapon && clip == 0 {
-            return Some((1, left, stock));
+            return Some(WeaponAmmo {
+                clip_r: 1,
+                clip_l: left,
+                stock,
+            });
         }
         let combat = world.combat_facts_for(weapon)?;
-        (stock < combat.max_ammo).then_some((clip, left, stock + 1))
+        (stock < combat.max_ammo).then_some(WeaponAmmo {
+            clip_r: clip,
+            clip_l: left,
+            stock: stock + 1,
+        })
     } else {
-        (clip < facts.clip_size.max(1)).then_some((clip + 1, left, stock))
+        (clip < facts.clip_size.max(1)).then_some(WeaponAmmo {
+            clip_r: clip + 1,
+            clip_l: left,
+            stock,
+        })
     }
 }
 
@@ -871,17 +969,26 @@ fn grab_projectile(world: &mut FrameWorld, walker: ClientId, number: i32, tick: 
         return;
     }
     let weapon = projectile.weapon;
-    let Some((clip, left, stock)) = projectile_pickup_ammo(world, walker, &ps, &projectile) else {
+    let Some(ammo) = projectile_pickup_ammo(world, walker, &ps, &projectile) else {
         return;
     };
-    let (old_clip, _, old_stock) = ammo_from_ps(world, &ps, weapon);
-    set_ammo_on_ps(world, &mut ps, weapon, clip, left, stock);
+    let WeaponAmmo {
+        clip_r: clip,
+        stock,
+        ..
+    } = ammo;
+    let WeaponAmmo {
+        clip_r: old_clip,
+        stock: old_stock,
+        ..
+    } = WeaponAmmo::from_player(world, &ps, weapon);
+    ammo.apply_to_player(world, &mut ps, weapon);
     *world.player_mut(walker).expect("picker exists") = ps;
     let meta = world.client_meta_mut(walker);
-    meta.set_ammo(weapon, clip, stock);
-    meta.mirror_held_ammo(ps.weapon);
+    meta.weapon_carry.set_ammo(weapon, clip, stock);
+    meta.weapon_carry.mirror_held_ammo(ps.weapon);
     world.despawn_projectile(number);
-    world.item_pickups_mut().push(ItemPickupRecord {
+    world.record_item_pickup(ItemPickupRecord {
         picker: walker.0 as i32,
         weapon,
         from_entnum: number,
@@ -890,11 +997,20 @@ fn grab_projectile(world: &mut FrameWorld, walker: ClientId, number: i32, tick: 
         stock: stock - old_stock,
         swapped_entnum: ENTITYNUM_NONE,
         picker_pm_type: ps.pm_type,
+        ..Default::default()
     });
+    let event = if world
+        .equipment_facts_for(weapon)
+        .is_some_and(|facts| facts.pickup != weapon_iw4::ProjectilePickup::AmmoUse)
+    {
+        entity_iw4::EntityEventKind::ITEM_PICKUP
+    } else {
+        entity_iw4::EntityEventKind::AMMO_PICKUP
+    };
     world.push_entity_event(
         tick,
         crate::EventAudience::All,
-        entity_iw4::EntityEventKind::AMMO_PICKUP,
+        event,
         crate::EntityEventPayload {
             number: walker.0 as i32,
             event_parm: weapon as i32,
@@ -903,7 +1019,10 @@ fn grab_projectile(world: &mut FrameWorld, walker: ClientId, number: i32, tick: 
             ..Default::default()
         },
     );
-    perf::pickup(ps.pm_type);
+    perf::instant!("pickup", "iw4l.sim", |ctx| {
+        let picker_pm_type: i32 = ps.pm_type;
+        ctx.arg("picker_pm_type", i64::from(picker_pm_type));
+    });
 }
 
 fn selected_item(world: &FrameWorld, walker: ClientId, ps: &PlayerState) -> Option<UseItem> {
@@ -945,7 +1064,7 @@ fn selected_item(world: &FrameWorld, walker: ClientId, ps: &PlayerState) -> Opti
             0.0
         };
         if world
-            .trace_world(eye, center, [0.0; 3], [0.0; 3], 0x11)
+            .trace_clip(eye, center, [0.0; 3], [0.0; 3], 0x11)
             .fraction
             < 1.0
         {
@@ -977,7 +1096,7 @@ fn selected_item(world: &FrameWorld, walker: ClientId, ps: &PlayerState) -> Opti
         let distance = delta.iter().map(|v| v * v).sum::<f32>().sqrt();
         if distance > 160.0
             || world
-                .trace_world(eye, projectile.origin, [0.0; 3], [0.0; 3], 0x11)
+                .trace_clip(eye, projectile.origin, [0.0; 3], [0.0; 3], 0x11)
                 .fraction
                 < 1.0
         {
@@ -1015,6 +1134,27 @@ pub(crate) fn phase_use_items(
             continue;
         };
         let selected = selected_item(world, id, &ps);
+        if let Some(item) = selected.filter(|item| item.projectile)
+            && ps.ground_entity_num != ENTITYNUM_NONE
+            && world
+                .equipment_facts_for(item.weapon)
+                .is_some_and(|facts| facts.pickup == weapon_iw4::ProjectilePickup::ItemTouch)
+            && world
+                .projectile_by_number(item.number)
+                .is_some_and(|projectile| {
+                    projectile
+                        .origin
+                        .iter()
+                        .zip(ps.origin)
+                        .map(|(a, b)| (a - b) * (a - b))
+                        .sum::<f32>()
+                        <= 50.0 * 50.0
+                })
+        {
+            grab_projectile(world, id, item.number, tick);
+            world.client_meta_mut(id).item_use_entity = None;
+            continue;
+        }
         let held = cmds.iter().any(|(client, bits)| {
             *client == id.0
                 && bits & (playerstate_iw4::buttons::USE | playerstate_iw4::buttons::USE_RELOAD)
@@ -1058,8 +1198,11 @@ pub(crate) fn phase_use_items(
         );
         let dual = selected.is_some_and(|item| {
             world
-                .combat_facts_for(item.weapon)
-                .is_some_and(|facts| facts.dual_wield)
+                .dropped_item_by_number(item.number)
+                .is_some_and(|item| item.dual_wield)
+                || world
+                    .combat_facts_for(item.weapon)
+                    .is_some_and(|facts| facts.dual_wield)
                 || gsc_give_weapon_is_akimbo(world.weapon_script_name(item.weapon))
         });
         if let Some(ps) = world.player_mut(id) {

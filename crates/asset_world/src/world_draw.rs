@@ -53,26 +53,23 @@ impl SurfacePass {
     }
 }
 
-pub fn surface_pass(
-    materials: &MaterialCatalog,
-    authored: Option<&AuthoredMaterial>,
-) -> SurfacePass {
+pub fn surface_pass(authored: Option<&AuthoredMaterial>) -> SurfacePass {
     let Some(material) = authored else {
         return SurfacePass::default();
     };
-    let state_bits_undecided = materials.agreed_draw_mode(material).is_none();
-    let Some(unlit) = materials.is_unlit(material) else {
+    let state_bits_undecided = material.agreed_draw_mode().is_none();
+    let Some(unlit) = material.is_unlit() else {
         return SurfacePass {
-            multiply: materials.is_multiply(material),
+            multiply: material.is_multiply(),
             unrouted: true,
             state_bits_undecided,
             ..SurfacePass::default()
         };
     };
     SurfacePass {
-        sky: materials.is_sky(material),
-        shadow_only: materials.is_shadowcaster(material),
-        multiply: materials.is_multiply(material),
+        sky: material.is_sky(),
+        shadow_only: material.is_shadowcaster(),
+        multiply: material.is_multiply(),
         unlit,
         unrouted: false,
         state_bits_undecided,
@@ -158,6 +155,7 @@ impl dpvs_iw4::BspSurfaceDrawFields for SurfaceDrawFields {
 
 #[derive(Clone, Debug)]
 pub struct DpvsWorldData {
+    pub generated_surfaces: Vec<crate::GeneratedSurfaceCells>,
     pub planes: Vec<CPlane>,
     pub nodes: Vec<u16>,
     pub cell_count: usize,
@@ -197,6 +195,7 @@ pub struct DpvsWorldData {
 impl DpvsWorldData {
     pub fn new(camera_ranges: CameraSurfRanges) -> Self {
         Self {
+            generated_surfaces: Vec::new(),
             planes: Vec::new(),
             nodes: Vec::new(),
             cell_count: 0,
@@ -221,7 +220,7 @@ impl DpvsWorldData {
         }
     }
 
-    pub(crate) fn checked(mut self) -> Result<Self, WorldMeshError> {
+    pub fn checked(mut self) -> Result<Self, WorldMeshError> {
         let mut cleared = 0usize;
         for (cell, nodes) in self.aabb_trees.iter().enumerate() {
             let table = BoundsTable::AabbNode { cell };
@@ -259,13 +258,13 @@ fn reject_negative_half(
 
 #[derive(Clone, Debug)]
 pub enum WorldVertexPayload {
-    Iw4(Vec<[u8; asset_iw4::size::GFX_WORLD_VERTEX]>),
-
-    Iw5(Vec<[u8; fastfile_iw5::size::GFX_WORLD_VERTEX]>),
-
-    T5(Vec<[u8; fastfile_t5::size::GFX_WORLD_VERTEX]>),
-    T6(Vec<[u8; asset_iw4::size::GFX_WORLD_VERTEX]>),
-    Unavailable { source_layout: &'static str },
+    Captured {
+        family: asset_core::FamilyId,
+        rows: Vec<[u8; asset_iw4::size::GFX_WORLD_VERTEX]>,
+    },
+    Unavailable {
+        source_layout: &'static str,
+    },
 }
 
 impl Default for WorldVertexPayload {
@@ -280,29 +279,23 @@ impl WorldVertexPayload {
     pub fn type2_stream0(
         &self,
     ) -> Result<&[[u8; asset_iw4::size::GFX_WORLD_VERTEX]], &'static str> {
-        const _: () =
-            assert!(asset_iw4::size::GFX_WORLD_VERTEX == fastfile_iw5::size::GFX_WORLD_VERTEX);
-        const _: () =
-            assert!(asset_iw4::size::GFX_WORLD_VERTEX == fastfile_t5::size::GFX_WORLD_VERTEX);
         match self {
-            Self::Iw4(rows) | Self::Iw5(rows) | Self::T5(rows) | Self::T6(rows) => Ok(rows),
+            Self::Captured { rows, .. } => Ok(rows),
             Self::Unavailable { source_layout } => Err(*source_layout),
         }
     }
 
     pub fn dump_kind(&self) -> &'static str {
         match self {
-            Self::Iw4(_) => "iw4",
-            Self::Iw5(_) => "iw5",
-            Self::T5(_) => "t5",
-            Self::T6(_) => "t6",
-            Self::Unavailable { source_layout } => *source_layout,
+            Self::Captured { family, .. } => family.as_str(),
+            Self::Unavailable { source_layout } => source_layout,
         }
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct WorldDraw {
+    pub space: asset_core::world_frame::SceneSpace,
     pub batches: Vec<WorldBatch>,
 
     pub sky_model: Option<crate::model_mesh::ModelMesh>,
@@ -365,6 +358,11 @@ pub struct WorldDraw {
 
     pub reflection_probes: Vec<WorldReflectionProbe>,
     pub dpvs: DpvsWorldData,
+
+    /// The other maps of a projectile_flight atlas appended to this one (`atlas_layer`).
+    pub atlas_layers: Vec<crate::AtlasLayer>,
+    /// The doors between the worlds of the atlas, world 0 being this map.
+    pub atlas_doors: Vec<crate::AtlasDoorPair>,
 
     pub outdoor_image_name: Option<String>,
 
@@ -502,7 +500,7 @@ pub struct WorldPrimaryLight {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CapturedLightDef {
-    pub namespace: crate::AssetNamespace,
+    pub namespace: crate::FamilyId,
     pub name: crate::AssetRef,
     pub attenuation_image_name: Option<String>,
     pub attenuation_width: Option<u16>,
@@ -644,7 +642,7 @@ impl std::fmt::Display for WorldLightmapGap {
     }
 }
 
-pub(crate) fn scatter_vertex_layer_type3(
+pub fn scatter_vertex_layer_type3(
     packed: &[u8],
     vertex_count: usize,
     first_vertex: &[u32],
@@ -685,6 +683,15 @@ pub fn build_world_draw(
     geometry: GfxWorldGeometry,
     materials: MaterialCatalog,
 ) -> Result<(WorldDraw, MaterialCatalog), WorldMeshError> {
+    build_world_draw_region(s, geometry, materials, None)
+}
+
+pub fn build_world_draw_region(
+    s: &ZoneStream<'_>,
+    geometry: GfxWorldGeometry,
+    materials: MaterialCatalog,
+    region: Option<crate::WorldRegion>,
+) -> Result<(WorldDraw, MaterialCatalog), WorldMeshError> {
     let (Some(vertices), Some(indices)) = (geometry.vertices, geometry.indices) else {
         return Err(WorldMeshError::NoGeometry);
     };
@@ -692,17 +699,62 @@ pub fn build_world_draw(
         return Err(WorldMeshError::NoGeometry);
     };
 
-    let mut packed_vertices = Vec::with_capacity(geometry.vertex_count);
-    let mut positions = Vec::with_capacity(geometry.vertex_count);
-    let mut normals = Vec::with_capacity(geometry.vertex_count);
-    let mut tangents = Vec::with_capacity(geometry.vertex_count);
-    let mut colors = Vec::with_capacity(geometry.vertex_count);
-    let mut texture_uvs = Vec::with_capacity(geometry.vertex_count);
-    let mut lightmap_uvs = Vec::with_capacity(geometry.vertex_count);
+    let triangle_mask = region
+        .map(|region| region.triangles(s, geometry))
+        .transpose()?;
+    let mut selected = triangle_mask
+        .as_ref()
+        .map(|rows| {
+            rows.iter()
+                .map(|row| row.iter().any(|keep| *keep))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| vec![true; geometry.surface_count]);
+    let mut used_vertices = vec![region.is_none(); geometry.vertex_count];
+    if let Some(mask) = &triangle_mask {
+        for (i, keep) in selected.iter_mut().enumerate() {
+            let surface = surfaces.at(i * s.layout(sz::GFX_SURFACE, 32));
+            let material = materials.material_index(surface.at(sz::gfx_surface::MATERIAL));
+            if material
+                .and_then(|i| materials.materials.get(i.get()))
+                .is_some_and(|m| surface_pass(Some(m)).sky)
+            {
+                *keep = false;
+            }
+            if !*keep {
+                continue;
+            }
+            let first = s.u32_at(surface, sz::gfx_surface::FIRST_VERTEX)? as usize;
+            let base = s.u32_at(surface, sz::gfx_surface::BASE_INDEX)? as usize;
+            for (triangle, keep) in mask[i].iter().enumerate() {
+                if !keep {
+                    continue;
+                }
+                for corner in 0..3 {
+                    let index =
+                        first + s.u16_at(indices, (base + triangle * 3 + corner) * 2)? as usize;
+                    used_vertices[index] = true;
+                }
+            }
+        }
+    }
+    let selected_vertex_count = used_vertices.iter().filter(|v| **v).count();
+    let mut vertex_remap = vec![0u32; geometry.vertex_count];
+    let mut packed_vertices = Vec::with_capacity(selected_vertex_count);
+    let mut positions = Vec::with_capacity(selected_vertex_count);
+    let mut normals = Vec::with_capacity(selected_vertex_count);
+    let mut tangents = Vec::with_capacity(selected_vertex_count);
+    let mut colors = Vec::with_capacity(selected_vertex_count);
+    let mut texture_uvs = Vec::with_capacity(selected_vertex_count);
+    let mut lightmap_uvs = Vec::with_capacity(selected_vertex_count);
     let mut min = [f32::INFINITY; 3];
     let mut max = [f32::NEG_INFINITY; 3];
 
     for i in 0..geometry.vertex_count {
+        if !used_vertices[i] {
+            continue;
+        }
+        vertex_remap[i] = positions.len() as u32;
         let v = vertices.at(i * sz::GFX_WORLD_VERTEX);
         let mut packed = [0u8; sz::GFX_WORLD_VERTEX];
         for (offset, byte) in packed.iter_mut().enumerate() {
@@ -739,16 +791,16 @@ pub fn build_world_draw(
     let mut unrouted_surfaces = 0usize;
     let mut undecided_state_bits_surfaces = 0usize;
 
-    for i in 0..geometry.surface_count {
+    for (i, &keep) in selected.iter().enumerate() {
         let surface = surfaces.at(i * s.layout(sz::GFX_SURFACE, 32));
-        let first_vertex = s.u32_at(surface, 4)? as usize;
-        let vertex_count = s.u16_at(surface, 8)? as usize;
-        let tri_count = s.u16_at(surface, 10)? as usize;
-        let base_index = s.u32_at(surface, 12)? as usize;
+        let first_vertex = s.u32_at(surface, sz::gfx_surface::FIRST_VERTEX)? as usize;
+        let vertex_count = s.u16_at(surface, sz::gfx_surface::VERTEX_COUNT)? as usize;
+        let tri_count = s.u16_at(surface, sz::gfx_surface::TRI_COUNT)? as usize;
+        let base_index = s.u32_at(surface, sz::gfx_surface::BASE_INDEX)? as usize;
         let lightmap_index = s.u8_at(surface, s.layout(20, 24))? as usize;
-        let material = materials.material_index(surface.at(16));
+        let material = materials.material_index(surface.at(sz::gfx_surface::MATERIAL));
         let authored = material.and_then(|index| materials.materials.get(index.get()));
-        let pass = crate::world_draw::surface_pass(&materials, authored);
+        let pass = crate::world_draw::surface_pass(authored);
         let is_sky = pass.sky;
         let is_shadowcaster = pass.shadow_only;
         if is_sky {
@@ -764,7 +816,7 @@ pub fn build_world_draw(
         surface_primary_lights.push(s.u8_at(surface, s.layout(22, 26))?);
         surface_reflection_probes.push(s.u8_at(surface, s.layout(21, 25))?);
         surface_draw_fields.push(SurfaceDrawFields {
-            first_vertex: first_vertex as u32,
+            first_vertex: vertex_remap.get(first_vertex).copied().unwrap_or(0),
             tri_count: tri_count as u16,
             base_index: base_index as u32,
             lightmap_index: lightmap_index.min(255) as u8,
@@ -781,37 +833,47 @@ pub fn build_world_draw(
         }
         let range_start = packed_indices.len() as u32;
 
-        if is_shadowcaster {
+        let count = if is_shadowcaster || !keep {
             skipped_shadowcaster_surfaces += 1;
-            surface_index_ranges.push((range_start, 0));
-            continue;
-        }
-
-        if first_vertex + vertex_count > geometry.vertex_count
+            0
+        } else if first_vertex + vertex_count > geometry.vertex_count
             || base_index + tri_count * 3 > geometry.index_count
         {
             skipped_surfaces += 1;
-            surface_index_ranges.push((range_start, 0));
-            continue;
-        }
-
-        let mut ok = true;
-        for t in 0..tri_count * 3 {
-            let local = s.u16_at(indices, (base_index + t) * 2)? as usize;
-            let absolute = first_vertex + local;
-            if absolute >= geometry.vertex_count {
-                skipped_surfaces += 1;
-                ok = false;
-                break;
-            }
-            packed_indices.push(absolute as u32);
-        }
-        let count = if ok {
-            packed_indices.len() as u32 - range_start
-        } else {
-            packed_indices.truncate(range_start as usize);
             0
+        } else {
+            let mut ok = true;
+            for t in 0..tri_count * 3 {
+                if triangle_mask.as_ref().is_some_and(|rows| !rows[i][t / 3]) {
+                    continue;
+                }
+                let local = s.u16_at(indices, (base_index + t) * 2)? as usize;
+                let absolute = first_vertex + local;
+                if absolute >= geometry.vertex_count {
+                    skipped_surfaces += 1;
+                    ok = false;
+                    break;
+                }
+                packed_indices.push(vertex_remap[absolute]);
+            }
+            if ok {
+                packed_indices.len() as u32 - range_start
+            } else {
+                packed_indices.truncate(range_start as usize);
+                0
+            }
         };
+        if region.is_some() {
+            let fields = &mut surface_draw_fields[i];
+            fields.base_index = range_start;
+            fields.tri_count = (count / 3) as u16;
+            fields.first_vertex = packed_indices
+                [range_start as usize..(range_start + count) as usize]
+                .iter()
+                .copied()
+                .min()
+                .unwrap_or(0);
+        }
         surface_index_ranges.push((range_start, count));
     }
 
@@ -830,7 +892,13 @@ pub fn build_world_draw(
         bounds: geometry.bounds.map(|bits| bits.map(f32::from_bits)),
     };
 
-    let lightmap = decode_lightmaps(s, geometry);
+    let needed_lightmaps: std::collections::HashSet<_> = selected
+        .iter()
+        .enumerate()
+        .filter(|(_, keep)| **keep)
+        .map(|(i, _)| surface_lightmap_indices[i] as usize)
+        .collect();
+    let lightmap = decode_lightmaps(s, geometry, region.map(|_| &needed_lightmaps));
     let surface_lightmapped: Vec<bool> = match &lightmap {
         Ok(pages) => authored_lightmapped
             .into_iter()
@@ -842,19 +910,23 @@ pub fn build_world_draw(
         Err(_) => vec![false; geometry.surface_count],
     };
     let (batches, surface_batch_ranges) = make_material_batches(
-        &positions,
-        &normals,
-        &tangents,
-        &colors,
-        &texture_uvs,
-        &lightmap_uvs,
+        WorldVertexStreams {
+            positions: &positions,
+            normals: &normals,
+            tangents: &tangents,
+            colors: &colors,
+            texture_uvs: &texture_uvs,
+            lightmap_uvs: &lightmap_uvs,
+        },
         &packed_indices,
-        &surface_index_ranges,
-        &surface_materials,
-        &surface_lightmapped,
-        &surface_lightmap_indices,
-        &surface_primary_lights,
-        &surface_reflection_probes,
+        WorldSurfaceStreams {
+            index_ranges: &surface_index_ranges,
+            materials: &surface_materials,
+            lightmapped: &surface_lightmapped,
+            lightmap_indices: &surface_lightmap_indices,
+            primary_lights: &surface_primary_lights,
+            reflection_probes: &surface_reflection_probes,
+        },
     );
 
     let dpvs = extract_dpvs(s, geometry)?;
@@ -876,11 +948,15 @@ pub fn build_world_draw(
 
     Ok((
         WorldDraw {
+            space: Default::default(),
             sky_model: None,
             batches,
             lightmap,
             stats,
-            packed_vertices: WorldVertexPayload::Iw4(packed_vertices),
+            packed_vertices: WorldVertexPayload::Captured {
+                family: asset_core::FamilyId::IW4,
+                rows: packed_vertices,
+            },
             vertex_layer: Vec::new(),
             surface_vertex_layer: Vec::new(),
             surface_first_vertex: surface_draw_fields
@@ -914,6 +990,8 @@ pub fn build_world_draw(
             shadow_geometry,
             reflection_probes,
             dpvs,
+            atlas_layers: Vec::new(),
+            atlas_doors: Vec::new(),
             outdoor_image_name,
             outdoor_image: None,
             outdoor_lookup: geometry.outdoor_lookup,
@@ -947,22 +1025,27 @@ struct BatchBuilder {
     indices: Vec<u32>,
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn make_material_batches(
-    positions: &[[f32; 3]],
-    normals: &[[f32; 3]],
-    tangents: &[[f32; 4]],
-    colors: &[[f32; 4]],
-    texture_uvs: &[[f32; 2]],
-    lightmap_uvs: &[[f32; 2]],
+pub fn make_material_batches(
+    vertices: WorldVertexStreams<'_>,
     packed_indices: &[u32],
-    surface_index_ranges: &[(u32, u32)],
-    surface_materials: &[Option<usize>],
-    surface_lightmapped: &[bool],
-    surface_lightmap_indices: &[u8],
-    surface_primary_lights: &[u8],
-    surface_reflection_probes: &[u8],
+    surfaces: WorldSurfaceStreams<'_>,
 ) -> (Vec<WorldBatch>, Vec<(usize, u32, u32)>) {
+    let WorldVertexStreams {
+        positions,
+        normals,
+        tangents,
+        colors,
+        texture_uvs,
+        lightmap_uvs,
+    } = vertices;
+    let WorldSurfaceStreams {
+        index_ranges: surface_index_ranges,
+        materials: surface_materials,
+        lightmapped: surface_lightmapped,
+        lightmap_indices: surface_lightmap_indices,
+        primary_lights: surface_primary_lights,
+        reflection_probes: surface_reflection_probes,
+    } = surfaces;
     let mut batch_by_key = HashMap::new();
     let mut builders: Vec<BatchBuilder> = Vec::new();
     let mut surface_batches = Vec::with_capacity(surface_index_ranges.len());
@@ -1081,20 +1164,20 @@ fn decode_brush_models(
     for i in 0..geometry.model_count {
         let model = models.at(i * sz::GFX_BRUSH_MODEL);
         surfs.push(GfxBrushModelSurfs {
-            surface_count: s.u16_at(model, 52)?,
-            start_surf: s.u16_at(model, 54)?,
-            surface_count_no_decal: s.u16_at(model, 56)?,
+            surface_count: s.u16_at(model, sz::gfx_brush_model::SURFACE_COUNT)?,
+            start_surf: s.u16_at(model, sz::gfx_brush_model::START_SURF)?,
+            surface_count_no_decal: s.u16_at(model, sz::gfx_brush_model::SURFACE_COUNT_NO_DECAL)?,
         });
         bounds.push(GfxBrushModelBounds {
             mid: [
-                s.f32_at(model, 24)?,
-                s.f32_at(model, 28)?,
-                s.f32_at(model, 32)?,
+                s.f32_at(model, sz::gfx_brush_model::BOUNDS_MID)?,
+                s.f32_at(model, sz::gfx_brush_model::BOUNDS_MID + 4)?,
+                s.f32_at(model, sz::gfx_brush_model::BOUNDS_MID + 8)?,
             ],
             half: [
-                s.f32_at(model, 36)?,
-                s.f32_at(model, 40)?,
-                s.f32_at(model, 44)?,
+                s.f32_at(model, sz::gfx_brush_model::BOUNDS_HALF)?,
+                s.f32_at(model, sz::gfx_brush_model::BOUNDS_HALF + 4)?,
+                s.f32_at(model, sz::gfx_brush_model::BOUNDS_HALF + 8)?,
             ],
         });
     }
@@ -1112,8 +1195,10 @@ pub fn brush_model_vertex_centroid(
     let last = end.min(surface_index_ranges.len());
     let mut acc = [0.0f32; 3];
     let mut n = 0u32;
-    for surf in start..last {
-        let (index_start, index_count) = surface_index_ranges[surf];
+    for (_surf, surface_index_ranges_entry) in
+        surface_index_ranges[..last].iter().enumerate().skip(start)
+    {
+        let (index_start, index_count) = *surface_index_ranges_entry;
         let begin = index_start as usize;
         let stop = begin.saturating_add(index_count as usize);
         for &raw in packed_indices.get(begin..stop)? {
@@ -1134,6 +1219,7 @@ pub fn brush_model_vertex_centroid(
 fn decode_lightmaps(
     s: &ZoneStream<'_>,
     geometry: GfxWorldGeometry,
+    needed: Option<&std::collections::HashSet<usize>>,
 ) -> Result<Vec<Option<WorldLightmap>>, WorldLightmapGap> {
     if geometry.lightmap_count == 0 {
         return Err(WorldLightmapGap::Missing);
@@ -1145,6 +1231,10 @@ fn decode_lightmaps(
     let mut decoded = 0usize;
     let mut last_err = None;
     for i in 0..retain {
+        if needed.is_some_and(|needed| !needed.contains(&i)) {
+            pages.push(None);
+            continue;
+        }
         let pair = geometry.lightmaps[i];
         match decode_lightmap_pair(s, pair.primary, pair.secondary) {
             Ok(page) => {
@@ -1178,7 +1268,7 @@ fn decode_lightmap_images(
     primary: fastfile_iw4::GfxImageGeometry,
     image: fastfile_iw4::GfxImageGeometry,
 ) -> Result<WorldLightmap, WorldLightmapGap> {
-    if image.width == 0 || image.height < 2 || image.height % 2 != 0 || image.depth != 1 {
+    if image.width == 0 || image.height < 2 || !image.height.is_multiple_of(2) || image.depth != 1 {
         return Err(WorldLightmapGap::InvalidDimensions {
             width: image.width,
             height: image.height,
@@ -1312,7 +1402,7 @@ fn decode_lightmap_images(
     })
 }
 
-pub(crate) fn secondary_page_payloads(
+pub fn secondary_page_payloads(
     source: &[u8],
     row_bytes: usize,
     page_height: usize,
@@ -1326,15 +1416,17 @@ pub(crate) fn secondary_page_payloads(
     let mut ambient = source[..page_bytes].to_vec();
     let mut directional = source[page_bytes..].to_vec();
     for pixel in ambient
-        .chunks_exact_mut(4)
-        .chain(directional.chunks_exact_mut(4))
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .chain(directional.as_chunks_mut::<4>().0.iter_mut())
     {
         pixel.swap(0, 2);
     }
     Ok((ambient, directional))
 }
 
-pub(crate) fn primary_mask_payload(
+pub fn primary_mask_payload(
     source: &[u8],
     width: u16,
     height: u16,
@@ -1459,7 +1551,7 @@ pub fn capture_light_defs(
                         .and_then(|p| s.cstr(p).ok().map(str::to_owned))
                 });
             Some(CapturedLightDef {
-                namespace: crate::AssetNamespace::Iw4,
+                namespace: crate::FamilyId::IW4,
                 name,
                 attenuation_image_name,
                 attenuation_width: def.attenuation_width,
@@ -1519,7 +1611,7 @@ pub fn resolve_primary_light_attenuation(
 
 pub fn resolve_outdoor_image(
     world_ptr_name: Option<&str>,
-    map_namespace: crate::AssetNamespace,
+    map_namespace: crate::FamilyId,
     catalog: &MaterialDefinitions,
 ) -> (Option<usize>, &'static str) {
     if let Some(name) = world_ptr_name
@@ -1683,13 +1775,10 @@ fn read_cell_reflection_probes(
     if count == 0 {
         return Ok(list);
     }
-    match s.ptr_at(cell, ptr_off)? {
-        ZonePtr::Offset(arr) => {
-            for k in 0..count {
-                list.push(s.u8_at(arr, k)?);
-            }
+    if let ZonePtr::Offset(arr) = s.ptr_at(cell, ptr_off)? {
+        for k in 0..count {
+            list.push(s.u8_at(arr, k)?);
         }
-        _ => {}
     }
     Ok(list)
 }
@@ -2000,4 +2089,128 @@ fn extract_dpvs(s: &ZoneStream<'_>, g: GfxWorldGeometry) -> Result<DpvsWorldData
     }
 
     out.checked()
+}
+
+pub struct WorldVertexStreams<'a> {
+    pub positions: &'a [[f32; 3]],
+    pub normals: &'a [[f32; 3]],
+    pub tangents: &'a [[f32; 4]],
+    pub colors: &'a [[f32; 4]],
+    pub texture_uvs: &'a [[f32; 2]],
+    pub lightmap_uvs: &'a [[f32; 2]],
+}
+
+pub struct WorldSurfaceStreams<'a> {
+    pub index_ranges: &'a [(u32, u32)],
+    pub materials: &'a [Option<usize>],
+    pub lightmapped: &'a [bool],
+    pub lightmap_indices: &'a [u8],
+    pub primary_lights: &'a [u8],
+    pub reflection_probes: &'a [u8],
+}
+
+pub fn make_nonempty_material_batches(
+    vertices: WorldVertexStreams<'_>,
+    packed_indices: &[u32],
+    surfaces: WorldSurfaceStreams<'_>,
+) -> (Vec<WorldBatch>, Vec<(usize, u32, u32)>) {
+    let WorldVertexStreams {
+        positions,
+        normals,
+        tangents,
+        colors,
+        texture_uvs,
+        lightmap_uvs,
+    } = vertices;
+    let WorldSurfaceStreams {
+        index_ranges: surface_index_ranges,
+        materials: surface_materials,
+        lightmapped: surface_lightmapped,
+        lightmap_indices: surface_lightmap_indices,
+        primary_lights: surface_primary_lights,
+        reflection_probes: surface_reflection_probes,
+    } = surfaces;
+    let mut builders: Vec<BatchBuilder> = Vec::new();
+    let mut surface_batch_ranges = Vec::with_capacity(surface_index_ranges.len());
+
+    for (i, &(start, count)) in surface_index_ranges.iter().enumerate() {
+        if count == 0 {
+            surface_batch_ranges.push((0, 0, 0));
+            continue;
+        }
+        let material = surface_materials.get(i).copied().flatten();
+        let lightmapped = surface_lightmapped.get(i).copied().unwrap_or(false);
+        let lightmap_index = surface_lightmap_indices[i];
+        let primary_light_index = surface_primary_lights.get(i).copied().unwrap_or(0);
+        let reflection_probe_index = surface_reflection_probes.get(i).copied().unwrap_or(0);
+
+        let batch_index = builders
+            .iter()
+            .position(|batch| {
+                batch.material == material
+                    && batch.lightmapped == lightmapped
+                    && batch.lightmap_index == lightmap_index
+                    && batch.primary_light_index == primary_light_index
+                    && batch.reflection_probe_index == reflection_probe_index
+            })
+            .unwrap_or_else(|| {
+                let index = builders.len();
+                builders.push(BatchBuilder {
+                    material,
+                    lightmapped,
+                    lightmap_index,
+                    primary_light_index,
+                    reflection_probe_index,
+                    ..Default::default()
+                });
+                index
+            });
+
+        let batch = &mut builders[batch_index];
+        let local_start = batch.indices.len() as u32;
+        for &absolute in &packed_indices[start as usize..(start + count) as usize] {
+            let local = *batch.vertices.entry(absolute).or_insert_with(|| {
+                let local = batch.positions.len() as u32;
+                batch.positions.push(positions[absolute as usize]);
+                batch.normals.push(normals[absolute as usize]);
+                batch.tangents.push(tangents[absolute as usize]);
+                batch.colors.push(colors[absolute as usize]);
+                batch.texture_uvs.push(texture_uvs[absolute as usize]);
+                batch.lightmap_uvs.push(lightmap_uvs[absolute as usize]);
+                local
+            });
+            batch.indices.push(local);
+        }
+        let local_count = batch.indices.len() as u32 - local_start;
+        surface_batch_ranges.push((batch_index, local_start, local_count));
+    }
+
+    let batches = builders
+        .into_iter()
+        .map(|batch| {
+            let packed_indices = batch.indices.clone();
+            let mut mesh = Mesh::new(
+                PrimitiveTopology::TriangleList,
+                RenderAssetUsages::default(),
+            );
+            mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, batch.positions);
+            mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, batch.normals);
+            mesh.insert_attribute(Mesh::ATTRIBUTE_TANGENT, batch.tangents);
+            mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, batch.colors);
+            mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, batch.texture_uvs);
+            mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, batch.lightmap_uvs);
+            mesh.insert_indices(Indices::U32(batch.indices));
+            WorldBatch {
+                mesh,
+                packed_indices,
+                material: batch.material,
+                lightmapped: batch.lightmapped,
+                lightmap_index: batch.lightmap_index,
+                primary_light_index: batch.primary_light_index,
+                reflection_probe_index: batch.reflection_probe_index,
+            }
+        })
+        .collect();
+
+    (batches, surface_batch_ranges)
 }

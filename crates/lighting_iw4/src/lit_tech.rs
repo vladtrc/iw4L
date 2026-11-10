@@ -108,3 +108,15 @@ const fn contains_u8(row: &[u8; 7], tech: u8) -> bool {
     }
     false
 }
+
+/// Keep the directional-light and DFOG/instancing row, selecting the native
+/// no-shadow column. Local-light and non-lit techniques are unchanged.
+pub const fn without_sun_shadow(tech: u8) -> u8 {
+    match tech {
+        0x0d => 0x0b,
+        0x0e => 0x0c,
+        0x1b => 0x19,
+        0x1c => 0x1a,
+        _ => tech,
+    }
+}

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use crate::CueFailure;
 
@@ -9,8 +9,6 @@ const FUTURE_TICKS: u32 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct AudioEventId {
-    pub world: Option<u64>,
-    pub timeline: u64,
     pub emitter: u64,
     pub occurrence: AudioOccurrence,
 }
@@ -47,15 +45,12 @@ pub struct AudioEvent {
 
 impl AudioEvent {
     pub fn from_entity(
-        generation: frame::WorldStamp,
         entity: bevy::prelude::Entity,
         event: &net::DispatchedEntityEvent,
         ordinal: u16,
     ) -> Self {
         Self {
             id: AudioEventId {
-                world: event.world.0,
-                timeline: event.timeline,
                 emitter: entity.to_bits(),
                 occurrence: AudioOccurrence::Entity {
                     domain: event.domain,
@@ -65,9 +60,8 @@ impl AudioEvent {
                 },
             },
             tick: event.tick.0,
-            fire_cause: (generation == event.world
-                && entity_iw4::entity_event_action(event.event)
-                    == Ok(entity_iw4::EntityEventAction::WeaponFire))
+            fire_cause: (entity_iw4::entity_event_action(event.event)
+                == Ok(entity_iw4::EntityEventAction::WeaponFire))
             .then_some(event.payload.fire_cause)
             .flatten()
             .map(|cause| (cause, ordinal)),
@@ -75,16 +69,12 @@ impl AudioEvent {
     }
 
     pub fn from_animation(
-        generation: frame::WorldStamp,
-        timeline: u64,
         client: sim::ClientId,
         tick: sim::Tick,
         marker: AnimationMarkerId,
     ) -> Self {
         Self {
             id: AudioEventId {
-                world: generation.0,
-                timeline,
                 emitter: u64::from(client.0),
                 occurrence: AudioOccurrence::Animation(marker),
             },
@@ -97,9 +87,8 @@ impl AudioEvent {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct EventContext {
     pub local_life: Option<(u32, u32)>,
-    pub world: u64,
-    pub timeline: u64,
     pub tick: u32,
+    pub killcam: bool,
     pub owner_tick: Option<u32>,
 }
 
@@ -132,7 +121,6 @@ pub(crate) struct EventJournal {
     available: bool,
     context: Option<EventContext>,
     accepted: HashMap<AudioEventId, u32>,
-    fire: HashMap<(sim::FireCause, u16, u8), (AudioEvent, Arc<crate::cue::CueState>)>,
 }
 
 impl EventJournal {
@@ -141,129 +129,58 @@ impl EventJournal {
             available: false,
             context: None,
             accepted: HashMap::with_capacity(EVENT_CAPACITY),
-            fire: HashMap::with_capacity(EVENT_CAPACITY),
         }
     }
 
     pub(crate) fn advance(&mut self, context: Option<EventContext>) {
         self.available = context.is_some();
-        if !self.available {
+        let Some(mut new) = context else {
+            return;
+        };
+        let Some(old) = self.context else {
+            self.context = Some(new);
+            return;
+        };
+        let rewound = new.tick.wrapping_sub(old.tick) >= 1 << 31;
+        if new.killcam != old.killcam || (new.killcam && rewound) {
+            // Archive playback is another occurrence of the same events.
+            // Its clock must rewind, and live-event deduplication must not
+            // silence the replay's shot, impacts or explosion.
+            self.accepted.clear();
+            self.context = Some(new);
             return;
         }
-        let same_timeline = self
-            .context
-            .zip(context)
-            .is_some_and(|(old, new)| old.world == new.world && old.timeline == new.timeline);
-        if !same_timeline {
-            self.accepted.clear();
-            self.fire.clear();
-            self.context = context;
-        } else if let (Some(old), Some(mut new)) = (self.context, context) {
-            if new.tick.wrapping_sub(old.tick) >= 1 << 31 {
-                new.tick = old.tick;
-            }
-            self.context = Some(new);
-            if new.tick == old.tick && new.owner_tick == old.owner_tick {
-                return;
-            }
-            self.accepted.retain(|id, tick| {
-                let age = new.tick_for(*id).wrapping_sub(*tick);
-                age < EVENT_WINDOW_TICKS || age >= 1 << 31
-            });
-            self.fire.retain(|_, (event, _)| {
-                let age = new.tick_for(event.id).wrapping_sub(event.tick);
-                (!(EVENT_WINDOW_TICKS..1 << 31).contains(&age))
-                    && event.fire_cause.is_none_or(|(cause, _)| {
-                        new.local_life.is_none_or(|(client, life)| {
-                            cause.client.0 != client || cause.life.0 == life
-                        })
-                    })
-            });
+        if rewound {
+            new.tick = old.tick;
         }
+        self.context = Some(new);
+        if new.tick == old.tick && new.owner_tick == old.owner_tick {
+            return;
+        }
+        self.accepted.retain(|id, tick| {
+            let age = new.tick_for(*id).wrapping_sub(*tick);
+            !(EVENT_WINDOW_TICKS..1 << 31).contains(&age)
+        });
     }
 
     pub(crate) fn current(&self, event: Option<AudioEvent>) -> bool {
         event.is_none_or(|event| {
             self.available
                 && self.context.is_some_and(|context| {
-                    event.id.world == Some(context.world)
-                        && event.id.timeline == context.timeline
-                        && event.fire_cause.is_none_or(|(cause, _)| {
-                            context.local_life.is_none_or(|(client, life)| {
-                                cause.client.0 != client || cause.life.0 == life
-                            })
+                    event.fire_cause.is_none_or(|(cause, _)| {
+                        context.local_life.is_none_or(|(client, life)| {
+                            cause.client.0 != client || cause.life.0 == life
                         })
-                        && match event.id.occurrence {
-                            AudioOccurrence::Entity { .. } => true,
-                            AudioOccurrence::Animation(marker) => {
-                                context.local_life.is_some_and(|(client, life)| {
-                                    u64::from(client) == event.id.emitter && life == marker.life
-                                })
-                            }
+                    }) && match event.id.occurrence {
+                        AudioOccurrence::Entity { .. } => true,
+                        AudioOccurrence::Animation(marker) => {
+                            context.local_life.is_some_and(|(client, life)| {
+                                u64::from(client) == event.id.emitter && life == marker.life
+                            })
                         }
+                    }
                 })
         })
-    }
-
-    pub(crate) fn fire_refused(
-        event: Option<AudioEvent>,
-        verdicts: &net::FireVerdictState,
-    ) -> bool {
-        event.is_some_and(|event| {
-            matches!(
-                event.id.occurrence,
-                AudioOccurrence::Entity {
-                    domain: net::EntityEventDomain::Predicted,
-                    ..
-                }
-            ) && event.fire_cause.is_some_and(|(cause, _)| {
-                verdicts.status(frame::WorldStamp(event.id.world), cause)
-                    == net::PredictedFireStatus::Refused
-            })
-        })
-    }
-
-    pub(crate) fn claim_fire(
-        &mut self,
-        event: Option<AudioEvent>,
-        state: &Arc<crate::cue::CueState>,
-        layer: u8,
-    ) -> Result<bool, CueFailure> {
-        let Some(event) = event else {
-            return Ok(true);
-        };
-        let Some((cause, ordinal)) = event.fire_cause else {
-            return Ok(true);
-        };
-        let key = (cause, ordinal, layer);
-        if let Some((_, pending)) = self.fire.get(&key) {
-            if Arc::ptr_eq(pending, state) {
-                return Ok(true);
-            }
-            if pending.playback.get().is_some_and(|instance| {
-                instance.has_reached(crate::render_core::InstanceStatus::Started)
-            }) {
-                return Err(CueFailure::DuplicateEvent);
-            }
-            let failed = pending.playback.get().is_some_and(|instance| {
-                instance.rejection().is_some()
-                    || instance.has_reached(crate::render_core::InstanceStatus::Retired)
-            }) || pending.primary_outcome().is_some_and(|outcome| {
-                matches!(
-                    outcome,
-                    crate::StartOutcome::Failed(_) | crate::StartOutcome::Suppressed(_)
-                )
-            });
-            if !failed {
-                return Ok(false);
-            }
-            self.fire.remove(&key);
-        }
-        if self.fire.len() == EVENT_CAPACITY {
-            return Err(CueFailure::EventBudget);
-        }
-        self.fire.insert(key, (event, state.clone()));
-        Ok(true)
     }
 
     pub(crate) fn accept(&mut self, event: Option<AudioEvent>) -> Result<(), CueFailure> {
@@ -282,7 +199,7 @@ impl EventJournal {
         }
         let context_tick = context.tick_for(id);
         let age = context_tick.wrapping_sub(event.tick);
-        if age >= EVENT_WINDOW_TICKS && age < 1 << 31 {
+        if (EVENT_WINDOW_TICKS..1 << 31).contains(&age) {
             return Err(CueFailure::StaleEvent);
         }
         if age >= 1 << 31 && event.tick.wrapping_sub(context_tick) > FUTURE_TICKS {

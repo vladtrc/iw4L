@@ -6,7 +6,7 @@ Rust libraries such as Bevy/wgpu/winit and the Windows allocator.
 
 | Interface | Creates data | Owns data | Valid until | Frees memory | Null | Size / error | Types / calling convention |
 |---|---|---|---|---|---|---|---|
-| `getenv` | Rust static key; C environment value | Rust key; C value | Key: process; value: environment change | C runtime; Rust only checks presence | Key: no; result: yes (absent) | Key ends in NUL; result checked | `c_char*`, C ABI |
+| `getenv` | Rust static CStr key; C environment value | Rust key; C value | Key: process; value: environment change | C runtime; Rust only checks presence | Key: no; result: yes (absent) | CStr guarantees NUL termination; result checked | `c_char*`, C ABI |
 | `malloc_trim` (Linux GNU) | No transferred buffer | Allocator heap | Call | Allocator releases free pages | No pointer | `size_t` pad, `int` status ignored (best effort) | `usize` / `c_int`, C ABI |
 | `sched_getaffinity` | Rust zeroed `cpu_set_t` | Rust stack | Call | Rust stack | No | `sizeof(cpu_set_t)`; failure becomes `None` before mask use | libc target types, C ABI |
 | `sched_setaffinity` | Rust populated `cpu_set_t` | Rust stack | Call | Rust stack | No | Same size; bootstrap checks status, load worker ignores it | libc target types, C ABI |
@@ -14,8 +14,8 @@ Rust libraries such as Bevy/wgpu/winit and the Windows allocator.
 | Perfetto category / track | Rust static categories; SDK descriptor `Vec` | Rust statics / SDK track | Emission; tracks retained in `OnceLock` | Rust / SDK | Required names and descriptors: no | NUL names; descriptor pointer + `size_t`; registration results checked for tracks | SDK `repr(C)` structs, C ABI |
 | Perfetto debug string | IW4L display string; SDK `CString`s | Rust / SDK `EventContext` | Synchronous emission returns | Rust drops SDK strings | Name/value: no | NUL terminated; interior NUL rendered as literal `\0` | SDK `const char*`, C ABI |
 | Perfetto config / heap buffer | Rust protobuf writer; C heap buffer | Rust writer; SDK owns C handle; Rust output `Vec` | Writer outlives buffer; config borrowed during setup | SDK C destroy; Rust drops `Vec` | Required handles: no | Written size = output length; setup parses during call | SDK pointer + `size_t`, C ABI |
-| Perfetto trace read | C chunk; SDK boxed Rust callback | C chunk; Rust callback and copied bytes | Chunk: callback only; callback: final chunk | C chunk owner; Rust box on `has_more=false` | C can return null/0; SDK 1.1.1 unconditionally forms a slice | Pointer + `size_t` + `bool`; IW4L copies each chunk | SDK C callback types match; null contract differs |
-| Perfetto flush / session | C session; Rust wrapper | Rust wrapper owns opaque C handle | Until SDK drop; process static retains it | SDK calls C destroy on drop | Create may return null, checked | Timeout is `uint32_t`; SDK 1.1.1 discards C flush `bool` status | C ABI and scalar types match |
+| Perfetto trace read | C chunk; Rust stack callback sink | C chunk; Rust mutex and copied bytes | Chunk: callback only; sink: blocking read returns | C chunk owner; Rust owns output Vec | Empty chunks return before slice construction; null with nonzero size is refused | Pointer + `size_t` + `bool`; IW4L copies nonempty chunks under the sink mutex | Direct SDK C ABI; blocking call waits for the final callback |
+| Perfetto flush / session | C session; Rust RecordingSession | Rust NonNull handle owns C session | Until RecordingSession drop; process static retains it | C destroy on Rust drop | Create may return null, checked | Timeout checked to fit `uint32_t`; false flush status returns an error | Direct SDK C ABI and scalar types match |
 | Global allocator adapter | System / Windows MiMalloc | Rust allocation consumer | Until deallocation or successful reallocation | Same backing allocator with matching `Layout` | Allocation can fail with null | Layout and new size forwarded unchanged | Rust `GlobalAlloc`; native ABI handled by backing library |
 
 All dynamic debug strings in `crates/perf/src/event.rs` pass through `str_arg`.
@@ -35,3 +35,14 @@ Adapter display examples:
 | `"a\0b"` | `a\0b` with a visible backslash and digit zero |
 | `"\0a\0"`, `"\0\0"` | every NUL rendered, including at the ends |
 | `"a\\0b"` | unchanged; display escaping is not a reversible encoding |
+
+The session adapter bypasses the SDK's Rust trace-read trampoline, which forms a
+slice from null even for a zero-length chunk, and preserves the C flush status.
+Perfetto permits session operations on application threads; the Rust session is
+Send and its process owner serializes access through a mutex. Blocking methods
+are never invoked from Perfetto service callbacks. Captured bytes survive an I/O
+failure for retry, and a flush is marked complete only after both trace and
+manifest are written. Capture errors remain errors on subsequent flush attempts.
+The callback reserves space before copying each chunk; allocation or capacity
+failure becomes a capture error. After the first refused chunk, later chunks
+are ignored rather than appended to an incomplete trace.

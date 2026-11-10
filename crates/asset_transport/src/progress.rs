@@ -254,7 +254,6 @@ impl StageSnapshot {
 /// running stage in it is measured against the same instant.
 #[derive(Clone, Debug)]
 pub struct LoadSnapshot {
-    pub request_id: u64,
     pub requested_at: Instant,
     pub now: Instant,
     pub canceled: bool,
@@ -465,12 +464,11 @@ pub struct LoadProgress(Arc<Inner>);
 
 impl Default for LoadProgress {
     fn default() -> Self {
-        Self::new(0)
+        Self::new()
     }
 }
 
 struct Inner {
-    request_id: u64,
     requested_at: Instant,
     slots: Mutex<Vec<Arc<StageSlot>>>,
     measurement: Mutex<LoadMeasurement>,
@@ -491,18 +489,13 @@ impl LoadProgress {
     /// A load request's own process. A new request takes a new one rather than
     /// clearing this one: tasks from the map before it still hold handles into
     /// their own slots and must not be able to write into the next map's rows.
-    pub fn new(request_id: u64) -> Self {
+    pub fn new() -> Self {
         Self(Arc::new(Inner {
-            request_id,
             requested_at: Instant::now(),
             slots: Mutex::new(Vec::new()),
             measurement: Mutex::new(LoadMeasurement::default()),
             canceled: Arc::new(AtomicBool::new(false)),
         }))
-    }
-
-    pub fn request_id(&self) -> u64 {
-        self.0.request_id
     }
 
     /// The one origin the whole process is measured from. Milestones are
@@ -614,7 +607,6 @@ impl LoadProgress {
             Err(_) => Vec::new(),
         };
         LoadSnapshot {
-            request_id: self.0.request_id,
             requested_at: self.0.requested_at,
             now: Instant::now(),
             canceled: self.is_canceled(),

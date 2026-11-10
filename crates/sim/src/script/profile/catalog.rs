@@ -16,6 +16,8 @@ pub enum Owner {
     PlayerCommand,
     Helicopter,
     Vehicle,
+    Actor,
+    Sentient,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,17 +45,20 @@ impl Builtin {
 
 #[derive(Clone, Debug)]
 pub struct Catalog {
-    realm: crate::script::Realm,
+    realm: crate::script::FamilyId,
     names: BTreeMap<Namespace, BTreeMap<&'static str, Builtin>>,
 }
 impl Catalog {
     pub fn iw4() -> Self {
-        Self::from_list(crate::script::Realm::Iw4, super::iw4_catalog::IW4)
+        Self::from_list(crate::script::FamilyId::IW4, super::iw4_catalog::IW4)
     }
-    pub fn t5() -> Self {
-        Self::from_list(crate::script::Realm::T5, super::t5_catalog::T5)
+    pub fn iw4_campaign() -> Self {
+        Self::from_list(
+            crate::script::FamilyId::IW4,
+            super::iw4_campaign_catalog::IW4_CAMPAIGN,
+        )
     }
-    fn from_list(realm: crate::script::Realm, list: &[Builtin]) -> Self {
+    pub fn from_list(realm: crate::script::FamilyId, list: &[Builtin]) -> Self {
         let mut catalog = Self {
             realm,
             names: BTreeMap::new(),
@@ -63,7 +68,7 @@ impl Catalog {
         }
         catalog
     }
-    pub fn realm(&self) -> crate::script::Realm {
+    pub fn realm(&self) -> crate::script::FamilyId {
         self.realm
     }
     fn insert(&mut self, builtin: Builtin) {

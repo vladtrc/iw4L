@@ -1,0 +1,5 @@
+pub const LEFTOVER_IW5_CODE_BASE: u16 = 0x100;
+pub const IW5_CODE_EYEOFFSET: u16 = 0x8;
+pub const IW5_CODE_COLOR_SATURATION_R: u16 = 0x9;
+pub const IW5_CODE_COLOR_SATURATION_G: u16 = 0xa;
+pub const IW5_CODE_COLOR_SATURATION_B: u16 = 0xb;

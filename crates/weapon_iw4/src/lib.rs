@@ -1,8 +1,20 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+extern crate alloc;
+mod event_apply;
+pub use event_apply::{FiredWeapon, WeaponAction, WeaponEventInstance, mark_weapon_used};
+mod carry;
+pub use carry::{WeaponCarry, pickup_owned_ammo};
+mod pm_weapon;
+pub use playerstate_iw4::PendingBrass;
+pub use pm_weapon::{
+    AIRDROP_MARKER_WEAPON, FireInputs, WeaponAnimation, WeaponEvent, WeaponFacts, WeaponStep,
+    pm_weapon,
+};
+
 mod equipment;
-pub use equipment::{EquipmentRuntimeFacts, WEAPCLASS_THROWINGKNIFE};
+pub use equipment::{EquipmentRuntimeFacts, ProjectilePickup, WEAPCLASS_THROWINGKNIFE};
 
 mod ads_allow;
 mod ads_overlay;
@@ -10,10 +22,12 @@ mod ammo;
 pub mod event_sound;
 mod fire_sound;
 mod fire_weapon;
+mod item_ammo;
 mod kick;
 mod melee;
 mod offhand;
 mod penetration;
+pub use item_ammo::WeaponItemAmmoFacts;
 mod placement;
 mod player_anim_type;
 mod reload;
@@ -67,11 +81,11 @@ pub use kick::{
     weapon_fire_recoil,
 };
 pub use melee::{
-    BUTTON_MELEE, MELEE_TRACE_OFFSETS, MeleeChargeState, MeleeWeaponFacts,
+    BUTTON_MELEE, MELEE_TRACE_OFFSETS, MeleeChargeState, MeleeTrace, MeleeWeaponFacts,
     PLAYER_MELEE_HEIGHT_DEFAULT, PLAYER_MELEE_RANGE_DEFAULT, PLAYER_MELEE_WIDTH_DEFAULT,
-    melee_charge_start, melee_trace_count, melee_trace_end, melee_weaponstate_blocks,
-    weapon_advance_melee, weapon_has_charge_melee, weapon_melee_to_end, weapon_melee_to_fire,
-    weapon_settle_ready, weapon_start_melee, weapon_start_melee_uses_charge, weapon_try_melee,
+    melee_charge_start, melee_weaponstate_blocks, weapon_advance_melee, weapon_has_charge_melee,
+    weapon_melee_to_end, weapon_melee_to_fire, weapon_settle_ready, weapon_start_melee,
+    weapon_start_melee_uses_charge,
 };
 pub use offhand::{
     BUTTON_FRAG, BUTTON_SMOKE, CURSOR_HINT_NONE, OFFHAND_INV_SLOTS, OffhandCmd, OffhandInvRow,
@@ -96,16 +110,16 @@ pub use placement::{
     WEAPON_IDLE_PITCH_FREQ, WEAPON_IDLE_ROLL_FREQ, WEAPON_IDLE_SIN_SCALE,
     WEAPON_IDLE_TIME_MS_SCALE, WEAPON_IDLE_YAW_FREQ, WeaponBobInputs, WeaponBobState,
     WeaponBobWaveformInputs, WeaponIdleInputs, WeaponMovementKinematics, WeaponMovementOfsInputs,
-    WeaponPlacementAssembleStep, WeaponPlacementContribution, WeaponPlacementPsInputs,
-    WeaponPlacementState, WeaponStanceStaticOfsInputs, apply_idle_sway_scale,
-    base_stance_movement_angles, calculate_weapon_movement_bob,
-    calculate_weapon_movement_bob_waveform, calculate_weapon_movement_targets,
-    dual_wield_view_model_origin_add, placement_movement_channel_scale, stance_movement_lerp,
-    stance_transition_fade, weapon_bob_add_to_angles, weapon_bob_ads_attenuation,
-    weapon_bob_apply_ads_attenuation, weapon_bob_rotate_origin, weapon_bob_set_waveform,
-    weapon_damage_kick_angles, weapon_idle_amount_speed, weapon_placement_apply_angles,
-    weapon_placement_apply_origin, weapon_placement_assemble, weapon_placement_jump_land_ofs,
-    weapon_stance_static_ofs,
+    WeaponPlacementAssembleStep, WeaponPlacementContribution, WeaponPlacementFrame,
+    WeaponPlacementPsInputs, WeaponPlacementSettings, WeaponPlacementState,
+    WeaponStanceStaticOfsInputs, apply_idle_sway_scale, base_stance_movement_angles,
+    calculate_weapon_movement_bob, calculate_weapon_movement_bob_waveform,
+    calculate_weapon_movement_targets, dual_wield_view_model_origin_add,
+    placement_movement_channel_scale, stance_movement_lerp, stance_transition_fade,
+    weapon_bob_add_to_angles, weapon_bob_ads_attenuation, weapon_bob_apply_ads_attenuation,
+    weapon_bob_rotate_origin, weapon_bob_set_waveform, weapon_damage_kick_angles,
+    weapon_idle_amount_speed, weapon_placement_apply_angles, weapon_placement_apply_origin,
+    weapon_placement_assemble, weapon_placement_jump_land_ofs, weapon_stance_static_ofs,
 };
 pub use player_anim_type::{PLAYER_ANIM_TYPE_COUNT, PLAYER_ANIM_TYPE_NAMES};
 pub use reload::{
@@ -116,7 +130,7 @@ pub use reload::{
 pub use response::{LookSway, RecoilAxis, SwayConfig};
 pub use spread::{
     AIM_SPREAD_AIR_DECAY, AIM_SPREAD_AIR_VIEWCHANGE, AIM_SPREAD_MOVE_SPEED_THRESHOLD_DEFAULT,
-    AIM_SPREAD_SCALE_MAX, AIM_SPREAD_TURN_SCALE, AimSpreadMotion, AimSpreadState,
+    AIM_SPREAD_SCALE_MAX, AIM_SPREAD_TURN_SCALE, AimSpreadMotion, AimSpreadPosture, AimSpreadState,
     PERK_BULLETACCURACY, PERK_WEAP_SPREAD_MULTIPLIER_DEFAULT, PM_TYPE_NORMAL_LINKED, SHORT2ANGLE,
     SpreadCone, SpreadOverrideState, VIEWHEIGHT_CROUCH_SEAM, VIEWHEIGHT_PRONE,
     VIEWHEIGHT_PRONE_SPAN, VIEWHEIGHT_STAND_SPAN, WeaponAimSpreadDecayFacts, WeaponSpreadFacts,

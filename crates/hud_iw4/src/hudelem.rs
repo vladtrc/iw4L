@@ -8,7 +8,7 @@ pub const PLAYERSTATE_HUD_ARCHIVAL: usize = 0x1ca0;
 
 pub const PLAYERSTATE_HUD_BANKS_END: usize = 0x30f8;
 
-pub const HUDELEM_ARCHIVAL_REMAPPED_TIMES: &[(usize, &'static str)] = &[
+pub const HUDELEM_ARCHIVAL_REMAPPED_TIMES: &[(usize, &str)] = &[
     (0x7c, "time"),
     (0x3c, "fadeStartTime"),
     (0x70, "scaleStartTime"),

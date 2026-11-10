@@ -20,10 +20,15 @@ pub use render_scene::{
     ResolvedModelLighting, ResolvedModelLightingTable,
 };
 
+type LightingShOutput = (u32, std::sync::Arc<Vec<Option<[[f32; 4]; 3]>>>);
+
 #[derive(Resource)]
 pub struct WorldModelLightingCache {
     pub handle: u16,
 
+    tweaks: Option<lighting_iw4::LightGridTweaks>,
+    hero_enabled: bool,
+    slot_hero_lighting: Vec<bool>,
     body_handles: HashMap<ModelLightingOwner, u16>,
     slot_owner: Vec<Option<ModelLightingOwner>>,
     rover: u32,
@@ -34,6 +39,8 @@ pub struct WorldModelLightingCache {
     lighting_info: Vec<u16>,
 
     packed_lighting: Vec<Option<[u8; 4]>>,
+
+    lighting_sh: std::sync::Arc<Vec<Option<[[f32; 4]; 3]>>>,
 
     pixel_free_bits: [Vec<u32>; MODEL_LIGHTING_PIXEL_FREE_BITS_BUFFERS],
     warned_fail: bool,
@@ -60,6 +67,9 @@ impl WorldModelLightingCache {
         let ones = vec![!0u32; words];
         Self {
             handle: 0,
+            tweaks: None,
+            hero_enabled: true,
+            slot_hero_lighting: vec![false; limit],
             body_handles: HashMap::new(),
             slot_owner: vec![None; limit],
             rover: 0,
@@ -68,6 +78,7 @@ impl WorldModelLightingCache {
             origins: vec![[0.0; 3]; limit],
             lighting_info: vec![0; limit],
             packed_lighting: vec![None; limit],
+            lighting_sh: std::sync::Arc::new(vec![None; limit]),
             pixel_free_bits: [ones.clone(), ones.clone(), ones.clone(), ones],
             warned_fail: false,
             frame_assigned: 0,
@@ -120,17 +131,31 @@ impl WorldModelLightingCache {
 
     pub fn alloc_sample_at(
         &mut self,
-        key: ModelLightingOwner,
-        origin: [f32; 3],
+        request: ModelLightingRequest,
         atlas: &WorldModelLightingAtlas,
         scene: Option<&WorldScene>,
         (images, tile_writes): (&mut Assets<Image>, &mut ModelLightingAtlasTileWrites),
-        lookup_fallback: u8,
         allow_moved_reuse: bool,
     ) -> u32 {
+        let ModelLightingRequest {
+            owner: key,
+            origin,
+            lookup_fallback,
+            hero_lighting,
+        } = request;
         let dims = atlas.dims;
         let base = dims.smodel_entry_limit;
         let current = self.body_handles.get(&key).copied().unwrap_or(0);
+        let current =
+            if lighting_iw4::model_lighting_cache_slot(base, current).is_some_and(|slot| {
+                self.slot_hero_lighting.get(slot as usize).copied() != Some(hero_lighting)
+            }) {
+                // Changed mode requires a new tile even when the origin is unchanged.
+                self.body_handles.remove(&key);
+                0
+            } else {
+                current
+            };
         // Rewriting a held slot in place relies on its tile write reaching the GPU
         // after every earlier frame's draws.
         let owned = lighting_iw4::model_lighting_cache_slot(base, current)
@@ -156,9 +181,11 @@ impl WorldModelLightingCache {
                 alloc_fail,
                 origins,
                 lighting_info,
-                &pixel_free_bits[pp],
-                &pixel_free_bits[p],
-                &mut curr,
+                lighting_iw4::ModelLightingFreeFrames {
+                    prev_prev: &pixel_free_bits[pp],
+                    prev: &pixel_free_bits[p],
+                    curr: &mut curr,
+                },
             ) {
                 Ok(mut glob) => Some(glob.alloc(current, origin, allow_moved_reuse || owned)),
                 Err(_) => None,
@@ -181,6 +208,7 @@ impl WorldModelLightingCache {
                 self.body_handles.insert(key, handle);
                 if let Some(owner) = self.slot_owner.get_mut(slot as usize) {
                     *owner = Some(key);
+                    self.slot_hero_lighting[slot as usize] = hero_lighting;
                 }
                 (handle, true, Some(slot))
             }
@@ -210,14 +238,39 @@ impl WorldModelLightingCache {
                 self.body_handles.remove(&key);
                 return 0;
             };
-            let Some(grid) = scene.light_grid.as_ref() else {
+            let world = asset_core::atlas::WorldLayout.world_at(origin).0;
+            let (grid, origin) = if world == 0 {
+                (scene.light_grid.as_ref(), origin)
+            } else {
+                let layer = scene
+                    .cull
+                    .as_ref()
+                    .and_then(|cull| cull.atlas_layers.iter().find(|layer| layer.world == world));
+                (
+                    layer.and_then(|layer| layer.light_grid.as_ref()),
+                    [
+                        origin[0]
+                            - asset_core::atlas::WorldLayout
+                                .origin(asset_core::atlas::WorldId(world))[0],
+                        origin[1],
+                        origin[2],
+                    ],
+                )
+            };
+            let Some(grid) = grid else {
                 self.body_handles.remove(&key);
                 return 0;
             };
-            match asset_model::sample_light_grid_with_lookup_fallback(
+            match asset_model::sample_light_grid_with_hero_lights(
                 &grid.view(),
                 origin,
                 lookup_fallback,
+                if hero_lighting { self.tweaks } else { None },
+                if hero_lighting && self.hero_enabled {
+                    &grid.hero_lights
+                } else {
+                    &[]
+                },
             ) {
                 Ok(sampled) => {
                     if key == ModelLightingOwner::Eye {
@@ -260,10 +313,17 @@ impl WorldModelLightingCache {
                         sampled.compressed[2],
                         0xff,
                     ]);
+                    std::sync::Arc::make_mut(&mut self.lighting_sh)[slot as usize] =
+                        sampled.lighting_sh;
                 }
                 Err(_) => {
                     if let Some(packed) = self.packed_lighting.get_mut(slot as usize) {
                         *packed = None;
+                    }
+                    if let Some(sh) =
+                        std::sync::Arc::make_mut(&mut self.lighting_sh).get_mut(slot as usize)
+                    {
+                        *sh = None;
                     }
                     if let Some(owner) = self.slot_owner.get_mut(slot as usize) {
                         *owner = None;
@@ -295,6 +355,11 @@ impl WorldModelLightingCache {
             .and_then(|slot| self.lighting_info.get(slot as usize).copied())
             .map(lighting_iw4::lighting_info_scene_light_index)
             .unwrap_or(0)
+    }
+
+    /// Light-grid SH per cache slot, with the handle base that maps a handle to its slot.
+    pub fn lighting_sh(&self) -> LightingShOutput {
+        (self.base_index, std::sync::Arc::clone(&self.lighting_sh))
     }
 
     pub fn packed_lighting_for_handle(&self, handle: u32) -> Option<[u8; 4]> {
@@ -338,6 +403,7 @@ pub fn viewmodel_lighting_origin(
 
 pub(crate) fn begin_dyn_model_lighting_frame(
     cache: Option<ResMut<WorldModelLightingCache>>,
+    presented: Option<Res<net::PresentedSnapshot>>,
     mut requests: ResMut<ModelLightingRequests>,
     mut resolved: ResMut<ResolvedModelLightingTable>,
 ) {
@@ -346,7 +412,63 @@ pub(crate) fn begin_dyn_model_lighting_frame(
     let Some(mut cache) = cache else {
         return;
     };
+    let tweaks = presented
+        .as_ref()
+        .and_then(|presented| presented.snapshot())
+        .and_then(|snapshot| light_grid_tweaks(&snapshot.meta.objectives.server_info));
+    let hero_enabled = presented
+        .as_ref()
+        .and_then(|presented| presented.snapshot())
+        .is_none_or(|snapshot| hero_lighting_enabled(&snapshot.meta.objectives.server_info));
+    if cache.tweaks != tweaks || cache.hero_enabled != hero_enabled {
+        // Discard ownership, retaining the frame free-bit history so tiles still in
+        // flight cannot be overwritten by a changed lighting setting.
+        cache.body_handles.clear();
+        cache.slot_owner.fill(None);
+        cache.handle = 0;
+        cache.tweaks = tweaks;
+        cache.hero_enabled = hero_enabled;
+    }
     cache.toggle_frame();
+}
+
+fn hero_lighting_enabled(dvars: &[(String, String)]) -> bool {
+    dvars
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("r_herolighting"))
+        .and_then(|(_, value)| value.parse::<i32>().ok())
+        .unwrap_or(1)
+        != 0
+}
+
+fn light_grid_tweaks(dvars: &[(String, String)]) -> Option<lighting_iw4::LightGridTweaks> {
+    let value = |name: &str| {
+        dvars
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    };
+    let enabled = |name: &str, default: i32| {
+        value(name)
+            .and_then(|value| value.parse::<i32>().ok())
+            .unwrap_or(default)
+            != 0
+    };
+    if !enabled("r_lightgridenabletweaks", 0)
+        || !enabled("r_lightgridusetweakedvalues", 1)
+        || !enabled("r_herolighting", 1)
+    {
+        return None;
+    }
+    let tweaks = lighting_iw4::LightGridTweaks {
+        intensity: value("r_lightgridintensity")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(1.0),
+        contrast: value("r_lightgridcontrast")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0.0),
+    };
+    tweaks.valid().then_some(tweaks)
 }
 
 pub fn enqueue_fpv_model_lighting(
@@ -397,6 +519,7 @@ pub fn enqueue_fpv_model_lighting(
         owner: ModelLightingOwner::Eye,
         origin,
         lookup_fallback,
+        hero_lighting: false,
     });
 }
 
@@ -499,12 +622,10 @@ fn drain_model_lighting_requests(
         }
         resolved.get_or_insert_with(request.owner, || {
             let handle = cache.alloc_sample_at(
-                request.owner,
-                request.origin,
+                request,
                 atlas,
                 scene,
                 (&mut images, &mut tile_writes),
-                request.lookup_fallback,
                 moving_glass,
             );
             if handle == 0 {

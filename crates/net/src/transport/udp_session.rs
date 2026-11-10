@@ -7,7 +7,6 @@ use master_protocol::MemberId;
 use playerstate_iw4::UserCmd;
 use sim::{ClientAction, ClientId, Snapshot, Tick};
 
-use crate::authority::runtime::ClientShotSamples;
 use crate::client::predict::CmdSeq;
 use crate::transport::acked_baseline::AckedBaselineTable;
 use crate::transport::bootstrap::{
@@ -29,6 +28,8 @@ use crate::transport::wire::WireReader;
 
 use super::account_wire::{AccountMessage, profile_payload};
 
+type ControlQueue = Arc<Mutex<Vec<(MemberId, Vec<u8>, std::time::Instant)>>>;
+
 const RELAY_MAIL_CAP: usize = 64;
 pub(crate) const CMDS_PER_PACKET: usize = 16;
 
@@ -36,9 +37,9 @@ pub(crate) const CMDS_PER_PACKET: usize = 16;
 pub struct RelayMailbox {
     inbound: Arc<Mutex<DataLanes>>,
     outbound: Arc<Mutex<DataLanes>>,
-    control_inbound: Arc<Mutex<Vec<(MemberId, Vec<u8>, std::time::Instant)>>>,
+    control_inbound: ControlQueue,
     control_inbound_drained: Arc<tokio::sync::Notify>,
-    control_outbound: Arc<Mutex<Vec<(MemberId, Vec<u8>, std::time::Instant)>>>,
+    control_outbound: ControlQueue,
     cap: usize,
 }
 
@@ -230,6 +231,31 @@ pub struct CommittedAdmission {
     pub first_commit: bool,
 }
 
+pub struct FrameServiceQueues<'a> {
+    pub sounds: Option<&'a mut crate::PendingSvcSounds>,
+    pub playercard: Option<&'a mut crate::PendingPlayerCard>,
+    pub notifications: Option<&'a mut crate::PendingGameNotify>,
+}
+
+impl FrameServiceQueues<'_> {
+    fn take_for(&mut self, client: ClientId) -> FrameTail {
+        let mut tail = FrameTail::default();
+        if let Some(pending) = self.sounds.as_mut() {
+            tail.svc_sounds = pending.take_for(client);
+        }
+        if let Some(pending) = self.playercard.as_mut() {
+            let (slots, menus, splashes) = pending.take_for(client);
+            tail.svc_card_slots = slots;
+            tail.svc_open_menus = menus;
+            tail.svc_hud_splashes = splashes;
+        }
+        if let Some(pending) = self.notifications.as_mut() {
+            tail.svc_game_notifies = pending.take_for(client);
+        }
+        tail
+    }
+}
+
 #[derive(Resource)]
 pub struct UdpAuthorityHub {
     relay: RelayMailbox,
@@ -255,6 +281,7 @@ struct PeerReplicationState {
     next_snap_seq: u32,
     out_seq: u32,
     in_ack: u32,
+    action_ack: u16,
     last_full: Option<Tick>,
     sent_ticks: std::collections::VecDeque<Tick>,
     admission: PeerAdmission,
@@ -333,6 +360,7 @@ impl PeerReplicationState {
             next_snap_seq: 1,
             out_seq: 0,
             in_ack: 0,
+            action_ack: 0,
             last_full: None,
             sent_ticks: std::collections::VecDeque::new(),
             admission: PeerAdmission::Uncommitted,
@@ -568,7 +596,12 @@ impl UdpAuthorityHub {
 
     fn send_outgoing(&mut self, member: MemberId, bytes: &[u8]) -> Result<(), UdpSendError> {
         if self.relay.push_outbound(member, bytes.to_vec()) {
-            perf::net_leg("mail_drop_out", 0, 1);
+            perf::instant!("net_leg", "iw4l.sim", |ctx| {
+                let (leg, key, bytes): (&str, u32, u32) = ("mail_drop_out", 0, 1);
+                ctx.arg("leg", leg);
+                ctx.arg("key", i64::from(key));
+                ctx.arg("bytes", i64::from(bytes));
+            });
         }
         Ok(())
     }
@@ -597,7 +630,6 @@ impl UdpAuthorityHub {
         &mut self,
         cmd_inbox: &mut crate::ClientCommandInbox,
         action_inbox: &mut crate::ClientActionInbox,
-        _samples: Option<&mut ClientShotSamples>,
         mut reliable: Option<&mut crate::ReliableEventHub>,
         account_context: Option<(&mut sim::SimWorld, frame::MatchKey)>,
     ) -> Result<(), String> {
@@ -608,7 +640,7 @@ impl UdpAuthorityHub {
         self.accounts_required = self.bootstrap.is_some()
             && account_world
                 .as_ref()
-                .is_some_and(|world| world.gsc_realm() == Some(sim::script::Realm::Iw4));
+                .is_some_and(|world| world.gsc_realm() == Some(sim::script::FamilyId::IW4));
         self.apply_admission_acks();
         if self.accounts_required {
             self.offer_accounts(account_world.as_deref().unwrap(), match_key)?;
@@ -699,31 +731,44 @@ impl UdpAuthorityHub {
                         reliable.ack(client, reliable_ack);
                     }
                     if let Some((seq, _)) = cmds.last() {
-                        perf::net_leg("cmd_in", seq.0, cmds.len() as u32);
+                        perf::instant!("net_leg", "iw4l.sim", |ctx| {
+                            let (leg, key, bytes): (&str, u32, u32) =
+                                ("cmd_in", seq.0, cmds.len() as u32);
+                            ctx.arg("leg", leg);
+                            ctx.arg("key", i64::from(key));
+                            ctx.arg("bytes", i64::from(bytes));
+                        });
                     }
                     for (seq, cmd) in cmds {
                         let mut sample = cmd_samples
                             .iter()
                             .find(|(sample_seq, _)| *sample_seq == seq)
                             .map(|(_, sample)| *sample);
-                        if let Some(claim) = sample.as_mut() {
-                            if claim.quality.claims_history()
-                                && !self
-                                    .replication
-                                    .get(&header.connection)
-                                    .is_some_and(|peer| {
-                                        peer.sent_ticks.contains(&claim.left)
-                                            && peer.sent_ticks.contains(&claim.right)
-                                    })
-                            {
-                                claim.alpha = f32::NAN;
-                            }
+                        if let Some(claim) = sample.as_mut()
+                            && claim.quality.claims_history()
+                            && !self
+                                .replication
+                                .get(&header.connection)
+                                .is_some_and(|peer| {
+                                    peer.sent_ticks.contains(&claim.left)
+                                        && peer.sent_ticks.contains(&claim.right)
+                                })
+                        {
+                            claim.alpha = f32::NAN;
                         }
                         cmd_inbox.push(client, Some(seq), cmd, sample);
                     }
                     if control {
-                        for action in actions {
-                            action_inbox.push_from_peer(client, action);
+                        let peer = self.replication.get_mut(&header.connection).unwrap();
+                        for (seq, action) in actions {
+                            let next = peer.action_ack.wrapping_add(1).max(1);
+                            if seq == next && action_inbox.push_from_peer(client, action) {
+                                peer.action_ack = seq;
+                                perf::instant!("client_action_admitted", "iw4l.sim", |ctx| {
+                                    ctx.arg("client", i64::from(client.0));
+                                    ctx.arg("sequence", i64::from(seq));
+                                });
+                            }
                         }
                     }
                 }
@@ -984,15 +1029,12 @@ impl UdpAuthorityHub {
         });
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn fanout_with_seats(
         &mut self,
         snapshot: &Snapshot,
         acks: &[(ClientId, CmdSeq)],
         mut for_peer: impl FnMut(ClientId, &Snapshot) -> Option<Snapshot>,
-        mut pending_svc: Option<&mut crate::PendingSvcSounds>,
-        mut pending_playercard: Option<&mut crate::PendingPlayerCard>,
-        mut pending_gamenotify: Option<&mut crate::PendingGameNotify>,
+        mut services: FrameServiceQueues<'_>,
         reliable: Option<&crate::ReliableEventHub>,
         scores_due: bool,
     ) -> Result<(), UdpSendError> {
@@ -1030,18 +1072,17 @@ impl UdpAuthorityHub {
             {
                 continue;
             }
-            if peer.admits_gameplay(self.bootstrap.is_some()) {
-                if let Some(reliable) = reliable {
-                    if let Err(error) = peer.queue_control(
-                        &self.relay,
-                        target,
-                        conn,
-                        live_epoch,
-                        reliable.payload(client),
-                    ) {
-                        last_err = Some(error);
-                    }
-                }
+            if peer.admits_gameplay(self.bootstrap.is_some())
+                && let Some(reliable) = reliable
+                && let Err(error) = peer.queue_control(
+                    &self.relay,
+                    target,
+                    conn,
+                    live_epoch,
+                    reliable.payload(client),
+                )
+            {
+                last_err = Some(error);
             }
             let resync = peer.baseline.clear_missing_ack();
             if resync {
@@ -1107,19 +1148,7 @@ impl UdpAuthorityHub {
                 .to_vec();
             let snapshot_delta = encoder.encode(&peer_snap);
             peer.encoder = encoder;
-            let mut tail = FrameTail::default();
-            if let Some(pending) = pending_svc.as_mut() {
-                tail.svc_sounds = pending.take_for(client);
-            }
-            if let Some(pending) = pending_playercard.as_mut() {
-                let (slots, menus, splashes) = pending.take_for(client);
-                tail.svc_card_slots = slots;
-                tail.svc_open_menus = menus;
-                tail.svc_hud_splashes = splashes;
-            }
-            if let Some(pending) = pending_gamenotify.as_mut() {
-                tail.svc_game_notifies = pending.take_for(client);
-            }
+            let mut tail = services.take_for(client);
             if scores_due {
                 tail.svc_scores = Some(crate::format_scoreboard_from_snapshot(&peer_snap));
             }
@@ -1163,6 +1192,7 @@ impl UdpAuthorityHub {
             };
             let packet = ServerPacket::Snapshot {
                 header,
+                action_ack: peer.action_ack,
                 baseline_seq,
                 snapshot_seq,
                 payload,
@@ -1220,7 +1250,13 @@ impl UdpAuthorityHub {
                 continue;
             }
             let bytes = packet.to_bytes();
-            perf::net_leg("snap_out", snapshot.tick.0, bytes.len() as u32);
+            perf::instant!("net_leg", "iw4l.sim", |ctx| {
+                let (leg, key, bytes): (&str, u32, u32) =
+                    ("snap_out", snapshot.tick.0, bytes.len() as u32);
+                ctx.arg("leg", leg);
+                ctx.arg("key", i64::from(key));
+                ctx.arg("bytes", i64::from(bytes));
+            });
             if let Err(e) = self.send_outgoing(target, &bytes) {
                 last_err = Some(e);
             } else if let Some(peer) = self.replication.get_mut(&conn) {
@@ -1249,6 +1285,7 @@ pub struct UdpClientLink {
     baselines: BTreeMap<u32, (Snapshot, Vec<u8>, FrameSegments)>,
     out_seq: u32,
     in_ack: u32,
+    action_ack: u16,
     last_snapshot_seq: Option<u32>,
     required_baseline_seq: u32,
     applied_bootstrap_id: Option<u32>,
@@ -1265,7 +1302,6 @@ pub struct UdpClientLink {
     account_profile: Option<Vec<u8>>,
     account_ack: Option<sim::AccountSnapshot>,
     account_offer: Option<sim::AccountSnapshot>,
-    sent_actions: HashSet<sim::ActionRequestId>,
 }
 
 impl UdpClientLink {
@@ -1280,6 +1316,7 @@ impl UdpClientLink {
             baselines: BTreeMap::new(),
             out_seq: 0,
             in_ack: 0,
+            action_ack: 0,
             last_snapshot_seq: None,
             required_baseline_seq: 0,
             applied_bootstrap_id: None,
@@ -1291,7 +1328,6 @@ impl UdpClientLink {
             account_profile: None,
             account_ack: None,
             account_offer: None,
-            sent_actions: HashSet::new(),
             held_bootstrap: Vec::new(),
             failed: None,
             bootstrap: None,
@@ -1304,7 +1340,12 @@ impl UdpClientLink {
 
     fn send_bytes(&mut self, bytes: &[u8]) -> Result<(), UdpSendError> {
         if self.relay.push_outbound(MemberId([0; 16]), bytes.to_vec()) {
-            perf::net_leg("mail_drop_out", 0, 1);
+            perf::instant!("net_leg", "iw4l.sim", |ctx| {
+                let (leg, key, bytes): (&str, u32, u32) = ("mail_drop_out", 0, 1);
+                ctx.arg("leg", leg);
+                ctx.arg("key", i64::from(key));
+                ctx.arg("bytes", i64::from(bytes));
+            });
         }
         Ok(())
     }
@@ -1417,7 +1458,7 @@ impl UdpClientLink {
         self.account_profile = None;
         self.account_ack = None;
         self.account_offer = None;
-        self.sent_actions.clear();
+        self.action_ack = 0;
         self.failed = None;
         if let Some(lane) = &self.bootstrap {
             lane.set_epoch(0);
@@ -1735,6 +1776,7 @@ impl UdpClientLink {
             }
             ServerPacket::Snapshot {
                 header,
+                action_ack,
                 baseline_seq,
                 snapshot_seq,
                 payload,
@@ -1783,13 +1825,23 @@ impl UdpClientLink {
                     .decode(&frame.snapshot_delta)
                     .map_err(|e| e.to_string())?;
                 snapshot.meta = frame.snapshot_meta.clone();
+                if super::reliable::seq_after(action_ack, self.action_ack) {
+                    self.action_ack = action_ack;
+                }
+
                 self.note_applied_snapshot(snapshot_seq);
                 self.baselines
                     .insert(snapshot_seq, (snapshot.clone(), payload, segments));
                 self.required_baseline_seq = self.required_baseline_seq.max(baseline_seq);
                 self.retain_applied_baseline();
                 snap_acks.push(snapshot_seq);
-                perf::net_leg("snap_in", snapshot.tick.0, wire_len as u32);
+                perf::instant!("net_leg", "iw4l.sim", |ctx| {
+                    let (leg, key, bytes): (&str, u32, u32) =
+                        ("snap_in", snapshot.tick.0, wire_len as u32);
+                    ctx.arg("leg", leg);
+                    ctx.arg("key", i64::from(key));
+                    ctx.arg("bytes", i64::from(bytes));
+                });
                 ticks.push(ReceivedTick { snapshot, frame });
                 Ok(true)
             }
@@ -1830,16 +1882,14 @@ impl UdpClientLink {
         self.send_bytes(&packet.to_bytes())
     }
 
-    pub fn has_unsent_actions(&self, actions: &[ClientAction]) -> bool {
-        actions
-            .iter()
-            .any(|action| !self.sent_actions.contains(&sim::action_request_id(action)))
+    pub fn action_ack(&self) -> u16 {
+        self.action_ack
     }
 
     pub fn send_commands(
         &mut self,
         cmds: &[(CmdSeq, UserCmd, sim::ShotSampleProvenance)],
-        actions: &[ClientAction],
+        actions: &[(u16, ClientAction)],
         reliable_ack: u16,
     ) -> Result<(), UdpSendError> {
         let Some(connection) = self.connection else {
@@ -1857,20 +1907,8 @@ impl UdpClientLink {
             self.send_command_packet(connection, chunk, &[], reliable_ack)?;
         }
 
-        self.sent_actions.retain(|id| {
-            actions
-                .iter()
-                .any(|action| sim::action_request_id(action) == *id)
-        });
-        let fresh: Vec<_> = actions
-            .iter()
-            .copied()
-            .filter(|action| !self.sent_actions.contains(&sim::action_request_id(action)))
-            .collect();
-        if !fresh.is_empty() || cmds.is_empty() {
-            self.send_command_packet(connection, &[], &fresh, reliable_ack)?;
-            self.sent_actions
-                .extend(fresh.iter().map(sim::action_request_id));
+        if !actions.is_empty() || cmds.is_empty() {
+            self.send_command_packet(connection, &[], actions, reliable_ack)?;
         }
         Ok(())
     }
@@ -1879,7 +1917,7 @@ impl UdpClientLink {
         &mut self,
         connection: ConnectionId,
         cmds: &[(CmdSeq, UserCmd, sim::ShotSampleProvenance)],
-        actions: &[ClientAction],
+        actions: &[(u16, ClientAction)],
         reliable_ack: u16,
     ) -> Result<(), UdpSendError> {
         self.out_seq = self.out_seq.wrapping_add(1);
@@ -1900,7 +1938,12 @@ impl UdpClientLink {
             reliable_ack,
         };
         if let Some((seq, _, _)) = cmds.last() {
-            perf::net_leg("cmd_out", seq.0, cmds.len() as u32);
+            perf::instant!("net_leg", "iw4l.sim", |ctx| {
+                let (leg, key, bytes): (&str, u32, u32) = ("cmd_out", seq.0, cmds.len() as u32);
+                ctx.arg("leg", leg);
+                ctx.arg("key", i64::from(key));
+                ctx.arg("bytes", i64::from(bytes));
+            });
         }
         if cmds.is_empty() {
             self.relay

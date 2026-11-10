@@ -12,6 +12,8 @@ use hud_iw4::{
 };
 use playerstate_iw4::ENTITYNUM_NONE;
 
+type HudDefaultInitializers = &'static [(&'static str, fn() -> Value)];
+
 const FONTS: &[&str] = &[
     "default",
     "bigfixed",
@@ -62,7 +64,7 @@ const VERT_ALIGN_T5: &[(&str, &str)] = &[
     ("user_bottom", "bottom_adjustable"),
 ];
 
-const DEFAULTS: &[(&str, fn() -> Value)] = &[
+const DEFAULTS: HudDefaultInitializers = &[
     ("x", || Value::Float(0.0)),
     ("y", || Value::Float(0.0)),
     ("z", || Value::Float(0.0)),
@@ -225,7 +227,7 @@ pub(crate) fn string_index(world: &mut World, value: &Value) -> Result<i32, Stri
         Value::Int(_) | Value::Float(_) => format!(
             "{}{}",
             crate::HUD_STRING_PLAIN,
-            crate::script::runtime::to_text(value).unwrap_or_default()
+            crate::script::runtime::to_text(value).unwrap_or(String::new())
         ),
         other => return Err(format!("{other:?} is not a string")),
     };
@@ -358,7 +360,7 @@ fn plain_text(world: &mut World, value: &Value) -> String {
     match name.as_ref().unwrap_or(value) {
         Value::String(text) => text.to_string(),
         Value::LocalizedString(key) => key.to_string(),
-        other => crate::script::runtime::to_text(other).unwrap_or_default(),
+        other => crate::script::runtime::to_text(other).unwrap_or(String::new()),
     }
 }
 

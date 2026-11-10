@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use asset_game::{FlameStreamView, FlameTube};
+use asset_game::FlameStreamView;
 use bevy::prelude::*;
 use fx_iw4::{FX_TRAIL_TANGENT_PACKED, FxSpriteAtlasUv, trail_pack_normal, trail_pack_texcoord};
 use render_fx::FxWorldColorImages;
@@ -118,24 +118,8 @@ impl FlameStreams {
             if let Some(fire) = materials[MATERIAL_FIRE].as_deref() {
                 present_fires(stream, fire, cam, color_images, runtime, now_ms, plan);
             }
-            for (tube, slot) in [
-                (&stream.view.fuel, MATERIAL_FUEL),
-                (&stream.view.flame, MATERIAL_FLAME),
-            ] {
-                if let (Some(material), Some(_)) =
-                    (materials[slot].as_deref(), materials[slot + 1].as_deref())
-                {
-                    present_tube(
-                        stream,
-                        tube,
-                        material,
-                        eye,
-                        color_images,
-                        runtime,
-                        now_ms,
-                        plan,
-                    );
-                }
+            for kind in [TubeKind::Fuel, TubeKind::Flame] {
+                stream.present_tube(kind, eye, color_images, runtime, now_ms, plan);
             }
         }
     }
@@ -391,93 +375,110 @@ fn present_fires(
     plan.end_material_draw(slot);
 }
 
-#[allow(clippy::too_many_arguments)]
-fn present_tube(
-    stream: &FlameStream,
-    tube: &FlameTube,
-    material: &str,
-    eye: Vec3,
-    color_images: &FxWorldColorImages,
-    runtime: &MaterialGeneration,
-    now_ms: i32,
-    plan: &mut FxCodeMeshPlan,
-) {
-    let Some((origin, _)) = stream.tag else {
-        return;
-    };
-    if tube.length <= 0.0 || stream.chunks.is_empty() {
-        return;
-    }
-    let origin = Vec3::from_array(origin);
-    let reach_sq = tube.length * tube.length;
-    let min_sq = TUBE_MIN_REACH_SQ[usize::from(!stream.player_view)];
-    let mut points = vec![origin];
-    let oldest = stream.chunks.len() - 1;
-    for (i, chunk) in stream.chunks.iter().rev().enumerate() {
-        if points.len() >= TUBE_POINT_CAP {
-            break;
+enum TubeKind {
+    Fuel,
+    Flame,
+}
+
+impl FlameStream {
+    fn present_tube(
+        &self,
+        kind: TubeKind,
+        eye: Vec3,
+        color_images: &FxWorldColorImages,
+        runtime: &MaterialGeneration,
+        now_ms: i32,
+        plan: &mut FxCodeMeshPlan,
+    ) {
+        let stream = self;
+        let (tube, slot) = match kind {
+            TubeKind::Fuel => (&stream.view.fuel, MATERIAL_FUEL),
+            TubeKind::Flame => (&stream.view.flame, MATERIAL_FLAME),
+        };
+        let materials = &stream.view.materials;
+        let (Some(material), Some(_)) =
+            (materials[slot].as_deref(), materials[slot + 1].as_deref())
+        else {
+            return;
+        };
+
+        let Some((origin, _)) = stream.tag else {
+            return;
+        };
+        if tube.length <= 0.0 || stream.chunks.is_empty() {
+            return;
         }
-        let from_tag = chunk.pos.distance_squared(origin);
-        let within = from_tag < reach_sq && (from_tag > min_sq || i == oldest);
-        if within && chunk.pos.distance_squared(*points.last().unwrap()) > TUBE_MIN_SPACING_SQ {
-            points.push(chunk.pos);
-        }
-    }
-    if points.len() < 2 {
-        return;
-    }
-    let segments = (tube.segments as usize).clamp(2, TUBE_POINT_CAP);
-    let points = resample(&points, segments);
-    let FxCodeMeshBind::Ready {
-        color,
-        sort_key,
-        ordinal,
-    } = code_mesh_bind(material, color_images, runtime)
-    else {
-        return;
-    };
-    let loop_ms = (tube.anim_loop_s * 1000.0) as i32;
-    let phase = if loop_ms > 0 {
-        now_ms.rem_euclid(loop_ms) as f32 / loop_ms as f32
-    } else {
-        0.0
-    };
-    let uv = atlas_frame(material_atlas(runtime, material), phase);
-    let slot = plan.begin_material_draw(color, sort_key, Some(ordinal));
-    let base = plan.mesh.vert_used;
-    let last = points.len() - 1;
-    let normal = trail_pack_normal([0.0, 0.0, 1.0]);
-    for (i, point) in points.iter().enumerate() {
-        let dir = points[i.min(last - 1) + 1] - points[i.min(last - 1)];
-        // perp = delta x view; the winding needs the first vert on the negative side.
-        let side = dir.cross(*point - eye).normalize_or(Vec3::Z);
-        let f = i as f32 / last as f32;
-        let half = tube.size[0] + (tube.size[1] - tube.size[0]) * f;
-        let v = uv.t0 + (1.0 - f) * uv.dt;
-        for (sign, u) in [(-1.0, uv.s0), (1.0, uv.s0 + uv.ds)] {
-            if !plan.push_trail_vert(
-                (*point + side * (sign * half)).to_array(),
-                [255; 4],
-                trail_pack_texcoord(u, v),
-                normal,
-                FX_TRAIL_TANGENT_PACKED,
-            ) {
-                plan.shrink_verts_to(base);
-                plan.end_material_draw(slot);
-                return;
+        let origin = Vec3::from_array(origin);
+        let reach_sq = tube.length * tube.length;
+        let min_sq = TUBE_MIN_REACH_SQ[usize::from(!stream.player_view)];
+        let mut points = vec![origin];
+        let oldest = stream.chunks.len() - 1;
+        for (i, chunk) in stream.chunks.iter().rev().enumerate() {
+            if points.len() >= TUBE_POINT_CAP {
+                break;
+            }
+            let from_tag = chunk.pos.distance_squared(origin);
+            let within = from_tag < reach_sq && (from_tag > min_sq || i == oldest);
+            if within && chunk.pos.distance_squared(*points.last().unwrap()) > TUBE_MIN_SPACING_SQ {
+                points.push(chunk.pos);
             }
         }
-    }
-    let index_used = plan.mesh.index_used;
-    for i in 0..last as u32 {
-        let q = base + i * 2;
-        if !plan.extend_indices(&[q + 1, q + 3, q, q, q + 3, q + 2]) {
-            plan.shrink_verts_to(base);
-            plan.shrink_indices_to(index_used);
-            break;
+        if points.len() < 2 {
+            return;
         }
+        let segments = (tube.segments as usize).clamp(2, TUBE_POINT_CAP);
+        let points = resample(&points, segments);
+        let FxCodeMeshBind::Ready {
+            color,
+            sort_key,
+            ordinal,
+        } = code_mesh_bind(material, color_images, runtime)
+        else {
+            return;
+        };
+        let loop_ms = (tube.anim_loop_s * 1000.0) as i32;
+        let phase = if loop_ms > 0 {
+            now_ms.rem_euclid(loop_ms) as f32 / loop_ms as f32
+        } else {
+            0.0
+        };
+        let uv = atlas_frame(material_atlas(runtime, material), phase);
+        let slot = plan.begin_material_draw(color, sort_key, Some(ordinal));
+        let base = plan.mesh.vert_used;
+        let last = points.len() - 1;
+        let normal = trail_pack_normal([0.0, 0.0, 1.0]);
+        for (i, point) in points.iter().enumerate() {
+            let dir = points[i.min(last - 1) + 1] - points[i.min(last - 1)];
+            // perp = delta x view; the winding needs the first vert on the negative side.
+            let side = dir.cross(*point - eye).normalize_or(Vec3::Z);
+            let f = i as f32 / last as f32;
+            let half = tube.size[0] + (tube.size[1] - tube.size[0]) * f;
+            let v = uv.t0 + (1.0 - f) * uv.dt;
+            for (sign, u) in [(-1.0, uv.s0), (1.0, uv.s0 + uv.ds)] {
+                if !plan.push_trail_vert(
+                    (*point + side * (sign * half)).to_array(),
+                    [255; 4],
+                    trail_pack_texcoord(u, v),
+                    normal,
+                    FX_TRAIL_TANGENT_PACKED,
+                ) {
+                    plan.shrink_verts_to(base);
+                    plan.end_material_draw(slot);
+                    return;
+                }
+            }
+        }
+        let index_used = plan.mesh.index_used;
+        for i in 0..last as u32 {
+            let q = base + i * 2;
+            if !plan.extend_indices(&[q + 1, q + 3, q, q, q + 3, q + 2]) {
+                plan.shrink_verts_to(base);
+                plan.shrink_indices_to(index_used);
+                break;
+            }
+        }
+        plan.end_material_draw(slot);
     }
-    plan.end_material_draw(slot);
 }
 
 fn resample(points: &[Vec3], count: usize) -> Vec<Vec3> {

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use asset_core::AssetNamespace;
+use asset_core::FamilyId;
 use dpvs_iw4::GfxDrawSurf;
 
 use crate::catalog::{fnv1a64, fnv1a64_more};
@@ -177,7 +177,7 @@ fn fold_mix(hash: u64, word: u64) -> u64 {
     (product as u64) ^ ((product >> 64) as u64)
 }
 
-fn hash_packed_code_lanes(lanes: &[PackedCodeSamplerLane]) -> u64 {
+pub fn hash_packed_code_lanes(lanes: &[PackedCodeSamplerLane]) -> u64 {
     let mut hash = fnv1a64(&(lanes.len() as u64).to_le_bytes());
     for lane in lanes {
         hash = fnv1a64_more(hash, &lane.register.to_le_bytes());
@@ -298,8 +298,8 @@ pub enum MaterialRefusal {
         arguments: usize,
     },
     TechniqueSetNamespaceMismatch {
-        want: AssetNamespace,
-        got: AssetNamespace,
+        want: FamilyId,
+        got: FamilyId,
     },
 }
 
@@ -414,7 +414,7 @@ pub fn resolve_material_technique(
         .parts()
         .technique_sets
         .get(set_id.0 as usize)
-        .ok_or_else(|| {
+        .ok_or({
             if matches!(material.remap, RemapResolution::SelfSet) {
                 MaterialRefusal::LocalTechniqueSetOutOfRange { set: set_id }
             } else {

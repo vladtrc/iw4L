@@ -4,10 +4,9 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::ui::{Display, FocusPolicy, ZIndex};
 use hud_iw4::{WeaponAdsOverlayFacts, draw_ads_overlay_layout, draw_weap_reticle};
-use net::{LocalPresentClient, PresentedSnapshot, ViewweaponAim};
+use net::ViewweaponAim;
 use weapon_iw4::get_viewmodel_weapon_index;
 
-use crate::gaps::{GapCause, HudGap, HudPresentationGaps};
 use crate::images::HudImages;
 use crate::presentation_scale::{PresentationScale, ScaleClass};
 use crate::reticle::ReticleAdsLatch;
@@ -57,6 +56,10 @@ pub(crate) fn spawn_iris(root: &mut ChildSpawnerCommands) {
     }
 }
 
+#[expect(
+    clippy::type_complexity,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 fn hide_overlay(
     overlay: &mut Query<
         (&mut Node, &mut ImageNode, &AdsIrisOverlay),
@@ -126,54 +129,195 @@ fn fill_handle(rgba: [u8; 4], images: &mut Assets<Image>) -> Handle<Image> {
     ))
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn update_iris(
-    surface: Res<crate::surface::Hud2dSurface>,
-    presented: Res<PresentedSnapshot>,
-    local: Res<LocalPresentClient>,
-    weapons: Option<Res<PreparedWeapons>>,
-    ads_latch: Res<ReticleAdsLatch>,
-    mut hud_images: ResMut<HudImages>,
-    mut images: ResMut<Assets<Image>>,
-    mut gaps: ResMut<HudPresentationGaps>,
-    mut fill: ResMut<IrisLetterboxFill>,
-    aim: Res<ViewweaponAim>,
-    mut overlay: Query<
-        (&mut Node, &mut ImageNode, &AdsIrisOverlay),
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct IrisOverlay<'w, 's> {
+    hud_images: ResMut<'w, HudImages>,
+    images: ResMut<'w, Assets<Image>>,
+    fill: ResMut<'w, IrisLetterboxFill>,
+    #[expect(
+        clippy::type_complexity,
+        reason = "Bevy system parameters keep scheduler resource access explicit."
+    )]
+    overlay: Query<
+        'w,
+        's,
+        (
+            &'static mut Node,
+            &'static mut ImageNode,
+            &'static AdsIrisOverlay,
+        ),
         (With<AdsIrisOverlay>, Without<AdsIrisLetterbox>),
     >,
-    mut letterbox: Query<
+    letterbox: Query<
+        'w,
+        's,
         (
-            &mut Node,
-            &mut ImageNode,
-            &mut BackgroundColor,
-            &AdsIrisLetterbox,
+            &'static mut Node,
+            &'static mut ImageNode,
+            &'static mut BackgroundColor,
+            &'static AdsIrisLetterbox,
         ),
         Without<AdsIrisOverlay>,
     >,
+}
+
+impl IrisOverlay<'_, '_> {
+    fn hide(&mut self) {
+        hide_overlay(&mut self.overlay);
+        hide_letterbox(&mut self.letterbox);
+    }
+
+    fn hide_letterbox(&mut self) {
+        hide_letterbox(&mut self.letterbox);
+    }
+
+    fn render(
+        &mut self,
+        surface: &crate::surface::Hud2dSurface,
+        aim: &ViewweaponAim,
+        facts: &asset_game::WeaponHudFacts,
+        alpha: Option<f32>,
+        namespace: asset_core::FamilyId,
+        image_name: &str,
+    ) {
+        let Some(handle) = self.hud_images.get(namespace, image_name, &mut self.images) else {
+            diag::warn_once!(
+                Ui,
+                "iris image `{name}` is {miss}",
+                name = image_name.to_owned(),
+                miss = self.hud_images.miss_reason()
+            );
+            self.hide();
+            return;
+        };
+
+        let scale = PresentationScale::from_window(surface.width(), surface.height());
+        let factor = scale.factor(ScaleClass::ProjectionBound);
+        let cx = scale.width() * 0.5;
+        let cy = scale.height() * 0.5;
+        let xhair = if aim.live {
+            (aim.xhair_x * factor, aim.xhair_y * factor)
+        } else {
+            (0.0, 0.0)
+        };
+        let Some(alpha) = alpha else {
+            self.hide();
+            return;
+        };
+        let layout = draw_ads_overlay_layout(facts.ads_overlay_width, facts.ads_overlay_height);
+
+        let inner_left = (cx + xhair.0 + layout.inner_x * factor).round();
+        let inner_top = (cy + xhair.1 + layout.inner_y * factor).round();
+        let inner_right = (cx + xhair.0 + (layout.inner_x + layout.inner_w) * factor).round();
+        let inner_bottom = (cy + xhair.1 + (layout.inner_y + layout.inner_h) * factor).round();
+        for (mut node, mut image_node, slot) in self.overlay.iter_mut() {
+            let Some(quad) = layout.live_quads().get(usize::from(slot.0)) else {
+                adopt_display(&mut node, Display::None);
+                image_node.flip_x = false;
+                image_node.flip_y = false;
+                continue;
+            };
+            adopt_display(&mut node, Display::Flex);
+            let left = (cx + xhair.0 + quad.x * factor).round();
+            let top = (cy + xhair.1 + quad.y * factor).round();
+            let right = (cx + xhair.0 + (quad.x + quad.w) * factor).round();
+            let bottom = (cy + xhair.1 + (quad.y + quad.h) * factor).round();
+            node.left = Val::Px(left);
+            node.top = Val::Px(top);
+            node.width = Val::Px(right - left);
+            node.height = Val::Px(bottom - top);
+            image_node.image = handle.clone();
+            image_node.color = Color::srgba(1.0, 1.0, 1.0, alpha);
+            image_node.rect = None;
+            image_node.flip_x = quad.flip_s;
+            image_node.flip_y = quad.flip_t;
+        }
+
+        let fill = match fill_for_overlay(&mut self.fill, image_name, &handle, &mut self.images) {
+            Some(sampled) => sampled,
+            None => {
+                self.hide_letterbox();
+                return;
+            }
+        };
+
+        let fill_color = Color::srgba(
+            f32::from(fill.rgba[0]) / 255.0,
+            f32::from(fill.rgba[1]) / 255.0,
+            f32::from(fill.rgba[2]) / 255.0,
+            alpha,
+        );
+        let image = self.images.get(&handle).expect("overlay image was loaded");
+        let quad = layout.quads[0];
+        // Back the outer texture texel and its linear-filter footprint with the frame fill.
+        let frame_x = (quad.w * factor * 1.5 / image.width() as f32).ceil();
+        let frame_y = (quad.h * factor * 1.5 / image.height() as f32).ceil();
+        let fill_left = (inner_left + frame_x).clamp(0.0, scale.width());
+        let fill_right = (inner_right - frame_x).clamp(fill_left, scale.width());
+        let fill_top = (inner_top + frame_y).clamp(0.0, scale.height());
+        let fill_bottom = (inner_bottom - frame_y).clamp(fill_top, scale.height());
+        let fill_width = fill_right - fill_left;
+        let screen_w = scale.width().round();
+        let screen_h = scale.height().round();
+        for (mut node, mut image_node, mut bg, strip) in self.letterbox.iter_mut() {
+            let placed = match strip.0 {
+                0 if fill_left > 0.0 => Some((0.0, 0.0, fill_left, screen_h)),
+                1 if screen_w > fill_right => {
+                    Some((fill_right, 0.0, screen_w - fill_right, screen_h))
+                }
+                2 if fill_top > 0.0 => Some((fill_left, 0.0, fill_width, fill_top)),
+                3 if screen_h > fill_bottom => {
+                    Some((fill_left, fill_bottom, fill_width, screen_h - fill_bottom))
+                }
+                _ => None,
+            };
+            let Some((left, top, width, height)) = placed else {
+                adopt_display(&mut node, Display::None);
+                *bg = BackgroundColor(Color::NONE);
+                continue;
+            };
+            if width <= 0.0 || height <= 0.0 {
+                adopt_display(&mut node, Display::None);
+                *bg = BackgroundColor(Color::NONE);
+                continue;
+            }
+            adopt_display(&mut node, Display::Flex);
+            node.left = Val::Px(left);
+            node.top = Val::Px(top);
+            node.width = Val::Px(width);
+            node.height = Val::Px(height);
+            image_node.image = fill.handle.clone();
+            image_node.color = Color::srgba(1.0, 1.0, 1.0, alpha);
+            image_node.rect = None;
+            *bg = BackgroundColor(fill_color);
+        }
+    }
+}
+
+pub(crate) fn update_iris(
+    surface: Res<crate::surface::Hud2dSurface>,
+    presentation: net::LocalPresentation,
+    weapons: Option<Res<PreparedWeapons>>,
+    ads_latch: Res<ReticleAdsLatch>,
+    mut iris: IrisOverlay,
+    aim: Res<ViewweaponAim>,
 ) {
-    let Some(ps) = presented.player(local.0) else {
-        gaps.clear(HudGap::AdsOverlay);
-        hide_overlay(&mut overlay);
-        hide_letterbox(&mut letterbox);
+    let Some(ps) = presentation.player() else {
+        iris.hide();
         return;
     };
 
     let viewmodel_index = get_viewmodel_weapon_index(ps);
     let Some(weapons) = weapons.as_ref() else {
-        gaps.clear(HudGap::AdsOverlay);
-        hide_overlay(&mut overlay);
-        hide_letterbox(&mut letterbox);
+        iris.hide();
         return;
     };
     let Some(facts) = weapons
-        .snapshot_weapon(presented.weapon_epoch(), viewmodel_index)
+        .snapshot_weapon(viewmodel_index)
         .ok()
         .and_then(|weapon| weapon.hud_facts())
     else {
-        gaps.clear(HudGap::AdsOverlay);
-        hide_overlay(&mut overlay);
-        hide_letterbox(&mut letterbox);
+        iris.hide();
         return;
     };
 
@@ -196,9 +340,7 @@ pub(crate) fn update_iris(
         ..WeaponAdsOverlayFacts::default()
     };
     if !surface.is_ready() {
-        gaps.clear(HudGap::AdsOverlay);
-        hide_overlay(&mut overlay);
-        hide_letterbox(&mut letterbox);
+        iris.hide();
         return;
     }
     let frame = draw_weap_reticle(
@@ -211,32 +353,30 @@ pub(crate) fn update_iris(
     let gate = frame.overlay_alpha.is_some();
 
     if !gate {
-        gaps.clear(HudGap::AdsOverlay);
-        hide_overlay(&mut overlay);
-        hide_letterbox(&mut letterbox);
+        iris.hide();
         return;
     }
     if weap.overlay_material == 0 {
-        gaps.clear(HudGap::AdsOverlay);
-        hide_overlay(&mut overlay);
-        hide_letterbox(&mut letterbox);
+        iris.hide();
         return;
     }
     if facts.ads_overlay_width <= 0.0 || facts.ads_overlay_height <= 0.0 {
-        gaps.raise(GapCause::AdsOverlayNoSize);
-        hide_overlay(&mut overlay);
-        hide_letterbox(&mut letterbox);
+        diag::warn_once!(Ui, "adsOverlayWidth×Height is not a drawable rect");
+        iris.hide();
         return;
     }
     let Some(image_name) = weapons.registry().overlay_image_of(viewmodel_index) else {
-        gaps.raise(GapCause::AdsOverlayNamesNoImage {
-            material: weapons
+        diag::warn_once!(Ui, "{}", {
+            let material: Option<String> = weapons
                 .registry()
                 .overlay_material_of(viewmodel_index)
-                .map(str::to_owned),
+                .map(str::to_owned);
+            match material {
+                Some(name) => format!("overlay material `{name}` names no image"),
+                None => "overlayMaterial is authored and names no material".to_owned(),
+            }
         });
-        hide_overlay(&mut overlay);
-        hide_letterbox(&mut letterbox);
+        iris.hide();
         return;
     };
 
@@ -244,117 +384,14 @@ pub(crate) fn update_iris(
         .registry()
         .component_namespace_of(viewmodel_index, asset_game::WeaponComponent::OverlayImage)
         .unwrap_or(crate::images::HUD_CHROME_NAMESPACE);
-    let Some(handle) = hud_images.get(weapon_ns, image_name, &mut images) else {
-        gaps.raise(GapCause::AdsOverlayImageMissing {
-            name: image_name.to_owned(),
-            miss: hud_images.miss_reason(),
-        });
-        hide_overlay(&mut overlay);
-        hide_letterbox(&mut letterbox);
-        return;
-    };
-
-    let scale = PresentationScale::from_window(surface.width(), surface.height());
-    let factor = scale.factor(ScaleClass::ProjectionBound);
-    let cx = scale.width() * 0.5;
-    let cy = scale.height() * 0.5;
-    let xhair = if aim.live {
-        (aim.xhair_x * factor, aim.xhair_y * factor)
-    } else {
-        (0.0, 0.0)
-    };
-    let Some(alpha) = frame.overlay_alpha else {
-        gaps.clear(HudGap::AdsOverlay);
-        hide_overlay(&mut overlay);
-        hide_letterbox(&mut letterbox);
-        return;
-    };
-    let layout = draw_ads_overlay_layout(facts.ads_overlay_width, facts.ads_overlay_height);
-    gaps.clear(HudGap::AdsOverlay);
-
-    let inner_left = (cx + xhair.0 + layout.inner_x * factor).round();
-    let inner_top = (cy + xhair.1 + layout.inner_y * factor).round();
-    let inner_right = (cx + xhair.0 + (layout.inner_x + layout.inner_w) * factor).round();
-    let inner_bottom = (cy + xhair.1 + (layout.inner_y + layout.inner_h) * factor).round();
-    for (mut node, mut image_node, slot) in overlay.iter_mut() {
-        let Some(quad) = layout.live_quads().get(usize::from(slot.0)) else {
-            adopt_display(&mut node, Display::None);
-            image_node.flip_x = false;
-            image_node.flip_y = false;
-            continue;
-        };
-        adopt_display(&mut node, Display::Flex);
-        let left = (cx + xhair.0 + quad.x * factor).round();
-        let top = (cy + xhair.1 + quad.y * factor).round();
-        let right = (cx + xhair.0 + (quad.x + quad.w) * factor).round();
-        let bottom = (cy + xhair.1 + (quad.y + quad.h) * factor).round();
-        node.left = Val::Px(left);
-        node.top = Val::Px(top);
-        node.width = Val::Px(right - left);
-        node.height = Val::Px(bottom - top);
-        image_node.image = handle.clone();
-        image_node.color = Color::srgba(1.0, 1.0, 1.0, alpha);
-        image_node.rect = None;
-        image_node.flip_x = quad.flip_s;
-        image_node.flip_y = quad.flip_t;
-    }
-
-    let fill = match fill_for_overlay(&mut fill, image_name, &handle, &mut images) {
-        Some(sampled) => sampled,
-        None => {
-            hide_letterbox(&mut letterbox);
-            return;
-        }
-    };
-
-    let fill_color = Color::srgba(
-        f32::from(fill.rgba[0]) / 255.0,
-        f32::from(fill.rgba[1]) / 255.0,
-        f32::from(fill.rgba[2]) / 255.0,
-        alpha,
+    iris.render(
+        &surface,
+        &aim,
+        &facts,
+        frame.overlay_alpha,
+        weapon_ns,
+        image_name,
     );
-    let image = images.get(&handle).expect("overlay image was loaded");
-    let quad = layout.quads[0];
-    // Back the outer texture texel and its linear-filter footprint with the frame fill.
-    let frame_x = (quad.w * factor * 1.5 / image.width() as f32).ceil();
-    let frame_y = (quad.h * factor * 1.5 / image.height() as f32).ceil();
-    let fill_left = (inner_left + frame_x).clamp(0.0, scale.width());
-    let fill_right = (inner_right - frame_x).clamp(fill_left, scale.width());
-    let fill_top = (inner_top + frame_y).clamp(0.0, scale.height());
-    let fill_bottom = (inner_bottom - frame_y).clamp(fill_top, scale.height());
-    let fill_width = fill_right - fill_left;
-    let screen_w = scale.width().round();
-    let screen_h = scale.height().round();
-    for (mut node, mut image_node, mut bg, strip) in letterbox.iter_mut() {
-        let placed = match strip.0 {
-            0 if fill_left > 0.0 => Some((0.0, 0.0, fill_left, screen_h)),
-            1 if screen_w > fill_right => Some((fill_right, 0.0, screen_w - fill_right, screen_h)),
-            2 if fill_top > 0.0 => Some((fill_left, 0.0, fill_width, fill_top)),
-            3 if screen_h > fill_bottom => {
-                Some((fill_left, fill_bottom, fill_width, screen_h - fill_bottom))
-            }
-            _ => None,
-        };
-        let Some((left, top, width, height)) = placed else {
-            adopt_display(&mut node, Display::None);
-            *bg = BackgroundColor(Color::NONE);
-            continue;
-        };
-        if width <= 0.0 || height <= 0.0 {
-            adopt_display(&mut node, Display::None);
-            *bg = BackgroundColor(Color::NONE);
-            continue;
-        }
-        adopt_display(&mut node, Display::Flex);
-        node.left = Val::Px(left);
-        node.top = Val::Px(top);
-        node.width = Val::Px(width);
-        node.height = Val::Px(height);
-        image_node.image = fill.handle.clone();
-        image_node.color = Color::srgba(1.0, 1.0, 1.0, alpha);
-        image_node.rect = None;
-        *bg = BackgroundColor(fill_color);
-    }
 }
 
 struct SampledFill {

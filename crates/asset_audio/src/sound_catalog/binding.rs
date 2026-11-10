@@ -8,14 +8,6 @@ pub struct SoundHandle {
     variant: usize,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SoundBindingRefusal {
-    ForeignOwner,
-    UnknownAlias,
-    UnpublishedPolicy,
-    ForeignMedia,
-}
-
 #[derive(Clone, Copy)]
 pub struct BoundSound<'a> {
     catalog: &'a SoundCatalog,
@@ -28,10 +20,9 @@ pub enum BoundSoundMedia<'a> {
         sound: &'a LoadedSoundPcm,
     },
     Streamed {
-        namespace: AssetNamespace,
+        namespace: FamilyId,
         dir: String,
         name: String,
-        decode: crate::StreamedDecodePolicy,
     },
 }
 
@@ -49,18 +40,20 @@ impl<'a> BoundSound<'a> {
         self.handle.variant
     }
     pub fn policy(self) -> &'a crate::AliasPlaybackPolicy {
-        &self.catalog.playback[self.handle.alias][self.handle.variant]
+        self.catalog
+            .playback_policy(self.handle.alias, self.handle.variant)
+            .expect("bound published policy")
     }
-    pub fn media(self) -> Result<Option<BoundSoundMedia<'a>>, SoundBindingRefusal> {
+    pub fn media(self) -> Result<Option<BoundSoundMedia<'a>>, &'static str> {
         let policy = self.policy();
         let row = &self.catalog.sounds[self.handle.alias].aliases[self.handle.variant];
         if let Some(index) = row.loaded.bound_index() {
             let sound = self
                 .catalog
                 .pcm_at(index)
-                .ok_or(SoundBindingRefusal::ForeignMedia)?;
+                .ok_or("sound media belongs to another family")?;
             if ns_of(sound.game) != policy.namespace {
-                return Err(SoundBindingRefusal::ForeignMedia);
+                return Err("sound media belongs to another family");
             }
             return Ok(Some(BoundSoundMedia::Loaded { index, sound }));
         }
@@ -71,29 +64,25 @@ impl<'a> BoundSound<'a> {
                 namespace,
                 dir,
                 name,
-                decode: policy.streamed_decode(),
             }))
     }
 }
 
 impl SoundCatalog {
-    pub fn bind(&self, handle: SoundHandle) -> Result<BoundSound<'_>, SoundBindingRefusal> {
+    pub fn bind(&self, handle: SoundHandle) -> Result<BoundSound<'_>, &'static str> {
         if self.revision == 0 || self.revision != handle.revision {
-            return Err(SoundBindingRefusal::ForeignOwner);
+            return Err("sound handle belongs to another catalog");
         }
-        let sound = self
-            .sounds
-            .get(handle.alias)
-            .ok_or(SoundBindingRefusal::UnknownAlias)?;
+        let sound = self.sounds.get(handle.alias).ok_or("unknown sound alias")?;
         sound
             .aliases
             .get(handle.variant)
-            .ok_or(SoundBindingRefusal::UnknownAlias)?;
+            .ok_or("unknown sound alias")?;
         let policy = self
             .playback_policy(handle.alias, handle.variant)
-            .ok_or(SoundBindingRefusal::UnpublishedPolicy)?;
+            .ok_or("sound playback policy unavailable")?;
         if policy.namespace != ns_of(sound.game) {
-            return Err(SoundBindingRefusal::UnpublishedPolicy);
+            return Err("sound playback policy unavailable");
         }
         Ok(BoundSound {
             catalog: self,
@@ -105,7 +94,7 @@ impl SoundCatalog {
         &self,
         alias: usize,
         variant: usize,
-    ) -> Result<BoundSound<'_>, SoundBindingRefusal> {
+    ) -> Result<BoundSound<'_>, &'static str> {
         self.bind(SoundHandle {
             revision: self.revision,
             alias,

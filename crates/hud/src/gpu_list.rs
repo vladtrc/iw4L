@@ -53,7 +53,6 @@ pub struct HudTessBatch {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ShellshockScreen {
-    pub world_generation: Option<u64>,
     pub client: u32,
     pub view_client: u32,
     pub life_sequence: u64,
@@ -179,6 +178,7 @@ pub enum TessJob {
 
 #[derive(Resource, Default)]
 pub struct HudTessPass {
+    pub campaign_objectives: TessJob,
     pub overhead_names: TessJob,
     pub compass: TessJob,
     pub scorebar: TessJob,
@@ -235,38 +235,50 @@ pub fn take_tess_body_cost() -> (f32, u32) {
     (ns as f32 / 1e6, jobs)
 }
 
-pub fn apply_tess_job(
-    job: TessJob,
-    host: &mut Node,
-    latch: &mut GpuListLatch,
-    hud_images: &mut HudImages,
-    images: &mut Assets<Image>,
-    frame: &mut HudTessGpuFrame,
-    surface_w: f32,
-    surface_h: f32,
-) {
-    JOBS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    match job {
-        TessJob::None => {
-            if !latch.hidden && !latch.packed.vertices.is_empty() {
-                frame.append_packed(&latch.packed);
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct HudTessWriter<'w> {
+    surface: Res<'w, crate::surface::Hud2dSurface>,
+    hud_images: ResMut<'w, HudImages>,
+    images: ResMut<'w, Assets<Image>>,
+    frame: ResMut<'w, HudTessGpuFrame>,
+}
+
+impl HudTessWriter<'_> {
+    pub(crate) fn is_ready(&self) -> bool {
+        self.surface.is_ready()
+    }
+
+    pub(crate) fn apply(&mut self, job: TessJob, host: &mut Node, latch: &mut GpuListLatch) {
+        // None and Hide submissions still mark all three output resources changed.
+        let hud_images = &mut *self.hud_images;
+        let images = &mut *self.images;
+        let frame = &mut *self.frame;
+        let surface = &*self.surface;
+        let surface_w = surface.width();
+        let surface_h = surface.height();
+        JOBS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        match job {
+            TessJob::None => {
+                if !latch.hidden && !latch.packed.vertices.is_empty() {
+                    frame.append_packed(&latch.packed);
+                }
             }
-        }
-        TessJob::Hide => hide_list(host, latch),
-        TessJob::Quads(quads) => {
-            if quads.is_empty() {
-                hide_list(host, latch);
-            } else {
-                present_list(PresentInput {
-                    host,
-                    latch,
-                    quads: &quads,
-                    hud_images,
-                    images,
-                    frame,
-                    surface_w,
-                    surface_h,
-                });
+            TessJob::Hide => hide_list(host, latch),
+            TessJob::Quads(quads) => {
+                if quads.is_empty() {
+                    hide_list(host, latch);
+                } else {
+                    present_list(PresentInput {
+                        host,
+                        latch,
+                        quads: &quads,
+                        hud_images,
+                        images,
+                        frame,
+                        surface_w,
+                        surface_h,
+                    });
+                }
             }
         }
     }

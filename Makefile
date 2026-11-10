@@ -10,9 +10,9 @@ endif
 GOAL := $(firstword $(MAKECMDGOALS))
 ARGS := $(wordlist 2,$(words $(MAKECMDGOALS)),$(MAKECMDGOALS))
 
-.PHONY: map export-gltf play bench bench-load-session bench-live bench-overhead bench-perf menu menu-shots scenario chaos lifecycle-all lifecycle-swap lifecycle-replace lifecycle-play-in lifecycle-demo-out lifecycle-demo-map launcher deploy logs loc clean help
+.PHONY: map export-gltf play render bench bench-load-session bench-live bench-overhead bench-perf menu menu-shots scenario chaos lifecycle-all lifecycle-swap lifecycle-replace lifecycle-play-in lifecycle-demo-out lifecycle-demo-map launcher deploy logs loc clean help
 .PHONY: build-windows setup-windows release publish github-release
-.PHONY: mr publish-check approved
+.PHONY: mr publish-check approved perf-compare
 .PHONY: $(ARGS)
 
 $(ARGS):
@@ -27,10 +27,12 @@ CMDS ?=
 CMDS_ARG = $(if $(CMDS),--cmds '$(CMDS)',)
 ZONE ?=
 ZONE_ARG = $(if $(ZONE),--zone $(ZONE),)
+# Host game mode token (dm, dom, dd, ...); the launcher defaults to dm.
+#   make map mp_nuketown GAMETYPE=dd
+GAMETYPE ?=
+GAMETYPE_ARG = $(if $(GAMETYPE),--gametype $(GAMETYPE),)
 
-# Live recipes use `[profile.play]` (Cargo.toml): release opt-level without
-# the fat-LTO link. PROFILE=release is the LTO binary. `make deploy`
-# uses this same PROFILE (default play).
+# Live recipes and `make deploy` use `[profile.play]` (Cargo.toml).
 PROFILE ?= play
 PROFILE_ARG = --profile $(PROFILE)
 RELEASE ?=
@@ -83,12 +85,13 @@ LIFECYCLE_DEMO_MAP_CMDS ?= wait world; spawn 0; record swap_map; wait 2s; stopre
 require-games:
 	@test -n "$(IW4L_GAMES)" || { echo "IW4L_GAMES unset — copy .env.example to .env and set the games root"; exit 1; }
 
+# Random door template: make map random-door mp_rust mp_nuked
 # ZONE= is the colon escape hatch: GNU make parses `iw5:mp_overwatch` as a
 # pattern rule (`target pattern contains no '%'`). `make map mp_boneyard` still
 # uses ARGS. ZONE wins if both are set.
 map: require-games
 	@test -n "$(or $(ZONE),$(ARGS))" || { echo "usage: make map <zone>   e.g. make map mp_boneyard"; echo "       make map ZONE=iw5:mp_overwatch   (colon is a make pattern)"; exit 1; }
-	cd $(ROOT) && $(CARGO) run $(PROFILE_ARG) -p launcher -- map $(or $(ZONE),$(ARGS)) $(CMDS_ARG)
+	cd $(ROOT) && $(CARGO) run $(PROFILE_ARG) -p launcher -- $(GAMETYPE_ARG) map $(or $(ZONE),$(ARGS)) $(CMDS_ARG)
 
 export-gltf: require-games
 	@test -n "$(or $(ZONE),$(ARGS))" || { echo "usage: make export-gltf <zone>"; exit 1; }
@@ -98,25 +101,24 @@ export-gltf: require-games
 # CMDS= still runs during playback (wait world; quit).
 play: require-games
 	@test -n "$(ARGS)" || { echo "usage: make play <demoname>   e.g. make play demo0000"; exit 1; }
-	cd $(ROOT) && $(CARGO) run $(PROFILE_ARG) -p launcher -- play $(ARGS) $(ZONE_ARG) $(CMDS_ARG)
+	cd $(ROOT) && $(CARGO) run $(PROFILE_ARG) -p launcher -- $(GAMETYPE_ARG) play $(ARGS) $(ZONE_ARG) $(CMDS_ARG)
 
-# The bench. One process, three independent reports written at exit: where the
-# map load spent its time, where a gameplay frame spends its time by span, and
-# what that frame asked the machine to do. All three are in-process — no trace
-# file and no Trace Processor — and land in iw4l-artifacts/bench/<stamp>.txt as
-# well as on stdout. The run's own directory gets report.txt, manifest.json and
-# summary.json beside the .pftrace, so a number can be read months later.
+# Render a Library clip at a fixed frame rate, then quit after encoding.
+# Output: iw4l-artifacts/renders/<clip>.mp4.
+FPS ?= 60
+render: require-games
+	@test -n "$(ARGS)" || { echo "usage: make render <clip> [FPS=60]"; exit 1; }
+	cd $(ROOT) && $(CARGO) run $(PROFILE_ARG) -p launcher -- menu --cmds 'render $(ARGS) $(FPS)'
+
+# Benchmark recording and offline SQL: docs/BENCH.md.
 #
 #   make bench demo0011            play a demo   (also: DEMO=demo0011)
 #   make bench ZONE=mp_boneyard    live map instead of a demo
-#   make bench demo0011 PROFILE=release          the LTO binary
 #
 # A goal after `bench` is always a demo name, never a zone: one goal cannot
 # tell the two apart, and ZONE= already names a map. `--demo` cannot be
 # written on the command line — make would read it as a flag of its own —
 # so the demo is a goal or DEMO=, and ZONE= still overrides a demo's header.
-# IW4L_PERF is on as well, so `cargo xtask bench` can still read the .pftrace
-# afterwards for the per-frame view this report deliberately does not give.
 # Same [profile.play] binary as `make play`; AutoNoVsync matches renderer
 # acceptance, Fifo would measure the monitor's refresh queue instead.
 BENCH_DEMO ?= $(DEMO)
@@ -127,7 +129,7 @@ BENCH_MAP_CMDS ?= wait world; spawn 0; wait ambient; force_match_start; wait 10s
 BENCH_DEMO_CMDS ?=
 bench: require-games
 	@test -n "$(or $(BENCH_DEMO),$(ZONE),$(ARGS))" || { echo "usage: make bench <demo>            e.g. make bench demo0011"; echo "       make bench ZONE=<zone>       e.g. make bench ZONE=mp_boneyard"; exit 1; }
-	cd $(ROOT) && IW4L_BENCH_STARTED_NS=$$(date +%s%N) IW4L_BENCH=1 IW4L_PERF=1 IW4L_PRESENT_MODE=AutoNoVsync $(CARGO) run $(PROFILE_ARG) -p launcher -- $(BENCH_TARGET)
+	cd $(ROOT) && IW4L_BENCH_STARTED_NS=$$(date +%s%N) IW4L_BENCH=1 IW4L_PERF=1 IW4L_PRESENT_MODE=AutoNoVsync $(CARGO) run $(PROFILE_ARG) -p launcher -- $(GAMETYPE_ARG) $(BENCH_TARGET)
 
 # `play <demo>` when a demo was named, `map <zone>` otherwise. A demo carries
 # its own zone in the header, so ZONE= only overrides it.
@@ -170,13 +172,13 @@ bench-perf: require-games
 # Script is BENCH_LIVE_CMDS; CMDS= replaces it. The process prints the run path,
 # then xtask reports active-gameplay percentiles and hot paths from that trace.
 bench-live: require-games
-	cd $(ROOT) && IW4L_PERF=1 IW4L_PRESENT_MODE=AutoNoVsync $(CARGO) run $(PROFILE_ARG) -p launcher -- map $(or $(ZONE),$(ARGS),$(SCENARIO_ZONE)) --cmds '$(or $(CMDS),$(BENCH_LIVE_CMDS))'
+	cd $(ROOT) && IW4L_PERF=1 IW4L_PRESENT_MODE=AutoNoVsync $(CARGO) run $(PROFILE_ARG) -p launcher -- $(GAMETYPE_ARG) map $(or $(ZONE),$(ARGS),$(SCENARIO_ZONE)) --cmds '$(or $(CMDS),$(BENCH_LIVE_CMDS))'
 	cd $(ROOT) && $(CARGO) run --quiet -p xtask -- bench
 
 # Alternating paired process benchmark. One binary and one script are used for
 # both arms; the runner requires >=5 measured pairs and reports a paired 95% CI.
 # VAR picks which recorder the on-arm turns on: IW4L_PERF (the Perfetto session,
-# the default) or IW4L_BENCH (the in-process recorder `make bench` reads). They
+# the default) or IW4L_BENCH (load observations and continuous rendering). They
 # are separate costs and each needs its own pairs.
 PERF_OVERHEAD_VAR ?= IW4L_PERF
 bench-overhead: require-games
@@ -222,7 +224,7 @@ lifecycle-demo-map: require-games
 	cd $(ROOT) && $(CARGO) run -p xtask -- live demo-map
 
 menu: require-games
-	cd $(ROOT) && $(CARGO) run $(PROFILE_ARG) -p launcher -- menu $(CMDS_ARG)
+	cd $(ROOT) && $(CARGO) run $(PROFILE_ARG) -p launcher -- $(GAMETYPE_ARG) menu $(CMDS_ARG)
 
 menu-shots:
 	@test -n "$$IW4L_GAMES" -o -n "$(IW4L_GAMES)" || { echo "set IW4L_GAMES to the games root"; exit 1; }
@@ -287,7 +289,16 @@ SCENARIO ?= heavy_gameplay_lifecycle
 # Cold cache by default; ARGS='--seed N' | '--replay <run.json>' | '--cache shared'.
 approved: require-games
 	cd $(ROOT) && $(CARGO) build --profile play -p launcher
+	$(if $(filter master_duo_chaos,$(SCENARIO)),cd $(ROOT) && $(CARGO) build --profile play -p iw4l-master,)
 	cd $(ROOT) && $(CARGO) run --quiet -p approved_tests -- $(SCENARIO) $(ARGS)
+
+# Build each commit once (play profile, one fixed worktree), then run the heavy
+# approved scenario on every binary in alternating rounds of one series.
+# `make perf-compare <base> <candidate>...` or HASHES='…'; ROUNDS, WARMUP, REPLAY=<run.json>.
+PERF_COMPARE_ROUNDS ?= 3
+PERF_COMPARE_INHIBIT := $(shell command -v gnome-session-inhibit 2>/dev/null)
+perf-compare: require-games
+	cd $(ROOT) && $(PERF_COMPARE_INHIBIT) $(CARGO) run --quiet -p xtask -- perf-compare $(or $(HASHES),$(ARGS)) --rounds $(or $(ROUNDS),$(PERF_COMPARE_ROUNDS)) $(if $(WARMUP),--warmup $(WARMUP)) $(if $(REPLAY),--replay $(REPLAY))
 
 # What a push would publish: nothing under `context/`, no `.env`, no key, no
 # piece of a game install, and no retail offsets left over in the code. It is a
@@ -305,7 +316,7 @@ loc:
 	@$(XTASK) loc
 
 # Reclaim disk: wipe target/debug only. Keeps target/play (live recipes)
-# and target/release (`PROFILE=release`) so neither has to relink. No rebuild.
+# so it does not have to relink. No rebuild.
 clean:
 	@before=$$(du -sh $(ROOT)/target/debug 2>/dev/null | cut -f1); \
 	 if [ -z "$$before" ]; then echo "nothing to clean (no target/debug)"; exit 0; fi; \
@@ -315,7 +326,7 @@ clean:
 	 df -h $(ROOT) | tail -1
 
 help:
-	@echo "make map <zone>   run crates/launcher, zone e.g. mp_boneyard"
+	@echo "make map <zone>   run apps/launcher, zone e.g. mp_boneyard [GAMETYPE=dd]"
 	@echo "                  make map ZONE=iw5:mp_overwatch  (colon cannot be a make goal)"
 	@echo "                  add CMDS='spawn 0; hold +attack' to script it"
 	@echo "                  sync-by-default: map/demo/disconnect/spawn block the FIFO"
@@ -323,12 +334,13 @@ help:
 	@echo "make play <demo>  play iw4l-artifacts/demos/<demo>.iw4ldemo, then quit"
 	@echo "                  ZONE= overrides header"
 	@echo "                  CMDS='wait world; wait 5s; quit' mid-play"
+	@echo "make render <clip> render a Library clip to iw4l-artifacts/renders/<clip>.mp4 [FPS=60]"
 	@echo "make bench <demo>  the bench: map-load breakdown, frame time by span,"
 	@echo "                  render/GPU/work counters; printed at exit, written to"
 	@echo "                  iw4l-artifacts/bench/ and the run dir as a package"
 	@echo "                  a goal is always a demo name; ZONE=mp_boneyard benches"
 	@echo "                  a live map instead, DEMO=demo0011 is the goal form"
-	@echo "                  same [profile.play] as map/play; PROFILE=release for LTO"
+	@echo "                  same [profile.play] as map/play"
 	@echo "make bench-live [zone]  live map: force start, fire/walk/yaw hold, 16 bots,"
 	@echo "                  wait 10s, then flush trace.pftrace (default mp_boneyard)"
 	@echo "                  ZONE=iw5:mp_overwatch  (colon cannot be a make goal)"
@@ -336,6 +348,9 @@ help:
 	@echo "make bench-load-session  menu → Hanoi → Underpass; engine mark intervals"
 	@echo "make bench-overhead  paired default-off/on runs of one built binary;"
 	@echo "                  PERF_OVERHEAD_PAIRS=10, alternating order, paired 95% CI"
+	@echo "make perf-compare <base> <hash>...  build each commit, run the heavy approved"
+	@echo "                  scenario in alternating rounds, report gameplay frames + RSS"
+	@echo "                  per hash under iw4l-artifacts/perf-compare/ (ROUNDS=3)"
 	@echo "make bench-perf   same live run under perf record (needs the perf package),"
 	@echo "                  [profile.perf] binary, perf.data under iw4l-artifacts/perf"
 	@echo "make scenario     play the scripted match, then gate its .pftrace"

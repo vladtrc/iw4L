@@ -11,15 +11,12 @@ asset_core.workspace = true
 asset_transport.workspace = true
 asset_iw4.workspace = true
 fastfile_iw4.workspace = true
-fastfile_iw5.workspace = true
-fastfile_t5.workspace = true
 dpvs_iw4.workspace = true
 lighting_iw4.workspace = true
 render_material.workspace = true
 diag.workspace = true
 bevy.workspace = true
 bcdec_rs.workspace = true
-dxbc_sm5.workspace = true
 
 [lints]
 workspace = true

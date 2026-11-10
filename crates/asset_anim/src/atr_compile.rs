@@ -74,6 +74,23 @@ fn add_selected_names(
     }
 }
 
+pub fn compile_script_animtree(
+    atr: &[u8],
+    names: impl IntoIterator<Item = String>,
+) -> Result<Arc<CompiledAnimTreeDefinition>, AtrCompileError> {
+    let names: std::collections::BTreeSet<_> = names
+        .into_iter()
+        .map(|name| name.to_ascii_lowercase())
+        .collect();
+    let tree = compile_named_tree(atr, names.iter().cloned().collect())?;
+    for name in names {
+        if tree.index_of(&name).is_none() {
+            return Err(AtrCompileError::AnimationNotFound { name });
+        }
+    }
+    Ok(tree)
+}
+
 fn compile_named_tree(
     atr: &[u8],
     names: HashSet<String>,
@@ -228,7 +245,7 @@ fn parse_internal(
                 names,
                 ignored,
                 !work.ignore,
-                (work.flags & ANIMFLAG_LOOPSYNC) != 0,
+                loop_sync || (work.flags & ANIMFLAG_LOOPSYNC) != 0,
                 child_complete,
             )?;
             if nested_eof {

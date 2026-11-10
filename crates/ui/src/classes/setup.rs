@@ -152,7 +152,7 @@ impl ClassLoadoutCatalog {
             .map(|family| (family.namespace, family.base))
             .unwrap_or_else(|| {
                 (
-                    asset_core::AssetNamespace::Iw4,
+                    asset_core::FamilyId::IW4,
                     value.trim_end_matches("_mp").to_owned(),
                 )
             });
@@ -259,7 +259,7 @@ impl ClassLoadoutCatalog {
 
     pub fn with_weapon_tables(
         mut self,
-        tables: &[(asset_core::AssetNamespace, asset_game::CapturedStringTable)],
+        tables: &[(asset_core::FamilyId, asset_game::CapturedStringTable)],
     ) -> Self {
         for (namespace, table) in tables {
             if !asset_game::is_stats_table_name(&table.name) {
@@ -335,7 +335,7 @@ impl ClassLoadoutCatalog {
             self.previews.insert(
                 row.reference.clone(),
                 prepare_cac_preview(
-                    asset_core::AssetNamespace::Iw4,
+                    asset_core::FamilyId::IW4,
                     asset_game::CacWeaponPreview {
                         reference: row.reference,
                         name_key: row.name_key,
@@ -615,7 +615,7 @@ impl ClassSlotState {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ClassPickerFolder {
-    pub namespace: asset_core::AssetNamespace,
+    pub namespace: asset_core::FamilyId,
     pub category: Option<asset_game::CacAuthoredCategory>,
 }
 

@@ -1,15 +1,11 @@
+use crate::plugin::WaitKind;
 use bevy::prelude::*;
-use net::{
-    ClientActionInbox, LocalPresentClient, LookState, PresentedSnapshot, look_angles_from_degrees,
-};
+use net::PresentedSnapshot;
 use sim::{ClientAction, ClientLifecycle, MatchPhase, SpawnPick};
 use ui::UiLayer;
 
 use crate::feature_dispatch::DebugPosOverlay;
-use crate::{
-    ConsoleCommand, ConsoleDispatch, ConsoleLine, ConsoleRegistry, ConsoleSettings, ConsoleState,
-    plugin::WaitMovePose,
-};
+use crate::{ConsoleCommand, ConsoleDispatch, ConsoleLine, ConsoleRegistry, plugin::WaitMovePose};
 
 #[derive(Component)]
 pub(crate) struct ShowposHud;
@@ -58,6 +54,11 @@ pub(crate) fn register_debug_move_commands(registry: &mut ConsoleRegistry) {
             crate::CommandSpec::new("god").usage("god — toggle invincibility (needs cheats)"),
         );
     }
+    if registry.resolve("projectile_flight").is_none() {
+        registry.register(crate::CommandSpec::new("projectile_flight").usage(
+            "projectile_flight — toggle bouncing projectiles and travel through portals (requires cheats)",
+        ));
+    }
     if registry.resolve("kill").is_none() {
         registry
             .register(crate::CommandSpec::new("kill").usage(
@@ -93,6 +94,11 @@ pub(crate) fn register_debug_move_commands(registry: &mut ConsoleRegistry) {
             "nudge <dx> <dy> <dz> — authority-only origin shift, no teleport bit (needs cheats)",
         ));
     }
+    if registry.resolve("end_grace_period").is_none() {
+        registry.register(crate::CommandSpec::new("end_grace_period").usage(
+            "end_grace_period — the stock grace period ends within a second (needs cheats; invented)",
+        ));
+    }
     if registry.resolve("force_match_start").is_none() {
         registry.register(crate::CommandSpec::new("force_match_start").usage(
             "force_match_start — skip waitForPlayers and matchStartTimer (needs cheats; invented)",
@@ -102,94 +108,67 @@ pub(crate) fn register_debug_move_commands(registry: &mut ConsoleRegistry) {
 
 pub(crate) fn route_debug_move_commands(
     mut events: MessageReader<ConsoleCommand>,
-    mut console: ResMut<ConsoleState>,
-    settings: Res<ConsoleSettings>,
-    mut line: ResMut<ConsoleLine>,
+    mut echo: crate::feature_dispatch::ConsoleEcho,
     mut debug_pos: ResMut<DebugPosOverlay>,
-    presented: Res<PresentedSnapshot>,
-    local: Res<LocalPresentClient>,
+    presentation: net::LocalPresentation,
     mut authority: Option<ResMut<net::AuthorityWorld>>,
-    mut inbox: Option<ResMut<ClientActionInbox>>,
-    mut seq: ResMut<net::ActionRequestIds>,
-    mut look: ResMut<LookState>,
+    mut target: crate::client_actions::ClientActionTarget,
     mut dispatch: ResMut<ConsoleDispatch>,
 ) {
-    let capacity = settings.log_capacity;
-    let echo = |msg: String, console: &mut ConsoleState, line: &mut ConsoleLine| {
-        diag::info!(Console, "{msg}");
-        line.0 = msg.clone();
-        console.echo(msg, capacity);
-    };
-
     for cmd in events.read() {
         match cmd.name.as_str() {
             "showpos" | "debug_pos" => match cmd.args.first().map(String::as_str) {
                 None => {
                     debug_pos.0 = true;
-                    echo(format_showpos(&presented, local.0), &mut console, &mut line);
+                    echo.write(format_showpos(
+                        &presentation.presented,
+                        presentation.client_id(),
+                    ));
                 }
                 Some("on") | Some("1") => {
                     debug_pos.0 = true;
-                    echo("showpos on".into(), &mut console, &mut line);
+                    echo.write("showpos on");
                 }
                 Some("off") | Some("0") => {
                     debug_pos.0 = false;
-                    echo("showpos off".into(), &mut console, &mut line);
+                    echo.write("showpos off");
                 }
-                Some(other) => echo(
-                    format!("usage: showpos [on|off] (got `{other}`)"),
-                    &mut console,
-                    &mut line,
-                ),
+                Some(other) => echo.write(format!("usage: showpos [on|off] (got `{other}`)")),
             },
-            "move" | "tp" => match parse_move(&cmd.args, &presented, local.0) {
-                Err(msg) => echo(msg, &mut console, &mut line),
-                Ok((origin, angles)) => {
-                    if !alive(&presented, local.0) {
-                        echo(
-                            "move: not Alive — spawn a class first".into(),
-                            &mut console,
-                            &mut line,
-                        );
-                        continue;
-                    }
-                    if authority.as_ref().is_some_and(|a| !a.0.cheats_enabled()) {
-                        echo("move: cheats are off".into(), &mut console, &mut line);
-                        continue;
-                    }
-                    let Some(inbox) = inbox.as_deref_mut() else {
-                        echo(
-                            "move: no action inbox (not a listen host)".into(),
-                            &mut console,
-                            &mut line,
-                        );
-                        continue;
-                    };
-                    let request_id = seq.allocate();
-                    if let Err(error) = inbox.push(
-                        local.0,
-                        ClientAction::Move {
-                            request_id,
+            "move" | "tp" => {
+                match parse_move(&cmd.args, &presentation.presented, presentation.client_id()) {
+                    Err(msg) => echo.write(msg),
+                    Ok((origin, angles)) => {
+                        if !alive(&presentation.presented, presentation.client_id()) {
+                            echo.write("move: not Alive — spawn a class first");
+                            continue;
+                        }
+                        if authority.as_ref().is_some_and(|a| !a.0.cheats_enabled()) {
+                            echo.write("move: cheats are off");
+                            continue;
+                        }
+                        let Some(mut inbox) = target.queue() else {
+                            echo.write("move: no action inbox (not a listen host)");
+                            continue;
+                        };
+                        if let Err(error) = inbox.push(
+                            presentation.client_id(),
+                            ClientAction::Move { origin, angles },
+                        ) {
+                            echo.write(format!("move: {error}"));
+                            continue;
+                        }
+
+                        arm_wait_move(
+                            &mut dispatch,
+                            cmd.background,
+                            presentation.client_id(),
                             origin,
                             angles,
-                        },
-                    ) {
-                        echo(format!("move: {error}"), &mut console, &mut line);
-                        continue;
-                    }
-
-                    look.angles = look_angles_from_degrees(angles);
-                    arm_wait_move(
-                        &mut dispatch,
-                        cmd.background,
-                        local.0,
-                        origin,
-                        angles,
-                        "move",
-                    );
-                    echo(
-                        format!(
-                            "move: queued ({:.1} {:.1} {:.1}) yaw={:.0} pitch={:.0} request_id={request_id}{}",
+                            "move",
+                        );
+                        echo.write(format!(
+                            "move: queued ({:.1} {:.1} {:.1}) yaw={:.0} pitch={:.0}{}",
                             origin[0],
                             origin[1],
                             origin[2],
@@ -200,59 +179,43 @@ pub(crate) fn route_debug_move_commands(
                             } else {
                                 " (sync until presented pose)"
                             }
-                        ),
-                        &mut console,
-                        &mut line,
-                    );
+                        ));
+                    }
                 }
-            },
-            "look" => match parse_look(&cmd.args, &presented, local.0) {
-                Err(msg) => echo(msg, &mut console, &mut line),
-                Ok((origin, angles)) => {
-                    if !alive(&presented, local.0) {
-                        echo(
-                            "look: not Alive — spawn a class first".into(),
-                            &mut console,
-                            &mut line,
-                        );
-                        continue;
-                    }
-                    if authority.as_ref().is_some_and(|a| !a.0.cheats_enabled()) {
-                        echo("look: cheats are off".into(), &mut console, &mut line);
-                        continue;
-                    }
-                    let Some(inbox) = inbox.as_deref_mut() else {
-                        echo(
-                            "look: no action inbox (not a listen host)".into(),
-                            &mut console,
-                            &mut line,
-                        );
-                        continue;
-                    };
-                    let request_id = seq.allocate();
-                    if let Err(error) = inbox.push(
-                        local.0,
-                        ClientAction::Move {
-                            request_id,
+            }
+            "look" => {
+                match parse_look(&cmd.args, &presentation.presented, presentation.client_id()) {
+                    Err(msg) => echo.write(msg),
+                    Ok((origin, angles)) => {
+                        if !alive(&presentation.presented, presentation.client_id()) {
+                            echo.write("look: not Alive — spawn a class first");
+                            continue;
+                        }
+                        if authority.as_ref().is_some_and(|a| !a.0.cheats_enabled()) {
+                            echo.write("look: cheats are off");
+                            continue;
+                        }
+                        let Some(mut inbox) = target.queue() else {
+                            echo.write("look: no action inbox (not a listen host)");
+                            continue;
+                        };
+                        if let Err(error) = inbox.push(
+                            presentation.client_id(),
+                            ClientAction::Move { origin, angles },
+                        ) {
+                            echo.write(format!("look: {error}"));
+                            continue;
+                        }
+                        arm_wait_move(
+                            &mut dispatch,
+                            cmd.background,
+                            presentation.client_id(),
                             origin,
                             angles,
-                        },
-                    ) {
-                        echo(format!("look: {error}"), &mut console, &mut line);
-                        continue;
-                    }
-                    look.angles = look_angles_from_degrees(angles);
-                    arm_wait_move(
-                        &mut dispatch,
-                        cmd.background,
-                        local.0,
-                        origin,
-                        angles,
-                        "look",
-                    );
-                    echo(
-                        format!(
-                            "look: queued yaw={:.0} pitch={:.0} request_id={request_id}{}",
+                            "look",
+                        );
+                        echo.write(format!(
+                            "look: queued yaw={:.0} pitch={:.0}{}",
                             angles[1],
                             angles[0],
                             if cmd.background {
@@ -260,121 +223,118 @@ pub(crate) fn route_debug_move_commands(
                             } else {
                                 " (sync until presented pose)"
                             }
-                        ),
-                        &mut console,
-                        &mut line,
-                    );
+                        ));
+                    }
                 }
-            },
+            }
             "god" => {
                 if !cmd.args.is_empty() {
-                    echo("usage: god".into(), &mut console, &mut line);
+                    echo.write("usage: god");
                     continue;
                 }
                 if authority.as_ref().is_some_and(|a| !a.0.cheats_enabled()) {
-                    echo("god: cheats are off".into(), &mut console, &mut line);
+                    echo.write("god: cheats are off");
                     continue;
                 }
-                if !alive(&presented, local.0) {
-                    echo(
-                        "god: not Alive — spawn a class first".into(),
-                        &mut console,
-                        &mut line,
-                    );
+                if !alive(&presentation.presented, presentation.client_id()) {
+                    echo.write("god: not Alive — spawn a class first");
                     continue;
                 }
-                let Some(inbox) = inbox.as_deref_mut() else {
-                    echo("god: no action inbox".into(), &mut console, &mut line);
+                let Some(mut inbox) = target.queue() else {
+                    echo.write("god: no action inbox");
                     continue;
                 };
-                let request_id = seq.allocate();
-                if let Err(error) = inbox.push(local.0, ClientAction::ToggleGod { request_id }) {
-                    echo(format!("god: {error}"), &mut console, &mut line);
+                if let Err(error) = inbox.push(presentation.client_id(), ClientAction::ToggleGod) {
+                    echo.write(format!("god: {error}"));
                     continue;
                 }
-                echo(
-                    format!("god: queued toggle request_id={request_id}"),
-                    &mut console,
-                    &mut line,
-                );
+                echo.write("god: queued toggle");
+            }
+            "end_grace_period" => {
+                if authority.as_ref().is_some_and(|a| !a.0.cheats_enabled()) {
+                    echo.write("end_grace_period: cheats are off");
+                    continue;
+                }
+                let Some(mut inbox) = target.queue() else {
+                    echo.write("end_grace_period: no action inbox");
+                    continue;
+                };
+                if let Err(error) =
+                    inbox.push(presentation.client_id(), ClientAction::EndGracePeriod)
+                {
+                    echo.write(format!("end_grace_period: {error}"));
+                    continue;
+                }
+                echo.write("end_grace_period: queued");
+            }
+            "projectile_flight" => {
+                if authority.as_ref().is_some_and(|a| !a.0.cheats_enabled()) {
+                    echo.write("projectile_flight: cheats are off");
+                    continue;
+                }
+                let Some(mut inbox) = target.queue() else {
+                    echo.write("projectile_flight: no action inbox");
+                    continue;
+                };
+                if let Err(error) = inbox.push(
+                    presentation.client_id(),
+                    ClientAction::ToggleProjectileFlight,
+                ) {
+                    echo.write(format!("projectile_flight: {error}"));
+                    continue;
+                }
+                echo.write("projectile_flight: queued toggle");
             }
             "kill" => {
-                if !alive(&presented, local.0) {
-                    echo(
-                        "kill: not Alive — spawn a class first".into(),
-                        &mut console,
-                        &mut line,
-                    );
+                if !alive(&presentation.presented, presentation.client_id()) {
+                    echo.write("kill: not Alive — spawn a class first");
                     continue;
                 }
                 if authority.as_ref().is_some_and(|a| !a.0.cheats_enabled()) {
-                    echo("kill: cheats are off".into(), &mut console, &mut line);
+                    echo.write("kill: cheats are off");
                     continue;
                 }
-                let Some(inbox) = inbox.as_deref_mut() else {
-                    echo(
-                        "kill: no action inbox (not a listen host)".into(),
-                        &mut console,
-                        &mut line,
-                    );
+                let Some(mut inbox) = target.queue() else {
+                    echo.write("kill: no action inbox (not a listen host)");
                     continue;
                 };
-                let request_id = seq.allocate();
-                if let Err(error) = inbox.push(local.0, ClientAction::ForceDeath { request_id }) {
-                    echo(format!("kill: {error}"), &mut console, &mut line);
+                if let Err(error) = inbox.push(presentation.client_id(), ClientAction::ForceDeath) {
+                    echo.write(format!("kill: {error}"));
                     continue;
                 }
-                echo(
-                    format!("kill: queued ForceDeath request_id={request_id}"),
-                    &mut console,
-                    &mut line,
-                );
+                echo.write("kill: queued ForceDeath");
             }
             "force_spawn" => {
                 let pick = match parse_force_spawn(&cmd.args) {
                     Ok(pick) => pick,
                     Err(error) => {
-                        echo(format!("force_spawn: {error}"), &mut console, &mut line);
+                        echo.write(format!("force_spawn: {error}"));
                         continue;
                     }
                 };
                 if authority.as_ref().is_some_and(|a| !a.0.cheats_enabled()) {
-                    echo(
-                        "force_spawn: cheats are off".into(),
-                        &mut console,
-                        &mut line,
-                    );
+                    echo.write("force_spawn: cheats are off");
                     continue;
                 }
-                let Some(inbox) = inbox.as_deref_mut() else {
-                    echo(
-                        "force_spawn: no action inbox (not a listen host)".into(),
-                        &mut console,
-                        &mut line,
-                    );
+                let Some(mut inbox) = target.queue() else {
+                    echo.write("force_spawn: no action inbox (not a listen host)");
                     continue;
                 };
-                let request_id = seq.allocate();
                 if let Err(error) =
-                    inbox.push(local.0, ClientAction::ForceSpawn { request_id, pick })
+                    inbox.push(presentation.client_id(), ClientAction::ForceSpawn { pick })
                 {
-                    echo(format!("force_spawn: {error}"), &mut console, &mut line);
+                    echo.write(format!("force_spawn: {error}"));
                     continue;
                 }
                 if !cmd.background {
                     let life = authority
                         .as_ref()
-                        .and_then(|a| a.0.client_meta(local.0))
+                        .and_then(|a| a.0.client_meta(presentation.client_id()))
                         .map(|m| m.life_sequence)
-                        .unwrap_or_default();
-                    dispatch.wait_alive = Some((local.0, life));
-                    dispatch.wait_alive_elapsed = 0.0;
+                        .unwrap_or(sim::LifeSequence(0));
+                    dispatch.wait(WaitKind::Alive(presentation.client_id(), life));
                 }
-                echo(
-                    format!("force_spawn: queued {pick:?} request_id={request_id}"),
-                    &mut console,
-                    &mut line,
-                );
+                echo.write(format!("force_spawn: queued {pick:?}"));
             }
             "damage" => {
                 let amount = match cmd.args.first() {
@@ -386,66 +346,46 @@ pub(crate) fn route_debug_move_commands(
                 let amount = match amount {
                     Ok(n) if n > 0 => n,
                     Ok(_) => {
-                        echo("damage: amount must be > 0".into(), &mut console, &mut line);
+                        echo.write("damage: amount must be > 0");
                         continue;
                     }
                     Err(msg) => {
-                        echo(msg, &mut console, &mut line);
+                        echo.write(msg);
                         continue;
                     }
                 };
-                if !alive(&presented, local.0) {
-                    echo(
-                        "damage: not Alive — spawn a class first".into(),
-                        &mut console,
-                        &mut line,
-                    );
+                if !alive(&presentation.presented, presentation.client_id()) {
+                    echo.write("damage: not Alive — spawn a class first");
                     continue;
                 }
                 if authority.as_ref().is_some_and(|a| !a.0.cheats_enabled()) {
-                    echo("damage: cheats are off".into(), &mut console, &mut line);
+                    echo.write("damage: cheats are off");
                     continue;
                 }
-                let Some(inbox) = inbox.as_deref_mut() else {
-                    echo(
-                        "damage: no action inbox (not a listen host)".into(),
-                        &mut console,
-                        &mut line,
-                    );
+                let Some(mut inbox) = target.queue() else {
+                    echo.write("damage: no action inbox (not a listen host)");
                     continue;
                 };
-                let request_id = seq.allocate();
-                if let Err(error) =
-                    inbox.push(local.0, ClientAction::DebugDamage { request_id, amount })
-                {
-                    echo(format!("damage: {error}"), &mut console, &mut line);
+                if let Err(error) = inbox.push(
+                    presentation.client_id(),
+                    ClientAction::DebugDamage { amount },
+                ) {
+                    echo.write(format!("damage: {error}"));
                     continue;
                 }
-                echo(
-                    format!("damage: queued {amount} request_id={request_id}"),
-                    &mut console,
-                    &mut line,
-                );
+                echo.write(format!("damage: queued {amount}"));
             }
             "nudge" => {
                 if cmd.args.len() != 3 {
-                    echo(
-                        "usage: nudge <dx> <dy> <dz>".into(),
-                        &mut console,
-                        &mut line,
-                    );
+                    echo.write("usage: nudge <dx> <dy> <dz>");
                     continue;
                 }
-                if !alive(&presented, local.0) {
-                    echo(
-                        "nudge: not Alive — spawn a class first".into(),
-                        &mut console,
-                        &mut line,
-                    );
+                if !alive(&presentation.presented, presentation.client_id()) {
+                    echo.write("nudge: not Alive — spawn a class first");
                     continue;
                 }
                 if authority.as_ref().is_some_and(|a| !a.0.cheats_enabled()) {
-                    echo("nudge: cheats are off".into(), &mut console, &mut line);
+                    echo.write("nudge: cheats are off");
                     continue;
                 }
                 let parse = |s: &str| {
@@ -461,145 +401,93 @@ pub(crate) fn route_debug_move_commands(
                 ) {
                     (Ok(x), Ok(y), Ok(z)) => [x, y, z],
                     (Err(msg), _, _) | (_, Err(msg), _) | (_, _, Err(msg)) => {
-                        echo(msg, &mut console, &mut line);
+                        echo.write(msg);
                         continue;
                     }
                 };
                 let Some(authority) = authority.as_deref_mut() else {
-                    echo(
-                        "nudge: no authority world (not a listen host)".into(),
-                        &mut console,
-                        &mut line,
-                    );
+                    echo.write("nudge: no authority world (not a listen host)");
                     continue;
                 };
-                authority.0.gate_nudge_origin(local.0, delta);
-                echo(
-                    format!(
-                        "nudge: authority origin += ({:.1} {:.1} {:.1})",
-                        delta[0], delta[1], delta[2]
-                    ),
-                    &mut console,
-                    &mut line,
-                );
+                authority
+                    .0
+                    .gate_nudge_origin(presentation.client_id(), delta);
+                echo.write(format!(
+                    "nudge: authority origin += ({:.1} {:.1} {:.1})",
+                    delta[0], delta[1], delta[2]
+                ));
             }
             "name" => match cmd.args.as_slice() {
                 [] => {
-                    let shown = presented
+                    let shown = presentation
+                        .presented
                         .snapshot()
-                        .and_then(|s| s.meta.for_client(local.0))
+                        .and_then(|s| s.meta.for_client(presentation.client_id()))
                         .and_then(|m| entity_iw4::client_state_name(&m.name).map(str::to_owned));
                     match shown {
-                        Some(n) => echo(format!("name is \"{n}\""), &mut console, &mut line),
-                        None => echo("name is \"\"".into(), &mut console, &mut line),
+                        Some(n) => echo.write(format!("name is \"{n}\"")),
+                        None => echo.write("name is \"\""),
                     }
                 }
                 [raw] => {
-                    let Some(inbox) = inbox.as_deref_mut() else {
-                        echo(
-                            "name: no action inbox (not a listen host)".into(),
-                            &mut console,
-                            &mut line,
-                        );
+                    let Some(mut inbox) = target.queue() else {
+                        echo.write("name: no action inbox (not a listen host)");
                         continue;
                     };
                     let packed = entity_iw4::pack_client_state_name(raw);
-                    let request_id = seq.allocate();
                     if let Err(error) = inbox.push(
-                        local.0,
-                        ClientAction::SetName {
-                            request_id,
-                            name: packed,
-                        },
+                        presentation.client_id(),
+                        ClientAction::SetName { name: packed },
                     ) {
-                        echo(format!("name: {error}"), &mut console, &mut line);
+                        echo.write(format!("name: {error}"));
                         continue;
                     }
-                    echo(
-                        format!("name: queued `{raw}` request_id={request_id}"),
-                        &mut console,
-                        &mut line,
-                    );
+                    echo.write(format!("name: queued `{raw}`"));
                 }
-                _ => echo("usage: name [string]".into(), &mut console, &mut line),
+                _ => echo.write("usage: name [string]"),
             },
             "force_match_start" => {
                 if authority.as_ref().is_some_and(|a| !a.0.cheats_enabled()) {
-                    echo(
-                        "force_match_start: cheats are off".into(),
-                        &mut console,
-                        &mut line,
-                    );
+                    echo.write("force_match_start: cheats are off");
                     continue;
                 }
                 let Some(world) = authority.as_ref() else {
-                    echo(
-                        "force_match_start: no authority world (not a listen host)".into(),
-                        &mut console,
-                        &mut line,
-                    );
+                    echo.write("force_match_start: no authority world (not a listen host)");
                     continue;
                 };
                 match world.0.phase() {
                     MatchPhase::Playing => {
-                        echo(
-                            "force_match_start: already playing".into(),
-                            &mut console,
-                            &mut line,
-                        );
+                        echo.write("force_match_start: already playing");
                         continue;
                     }
                     MatchPhase::Warmup => {}
                     other => {
-                        echo(
-                            format!("force_match_start: match is not in warmup (phase={other:?})"),
-                            &mut console,
-                            &mut line,
-                        );
+                        echo.write(format!(
+                            "force_match_start: match is not in warmup (phase={other:?})"
+                        ));
                         continue;
                     }
                 }
-                let Some(inbox) = inbox.as_deref_mut() else {
-                    echo(
-                        "force_match_start: no action inbox (not a listen host)".into(),
-                        &mut console,
-                        &mut line,
-                    );
+                let Some(mut inbox) = target.queue() else {
+                    echo.write("force_match_start: no action inbox (not a listen host)");
                     continue;
                 };
-                let request_id = seq.allocate();
                 if let Err(error) = inbox.push(
-                    local.0,
+                    presentation.client_id(),
                     ClientAction::SetMatchPhase {
-                        request_id,
                         phase: MatchPhase::Playing,
                     },
                 ) {
-                    echo(
-                        format!("force_match_start: {error}"),
-                        &mut console,
-                        &mut line,
-                    );
+                    echo.write(format!("force_match_start: {error}"));
                     continue;
                 }
                 if !cmd.background {
-                    dispatch.wait_playing = true;
-                    dispatch.wait_playing_elapsed = 0.0;
-                    echo(
-                        format!(
-                            "force_match_start: queued SetMatchPhase Playing request_id={request_id} (sync until Playing)"
-                        ),
-                        &mut console,
-                        &mut line,
+                    dispatch.wait(WaitKind::Playing);
+                    echo.write(
+                        "force_match_start: queued SetMatchPhase Playing (sync until Playing)",
                     );
                 } else {
-                    echo(
-                        format!(
-                            "force_match_start &: queued SetMatchPhase Playing request_id={request_id} (async)"
-                        ),
-                        &mut console,
-                        &mut line,
-                    );
+                    echo.write("force_match_start &: queued SetMatchPhase Playing (async)");
                 }
             }
             _ => {}
@@ -609,14 +497,14 @@ pub(crate) fn route_debug_move_commands(
 
 pub(crate) fn update_showpos_overlay(
     debug_pos: Res<DebugPosOverlay>,
-    presented: Res<PresentedSnapshot>,
-    local: Res<LocalPresentClient>,
+    player: net::LocalPresentation,
     clock: Res<net::AuthorityClock>,
     time: Res<Time>,
     actions: Res<net::ClientActionInput>,
     mut line: ResMut<ConsoleLine>,
     mut hud: Query<(&mut Text, &mut Visibility), With<ShowposHud>>,
 ) {
+    let net::LocalPresentation { presented, local } = player;
     if !debug_pos.0 {
         for (_, mut vis) in &mut hud {
             *vis = Visibility::Hidden;
@@ -768,12 +656,11 @@ fn arm_wait_move(
         diag::info!(Console, "{verb} &: async — FIFO not blocked");
         return;
     }
-    dispatch.wait_move = Some(WaitMovePose {
+    dispatch.wait(WaitKind::Move(WaitMovePose {
         client,
         origin,
         angles,
-    });
-    dispatch.wait_move_elapsed = 0.0;
+    }));
 }
 
 pub(crate) fn presented_matches_move(presented: &PresentedSnapshot, pose: WaitMovePose) -> bool {
@@ -807,9 +694,11 @@ fn angle_abs_delta(a: f32, b: f32) -> f32 {
 
 fn parse_force_spawn(args: &[String]) -> Result<SpawnPick, String> {
     const USAGE: &str = "usage: force_spawn [random <seed> | at <x> <y> <z> [yaw]]";
-    let num = |raw: &String| {
+    let num = |raw: &str| {
         raw.parse::<f32>()
-            .map_err(|_| format!("{USAGE} (got `{raw}`)"))
+            .ok()
+            .filter(|value| value.is_finite())
+            .ok_or_else(|| format!("{USAGE} (expected a finite number, got `{raw}`)"))
     };
     match args.first().map(String::as_str) {
         None => Ok(SpawnPick::Seeded(0)),
@@ -823,7 +712,11 @@ fn parse_force_spawn(args: &[String]) -> Result<SpawnPick, String> {
         }
         Some("at") if matches!(args.len(), 4 | 5) => Ok(SpawnPick::At {
             origin: [num(&args[1])?, num(&args[2])?, num(&args[3])?],
-            yaw: args.get(4).map(num).transpose()?.unwrap_or(0.0),
+            yaw: args
+                .get(4)
+                .map(|text| num(text))
+                .transpose()?
+                .unwrap_or(0.0),
         }),
         Some(_) => Err(USAGE.into()),
     }

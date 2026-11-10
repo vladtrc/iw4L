@@ -230,7 +230,7 @@ fn fire_weapon(world: &mut World, receiver: &Value, args: &[Value]) -> Result<Va
         (heli.weapon, heli.owner, heli.turret, heli.heading)
     };
     let weapon = weapon.ok_or("vehicle has no weapon")?;
-    let tag = optional(args, 0, string)?.unwrap_or_default();
+    let tag = optional(args, 0, string)?.unwrap_or(String::new());
     let from = super::presence::tag_world(world, id, &tag)
         .map(|(origin, _)| origin)
         .unwrap_or_else(|| super::turrets::muzzle(world, id));
@@ -388,9 +388,15 @@ fn vehicle_array(world: &mut World, prefix: Option<&str>) -> Result<Value, Strin
         Some(prefix) => runtime
             .entities
             .iter()
-            .filter(|(_, entity)| {
-                entity.classname.starts_with(prefix)
-                    && (prefix != "script_vehicle" || entity.kind != EntityKind::Vehicle)
+            .filter(|(id, entity)| {
+                if prefix == "script_vehicle"
+                    && runtime.profile == asset_core::RuntimeProfile::Campaign
+                {
+                    runtime.live(id) && entity.kind == EntityKind::VehicleSpawner
+                } else {
+                    entity.classname.starts_with(prefix)
+                        && (prefix != "script_vehicle" || entity.kind != EntityKind::Vehicle)
+                }
             })
             .map(|(id, _)| Value::Object(*id))
             .collect(),
@@ -415,7 +421,12 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
                 .count() as i32,
         ))
     });
-    registry.register(Function, "vehicle_getspawnerarray", |world, _, _| {
+    registry.register(Function, "vehicle_getspawnerarray", |world, _, args| {
+        if !args.is_empty()
+            && world.resource::<RoundScript>().profile == asset_core::RuntimeProfile::Campaign
+        {
+            return Err("Vehicle_GetSpawnerArray cannot take arguments".into());
+        }
         vehicle_array(world, Some("script_vehicle"))
     });
     registry.register(Method, "getvehicleowner", |world, receiver, _| {
@@ -856,7 +867,7 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         let weapon = string(args, 5)?;
         let point = vector(args, 6)?;
         let dir = vector(args, 7)?;
-        let part = optional(args, 11, string)?.unwrap_or_default();
+        let part = optional(args, 11, string)?.unwrap_or(String::new());
         let mut runtime = world.resource_mut::<RoundScript>();
         let before = match runtime.object_field(object, "health") {
             Value::Int(health) => health,
@@ -866,7 +877,7 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         let after = before.saturating_sub(amount);
         runtime.set_object_field(object, "health", Value::Int(after));
         let model = runtime.object_field(object, "model");
-        drop(runtime);
+
         raise(
             world,
             receiver.clone(),
@@ -1198,7 +1209,7 @@ pub(crate) fn advance(world: &mut World) {
         runtime.set_object_field(id, "origin", Value::Vector(next));
         runtime.set_object_field(id, "angles", Value::Vector([pitch, yaw, roll]));
         runtime.set_object_field(id, "veh_speed", Value::Float(speed / MPH));
-        drop(runtime);
+
         for note in notes {
             raise(world, Value::Object(id), note, Vec::new());
         }

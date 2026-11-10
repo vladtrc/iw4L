@@ -75,64 +75,65 @@ fn apply_one_client_anim_rate(
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlayerAnimTransition {
+    pub previous: u16,
+    pub index: u16,
+    pub restart: bool,
+    pub was_moving: bool,
+    pub moving: bool,
+    pub authored_blend_ms: i32,
+}
+
 pub fn apply_player_anim_goals(
     runtime: &mut crate::XAnimTreeRuntime,
     branches: PlayerBodyBranches,
-    old_legs: u16,
-    old_torso: u16,
-    legs_index: u16,
-    torso_index: u16,
-    legs_restart: bool,
-    torso_restart: bool,
-    old_legs_moving: bool,
-    old_torso_moving: bool,
-    new_legs_moving: bool,
-    new_torso_moving: bool,
-    authored_blend_ms: [i32; 2],
+    legs: PlayerAnimTransition,
+    torso: PlayerAnimTransition,
 ) -> Result<(), String> {
     let legs_time = goal_time_from_blend_ms(client_anim_blend_ms(
-        legs_index,
-        authored_blend_ms[0],
-        old_legs != 0,
+        legs.index,
+        legs.authored_blend_ms,
+        legs.previous != 0,
         false,
-        old_legs_moving,
-        new_legs_moving,
+        legs.was_moving,
+        legs.moving,
     ));
     let torso_time = goal_time_from_blend_ms(client_anim_blend_ms(
-        torso_index,
-        authored_blend_ms[1],
-        old_torso != 0,
+        torso.index,
+        torso.authored_blend_ms,
+        torso.previous != 0,
         true,
-        old_torso_moving,
-        new_torso_moving,
+        torso.was_moving,
+        torso.moving,
     ));
-    if old_legs != 0 && old_legs != legs_index {
+    if legs.previous != 0 && legs.previous != legs.index {
         runtime
-            .set_goal_weight(crate::XAnimNodeId(old_legs), 0.0, legs_time)
+            .set_goal_weight(crate::XAnimNodeId(legs.previous), 0.0, legs_time)
             .map_err(|error| error.to_string())?;
     }
-    if old_torso != 0 && old_torso != torso_index {
+    if torso.previous != 0 && torso.previous != torso.index {
         runtime
-            .set_goal_weight(crate::XAnimNodeId(old_torso), 0.0, torso_time)
+            .set_goal_weight(crate::XAnimNodeId(torso.previous), 0.0, torso_time)
             .map_err(|error| error.to_string())?;
     }
-    if old_legs == legs_index && !legs_restart {
+    if legs.previous == legs.index && !legs.restart {
         runtime
-            .set_goal_weight(crate::XAnimNodeId(legs_index), 1.0, legs_time)
+            .set_goal_weight(crate::XAnimNodeId(legs.index), 1.0, legs_time)
             .map_err(|error| error.to_string())?;
     } else {
         runtime
-            .set_complete_goal_weight_in(crate::XAnimNodeId(legs_index), 0.0, 1.0, legs_time)
+            .set_complete_goal_weight_in(crate::XAnimNodeId(legs.index), 0.0, 1.0, legs_time)
             .map_err(|error| error.to_string())?;
     }
-    if torso_index != 0 {
-        if old_torso == torso_index && !torso_restart {
+    if torso.index != 0 {
+        if torso.previous == torso.index && !torso.restart {
             runtime
-                .set_goal_weight(crate::XAnimNodeId(torso_index), 1.0, torso_time)
+                .set_goal_weight(crate::XAnimNodeId(torso.index), 1.0, torso_time)
                 .map_err(|error| error.to_string())?;
         } else {
             runtime
-                .set_complete_goal_weight_in(crate::XAnimNodeId(torso_index), 0.0, 1.0, torso_time)
+                .set_complete_goal_weight_in(crate::XAnimNodeId(torso.index), 0.0, 1.0, torso_time)
                 .map_err(|error| error.to_string())?;
         }
     }
@@ -140,7 +141,7 @@ pub fn apply_player_anim_goals(
         .set_complete_goal_weight_in(
             branches.legs,
             0.0,
-            if torso_index != 0 {
+            if torso.index != 0 {
                 XANIM_LEGS_PARENT_WEIGHT_WHEN_TORSO
             } else {
                 1.0
@@ -152,7 +153,7 @@ pub fn apply_player_anim_goals(
         .set_complete_goal_weight_in(
             branches.torso,
             0.0,
-            if torso_index != 0 { 1.0 } else { 0.0 },
+            if torso.index != 0 { 1.0 } else { 0.0 },
             torso_time,
         )
         .map_err(|error| error.to_string())?;

@@ -9,14 +9,13 @@ use hud_iw4::{
     killicon_stretch_uv, killicon_virtual_size, normalized_text_scale, obituary_mod,
     obituary_mod_killicon,
 };
-use net::{FrameClock, LocalPresentClient};
+use net::FrameClock;
 
 use crate::chrome::text_width;
 use crate::draw2d::{Draw2dCmd, Draw2dList, Draw2dOp, Draw2dProvenance, tessellate_fonts};
 use crate::font_overlay::HUD_SMALL_FONT;
-use crate::gaps::{GapCause, HudGap, HudPresentationGaps};
 use crate::gpu_list::{HudTessPass, TessJob};
-use crate::images::HudImages;
+use crate::images::HudImageLoader;
 
 #[derive(Clone, Debug)]
 enum KillfeedLine {
@@ -24,7 +23,7 @@ enum KillfeedLine {
         start_ms: i32,
         end_ms: i32,
         icon: String,
-        icon_namespace: asset_core::AssetNamespace,
+        icon_namespace: asset_core::FamilyId,
         attacker: String,
         has_attacker: bool,
         victim: String,
@@ -68,7 +67,7 @@ impl KillfeedLine {
 struct KillIconPick {
     stem: String,
 
-    namespace: asset_core::AssetNamespace,
+    namespace: asset_core::FamilyId,
     ratio: i32,
     flip: bool,
 }
@@ -104,10 +103,6 @@ pub(crate) struct KillfeedRaster;
 
 pub(crate) fn spawn_killfeed(root: &mut ChildSpawnerCommands) {
     crate::font_overlay::spawn_overlay(root, KillfeedRaster);
-}
-
-fn hide(pass: &mut HudTessPass) {
-    pass.killfeed = TessJob::Hide;
 }
 
 fn pick_kill_icon(
@@ -242,9 +237,7 @@ pub(crate) fn obituary(
         return;
     }
     let payload = obituary.event.payload;
-    let bound = weapons
-        .as_deref()
-        .and_then(|weapons| weapons.for_event(obituary.event.world).ok());
+    let bound = weapons.as_deref().map(|weapons| weapons.bound());
     let pick = pick_kill_icon(&payload, bound.as_ref());
     let attacker = snapshot_client_name(&presented, payload.attacker_entity_num);
     let victim = snapshot_client_name(&presented, payload.other_entity_num);
@@ -270,14 +263,10 @@ pub(crate) fn obituary(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
 fn text_cmd(
     font_name: &str,
     text_style: i32,
-    x: f32,
-    y: f32,
-    cmd_w: f32,
-    cmd_h: f32,
+    rect: hud_iw4::AppliedRect,
     material: String,
     text: String,
     color: [f32; 4],
@@ -285,10 +274,10 @@ fn text_cmd(
 ) -> Draw2dCmd {
     Draw2dCmd {
         material_namespace: crate::images::HUD_CHROME_NAMESPACE,
-        x: (x + 0.5).floor(),
-        y: (y + 0.5).floor(),
-        w: cmd_w,
-        h: cmd_h,
+        x: (rect.x + 0.5).floor(),
+        y: (rect.y + 0.5).floor(),
+        w: rect.w,
+        h: rect.h,
         s0: 0.0,
         t0: 0.0,
         s1: 1.0,
@@ -297,7 +286,7 @@ fn text_cmd(
         material,
         op: Draw2dOp::TextRun {
             font: font_name.to_owned(),
-            scale: cmd_w,
+            scale: rect.w,
             text,
             loc_key: String::new(),
 
@@ -310,258 +299,264 @@ fn text_cmd(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn update_killfeed(
-    surface: Res<crate::surface::Hud2dSurface>,
-    presented: Res<net::PresentedSnapshot>,
-    clock: Res<FrameClock>,
-    local: Res<LocalPresentClient>,
-    catalog: Option<Res<MenuCatalog>>,
-    strings: Option<Res<PreparedLocalizedStrings>>,
-    mut hud_images: ResMut<HudImages>,
-    mut images: ResMut<Assets<Image>>,
-    mut gaps: ResMut<HudPresentationGaps>,
-    mut window: ResMut<KillfeedWindow>,
-    mut pass: ResMut<HudTessPass>,
-    mut notifies: MessageReader<net::SvcGameNotify>,
-    view: Option<Res<frame::ViewSubject>>,
-) {
-    if !surface.is_ready() {
-        hide(&mut pass);
-        return;
-    }
-    if presented.player(local.0).is_none() {
-        window.lines.clear();
-        window.bold.clear();
-        window.seen.clear();
-        gaps.clear(HudGap::Obituary);
-        hide(&mut pass);
-        return;
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct KillfeedDisplay<'w, 's> {
+    clock: Res<'w, FrameClock>,
+    notifies: MessageReader<'w, 's, net::SvcGameNotify>,
+    window: ResMut<'w, KillfeedWindow>,
+    hud_images: HudImageLoader<'w>,
+    pass: ResMut<'w, HudTessPass>,
+}
+
+impl KillfeedDisplay<'_, '_> {
+    fn hide(&mut self) {
+        self.pass.killfeed = TessJob::Hide;
     }
 
-    let now = clock.time();
-    for cmd in notifies.read() {
-        if cmd.tag == net::SVC_CHAT {
-            continue;
+    fn update(
+        &mut self,
+        surface: Res<crate::surface::Hud2dSurface>,
+        presentation: net::LocalPresentation,
+        catalog: Option<Res<MenuCatalog>>,
+        strings: Option<Res<PreparedLocalizedStrings>>,
+        view: Option<Res<frame::ViewSubject>>,
+    ) {
+        if !surface.is_ready() {
+            self.hide();
+            return;
         }
-        if !window.seen.insert(cmd.id) {
-            continue;
+        if presentation.player().is_none() {
+            self.window.lines.clear();
+            self.window.bold.clear();
+            self.window.seen.clear();
+
+            self.hide();
+            return;
         }
-        let Some(template) = strings
-            .as_ref()
-            .and_then(|s| crate::hudelem::resolve_hud_text(s, &cmd.key))
-        else {
-            gaps.raise(GapCause::LocalizedRowMissing {
-                key: cmd.key.clone(),
-            });
-            continue;
-        };
-        let args: Vec<String> = cmd
-            .name
-            .split(sim::HUD_PRINT_ARG_SEPARATOR)
-            .map(|arg| {
-                strings
-                    .as_ref()
-                    .and_then(|s| crate::hudelem::resolve_hud_text(s, arg))
-                    .unwrap_or_else(|| arg.to_owned())
-            })
-            .collect();
-        let text = if template.contains("&&2") {
-            args.iter().enumerate().fold(template, |line, (i, arg)| {
-                line.replace(&format!("&&{}", i + 1), arg)
-            })
-        } else {
-            gamenotify_line(&template, &args[0])
-        };
-        if cmd.tag == net::SVC_PRINT_BOLD {
-            window.bold.push_back((now, text));
-            while window.bold.len() > BOLD_LINE_COUNT {
-                window.bold.pop_front();
+
+        let now = self.clock.time();
+        for cmd in self.notifies.read() {
+            if cmd.tag == net::SVC_CHAT {
+                continue;
             }
-            continue;
-        }
-        window.push(
-            KillfeedLine::Notify {
-                start_ms: now,
-                end_ms: now.saturating_add(GAME_MSG_WIN0_MSG_TIME_MS),
-                text,
-                name_empty: cmd.tag == net::SVC_DISCONNECT_NOTIFY && cmd.name.is_empty(),
-            },
-            now,
-        );
-    }
-    window.lines.retain(|line| now < line.end_ms());
-    window
-        .bold
-        .retain(|(start, _)| now.saturating_sub(*start) < BOLD_MSG_TIME_MS);
-    if window.lines.is_empty() && window.bold.is_empty() {
-        gaps.clear(HudGap::Obituary);
-        hide(&mut pass);
-        return;
-    }
-    if view.is_some_and(|v| v.in_killcam()) {
-        hide(&mut pass);
-        return;
-    }
-
-    let names_ok = match window.lines.back() {
-        None => true,
-        Some(KillfeedLine::Obituary {
-            has_attacker,
-            attacker,
-            victim,
-            ..
-        }) => (!*has_attacker || !attacker.is_empty()) && !victim.is_empty(),
-        Some(KillfeedLine::Notify { text, .. }) => !text.is_empty(),
-    };
-    match window.lines.back() {
-        None => {}
-        Some(KillfeedLine::Obituary { .. }) => {
-            if !names_ok {
-                gaps.raise(GapCause::ObituaryNoClientInfo);
+            if !self.window.seen.insert(cmd.id) {
+                continue;
+            }
+            let Some(template) = strings
+                .as_ref()
+                .and_then(|s| crate::hudelem::resolve_hud_text(s, &cmd.key))
+            else {
+                diag::warn_once!(
+                    Ui,
+                    "key `{key}` has no row in the loaded language",
+                    key = cmd.key.clone()
+                );
+                continue;
+            };
+            let args: Vec<String> = cmd
+                .name
+                .split(sim::HUD_PRINT_ARG_SEPARATOR)
+                .map(|arg| {
+                    strings
+                        .as_ref()
+                        .and_then(|s| crate::hudelem::resolve_hud_text(s, arg))
+                        .unwrap_or_else(|| arg.to_owned())
+                })
+                .collect();
+            let text = if template.contains("&&2") {
+                args.iter().enumerate().fold(template, |line, (i, arg)| {
+                    line.replace(&format!("&&{}", i + 1), arg)
+                })
             } else {
-                gaps.clear(HudGap::Obituary);
-            }
-        }
-        Some(KillfeedLine::Notify { name_empty, .. }) => {
-            if *name_empty {
-                gaps.raise(GapCause::GameNotifyNoClientInfo);
-            } else if names_ok {
-                gaps.clear(HudGap::Obituary);
-            }
-        }
-    }
-
-    let local_team = snapshot_client_team(&presented, local.0.0 as i32);
-    let Some(snapshot) = presented.snapshot() else {
-        hide(&mut pass);
-        return;
-    };
-    let dvars = snapshot.meta.script_dvars(local.0);
-    let Some(item) = catalog
-        .as_ref()
-        .and_then(|c| c.get("hud_fullscreen"))
-        .and_then(|menu| {
-            menu.items.iter().find(|item| {
-                item.item_type == hud_iw4::ITEM_TYPE_GAME_MESSAGE_WINDOW
-                    && item.game_msg_window_index == 0
-            })
-        })
-    else {
-        hide(&mut pass);
-        return;
-    };
-    let font_name = hud_iw4::ui_get_font_handle(
-        item.font_enum,
-        surface.scale_virtual_to_real()[1],
-        item.text_scale,
-    );
-    let font = catalog.as_ref().and_then(|c| c.font(font_name));
-    let (nscale, font_material) = match font {
-        Some(def) => (
-            normalized_text_scale(def.pixel_height, item.text_scale),
-            asset_core::AssetRef::bare_name(&def.material).to_owned(),
-        ),
-        None => (0.0, String::new()),
-    };
-    if names_ok && font.is_none() {
-        gaps.raise(GapCause::ObituaryNoClientInfo);
-    }
-
-    let miss = hud_images.miss_reason();
-    let mut cmds = Vec::new();
-    let mut fonts = HashMap::new();
-    let font_tex_ok = if let Some(def) = font {
-        fonts.insert(font_name.to_owned(), def);
-        hud_images
-            .get(
-                crate::images::HUD_CHROME_NAMESPACE,
-                &font_material,
-                &mut images,
-            )
-            .is_some()
-    } else {
-        false
-    };
-    if names_ok && font.is_some() && !font_tex_ok {
-        let image = hud_images
-            .zone_image_name(&font_material)
-            .map(str::to_owned);
-        gaps.raise(GapCause::FontAtlasMissing {
-            material: font_material.clone(),
-            image,
-        });
-    }
-
-    let line_height = (item.text_scale * hud_iw4::GAME_MSG_CHAR_EM + 0.5).floor();
-    let icon_spacing = font.map_or(0.0, |def| text_width(def, " ") as f32 * nscale);
-    let scroll_offset: f32 = window
-        .lines
-        .iter()
-        .map(|line| {
-            let age = now.saturating_sub(line.start_ms());
-            let fraction = (1.0 - age as f32 / GAME_MSG_WIN0_SCROLL_TIME_MS as f32).clamp(0.0, 1.0);
-            (line_height * fraction + 0.5).floor()
-        })
-        .sum();
-    for (i, line) in window.lines.iter().rev().enumerate() {
-        let first_cmd = cmds.len();
-        let age = now.saturating_sub(line.start_ms());
-
-        let alpha = (age as f32 / GAME_MSG_WIN0_FADE_IN_TIME_MS as f32).clamp(0.0, 1.0)
-            * ((line.end_ms() - now) as f32 / GAME_MSG_WIN0_FADE_OUT_TIME_MS as f32)
-                .clamp(0.0, 1.0)
-            * item.fore_color[3];
-        let y_virtual = item.rect.y + scroll_offset - line_height * (i as f32 + 1.0);
-        match line {
-            KillfeedLine::Notify { text, .. } => {
-                if font.is_some() && font_tex_ok {
-                    let applied = surface.apply_rect(
-                        item.rect.x,
-                        y_virtual,
-                        nscale,
-                        nscale,
-                        i32::from(item.rect.horz_align),
-                        i32::from(item.rect.vert_align),
-                    );
-                    cmds.push(text_cmd(
-                        font_name,
-                        item.text_style,
-                        applied.x,
-                        applied.y,
-                        applied.w,
-                        applied.h,
-                        font_material.clone(),
-                        text.clone(),
-                        [
-                            item.fore_color[0],
-                            item.fore_color[1],
-                            item.fore_color[2],
-                            1.0,
-                        ],
-                        "killfeed_game_msg",
-                    ));
+                gamenotify_line(&template, &args[0])
+            };
+            if cmd.tag == net::SVC_PRINT_BOLD {
+                self.window.bold.push_back((now, text));
+                while self.window.bold.len() > BOLD_LINE_COUNT {
+                    self.window.bold.pop_front();
                 }
+                continue;
             }
-            KillfeedLine::Obituary {
-                icon,
-                icon_namespace,
-                attacker,
+            self.window.push(
+                KillfeedLine::Notify {
+                    start_ms: now,
+                    end_ms: now.saturating_add(GAME_MSG_WIN0_MSG_TIME_MS),
+                    text,
+                    name_empty: cmd.tag == net::SVC_DISCONNECT_NOTIFY && cmd.name.is_empty(),
+                },
+                now,
+            );
+        }
+        self.window.lines.retain(|line| now < line.end_ms());
+        self.window
+            .bold
+            .retain(|(start, _)| now.saturating_sub(*start) < BOLD_MSG_TIME_MS);
+        if self.window.lines.is_empty() && self.window.bold.is_empty() {
+            self.hide();
+            return;
+        }
+        if view.is_some_and(|v| v.in_killcam()) {
+            self.hide();
+            return;
+        }
+
+        let names_ok = match self.window.lines.back() {
+            None => true,
+            Some(KillfeedLine::Obituary {
                 has_attacker,
+                attacker,
                 victim,
-                attacker_team,
-                victim_team,
-                kill_icon_ratio,
-                flip_kill_icon,
                 ..
-            } => {
-                let mut x_virtual = item.rect.x;
-                let line_names = (!*has_attacker || !attacker.is_empty())
-                    && !victim.is_empty()
-                    && font.is_some()
-                    && font_tex_ok;
-                if line_names && *has_attacker {
-                    if let Some(def) = font {
+            }) => (!*has_attacker || !attacker.is_empty()) && !victim.is_empty(),
+            Some(KillfeedLine::Notify { text, .. }) => !text.is_empty(),
+        };
+        match self.window.lines.back() {
+            Some(KillfeedLine::Obituary { .. }) if !names_ok => {
+                diag::warn_once!(Ui, "clientState.name empty; killfeed icon only");
+            }
+            Some(KillfeedLine::Notify {
+                name_empty: true, ..
+            }) => {
+                diag::warn_once!(Ui, "clientState.name empty; gamenotify has no name");
+            }
+            _ => {}
+        }
+
+        let local_team =
+            snapshot_client_team(&presentation.presented, presentation.client_id().0 as i32);
+        let Some(snapshot) = presentation.snapshot() else {
+            self.hide();
+            return;
+        };
+        let dvars = snapshot.meta.script_dvars(presentation.client_id());
+        let Some(item) = catalog
+            .as_ref()
+            .and_then(|c| c.get("hud_fullscreen"))
+            .and_then(|menu| {
+                menu.items.iter().find(|item| {
+                    item.item_type == hud_iw4::ITEM_TYPE_GAME_MESSAGE_WINDOW
+                        && item.game_msg_window_index == 0
+                })
+            })
+        else {
+            self.hide();
+            return;
+        };
+        let font_name = hud_iw4::ui_get_font_handle(
+            item.font_enum,
+            surface.scale_virtual_to_real()[1],
+            item.text_scale,
+        );
+        let font = catalog.as_ref().and_then(|c| c.font(font_name));
+        let (nscale, font_material) = match font {
+            Some(def) => (
+                normalized_text_scale(def.pixel_height, item.text_scale),
+                asset_core::AssetRef::bare_name(&def.material).to_owned(),
+            ),
+            None => (0.0, String::new()),
+        };
+        if names_ok && font.is_none() {
+            diag::warn_once!(Ui, "clientState.name empty; killfeed icon only");
+        }
+
+        let miss = self.hud_images.miss_reason();
+        let mut cmds = Vec::new();
+        let mut fonts = HashMap::new();
+        let font_tex_ok = if let Some(def) = font {
+            fonts.insert(font_name.to_owned(), def);
+            self.hud_images
+                .load(crate::images::HUD_CHROME_NAMESPACE, &font_material)
+                .is_some()
+        } else {
+            false
+        };
+        if names_ok && font.is_some() && !font_tex_ok {
+            let image = self
+                .hud_images
+                .zone_image_name(&font_material)
+                .map(str::to_owned);
+            diag::warn_once!(Ui, "{}", {
+                let material: String = font_material.clone();
+                let image: Option<String> = image;
+                match image {
+                    Some(image) => {
+                        format!("font material `{material}` image `{image}` did not upload")
+                    }
+                    None => format!("font material `{material}` has no zone atlas"),
+                }
+            });
+        }
+
+        let line_height = (item.text_scale * hud_iw4::GAME_MSG_CHAR_EM + 0.5).floor();
+        let icon_spacing = font.map_or(0.0, |def| text_width(def, " ") as f32 * nscale);
+        let scroll_offset: f32 = self
+            .window
+            .lines
+            .iter()
+            .map(|line| {
+                let age = now.saturating_sub(line.start_ms());
+                let fraction =
+                    (1.0 - age as f32 / GAME_MSG_WIN0_SCROLL_TIME_MS as f32).clamp(0.0, 1.0);
+                (line_height * fraction + 0.5).floor()
+            })
+            .sum();
+        for (i, line) in self.window.lines.iter().rev().enumerate() {
+            let first_cmd = cmds.len();
+            let age = now.saturating_sub(line.start_ms());
+
+            let alpha = (age as f32 / GAME_MSG_WIN0_FADE_IN_TIME_MS as f32).clamp(0.0, 1.0)
+                * ((line.end_ms() - now) as f32 / GAME_MSG_WIN0_FADE_OUT_TIME_MS as f32)
+                    .clamp(0.0, 1.0)
+                * item.fore_color[3];
+            let y_virtual = item.rect.y + scroll_offset - line_height * (i as f32 + 1.0);
+            match line {
+                KillfeedLine::Notify { text, .. } => {
+                    if font.is_some() && font_tex_ok {
+                        let applied = surface.apply_rect(
+                            item.rect.x,
+                            y_virtual,
+                            nscale,
+                            nscale,
+                            i32::from(item.rect.horz_align),
+                            i32::from(item.rect.vert_align),
+                        );
+                        cmds.push(text_cmd(
+                            font_name,
+                            item.text_style,
+                            applied,
+                            font_material.clone(),
+                            text.clone(),
+                            [
+                                item.fore_color[0],
+                                item.fore_color[1],
+                                item.fore_color[2],
+                                1.0,
+                            ],
+                            "killfeed_game_msg",
+                        ));
+                    }
+                }
+                KillfeedLine::Obituary {
+                    icon,
+                    icon_namespace,
+                    attacker,
+                    has_attacker,
+                    victim,
+                    attacker_team,
+                    victim_team,
+                    kill_icon_ratio,
+                    flip_kill_icon,
+                    ..
+                } => {
+                    let mut x_virtual = item.rect.x;
+                    let line_names = (!*has_attacker || !attacker.is_empty())
+                        && !victim.is_empty()
+                        && font.is_some()
+                        && font_tex_ok;
+                    if line_names
+                        && *has_attacker
+                        && let Some(def) = font
+                    {
                         let attacker_w = text_width(def, attacker) as f32 * nscale;
                         let applied = surface.apply_rect(
                             x_virtual,
@@ -574,10 +569,7 @@ pub(crate) fn update_killfeed(
                         cmds.push(text_cmd(
                             font_name,
                             item.text_style,
-                            applied.x,
-                            applied.y,
-                            applied.w,
-                            applied.h,
+                            applied,
                             font_material.clone(),
                             attacker.clone(),
                             team_name_color(local_team, *attacker_team, dvars),
@@ -585,123 +577,132 @@ pub(crate) fn update_killfeed(
                         ));
                         x_virtual += attacker_w + icon_spacing;
                     }
-                }
 
-                let (icon_vw, icon_vh) = killicon_virtual_size(*kill_icon_ratio);
-                let icon_scale = item.text_scale / hud_iw4::GAME_MSG_WIN0_TEXT_SCALE;
-                let (icon_vw, icon_vh) = (icon_vw * icon_scale, icon_vh * icon_scale);
-                let (s0, s1) = killicon_stretch_uv(*flip_kill_icon);
-                let placed = surface.apply_rect(
-                    x_virtual,
-                    y_virtual - icon_vh,
-                    icon_vw,
-                    icon_vh,
-                    i32::from(item.rect.horz_align),
-                    i32::from(item.rect.vert_align),
-                );
-                let icon_ok = hud_images.get(*icon_namespace, icon, &mut images).is_some();
-                if !icon_ok {
-                    gaps.raise(GapCause::ObituaryKillIconMissing {
-                        name: icon.clone(),
-                        miss,
-                    });
-                } else {
-                    cmds.push(Draw2dCmd {
-                        material_namespace: *icon_namespace,
-                        x: (placed.x + 0.5).floor(),
-                        y: (placed.y + 0.5).floor(),
-                        w: placed.w,
-                        h: placed.h,
-                        s0,
-                        t0: 0.0,
-                        s1,
-                        t1: 1.0,
-                        color: [1.0, 1.0, 1.0, 1.0],
-                        material: icon.clone(),
-                        op: Draw2dOp::StretchPic,
-                        provenance: Draw2dProvenance::CgDraw {
-                            site: "killfeed_obituary",
-                        },
-                        layer: 1,
-                    });
-                }
-                if line_names {
-                    x_virtual += icon_vw + icon_spacing;
-                    let applied = surface.apply_rect(
+                    let (icon_vw, icon_vh) = killicon_virtual_size(*kill_icon_ratio);
+                    let icon_scale = item.text_scale / hud_iw4::GAME_MSG_WIN0_TEXT_SCALE;
+                    let (icon_vw, icon_vh) = (icon_vw * icon_scale, icon_vh * icon_scale);
+                    let (s0, s1) = killicon_stretch_uv(*flip_kill_icon);
+                    let placed = surface.apply_rect(
                         x_virtual,
-                        y_virtual,
-                        nscale,
-                        nscale,
+                        y_virtual - icon_vh,
+                        icon_vw,
+                        icon_vh,
                         i32::from(item.rect.horz_align),
                         i32::from(item.rect.vert_align),
                     );
-                    cmds.push(text_cmd(
-                        font_name,
-                        item.text_style,
-                        applied.x,
-                        applied.y,
-                        applied.w,
-                        applied.h,
-                        font_material.clone(),
-                        victim.clone(),
-                        team_name_color(local_team, *victim_team, dvars),
-                        "killfeed_obituary",
-                    ));
+                    let icon_ok = self.hud_images.load(*icon_namespace, icon).is_some();
+                    if !icon_ok {
+                        diag::warn_once!(
+                            Ui,
+                            "killfeed icon `{name}` is {miss}",
+                            name = icon.clone()
+                        );
+                    } else {
+                        cmds.push(Draw2dCmd {
+                            material_namespace: *icon_namespace,
+                            x: (placed.x + 0.5).floor(),
+                            y: (placed.y + 0.5).floor(),
+                            w: placed.w,
+                            h: placed.h,
+                            s0,
+                            t0: 0.0,
+                            s1,
+                            t1: 1.0,
+                            color: [1.0, 1.0, 1.0, 1.0],
+                            material: icon.clone(),
+                            op: Draw2dOp::StretchPic,
+                            provenance: Draw2dProvenance::CgDraw {
+                                site: "killfeed_obituary",
+                            },
+                            layer: 1,
+                        });
+                    }
+                    if line_names {
+                        x_virtual += icon_vw + icon_spacing;
+                        let applied = surface.apply_rect(
+                            x_virtual,
+                            y_virtual,
+                            nscale,
+                            nscale,
+                            i32::from(item.rect.horz_align),
+                            i32::from(item.rect.vert_align),
+                        );
+                        cmds.push(text_cmd(
+                            font_name,
+                            item.text_style,
+                            applied,
+                            font_material.clone(),
+                            victim.clone(),
+                            team_name_color(local_team, *victim_team, dvars),
+                            "killfeed_obituary",
+                        ));
+                    }
                 }
             }
+            for cmd in &mut cmds[first_cmd..] {
+                cmd.color[3] *= alpha;
+            }
         }
-        for cmd in &mut cmds[first_cmd..] {
-            cmd.color[3] *= alpha;
+        if let Some(def) = catalog
+            .as_ref()
+            .and_then(|c| c.font(HUD_SMALL_FONT))
+            .filter(|_| !self.window.bold.is_empty())
+        {
+            let font_material = asset_core::AssetRef::bare_name(&def.material).to_owned();
+            fonts.insert(HUD_SMALL_FONT.to_owned(), def);
+            let bold_font_tex_ok = self
+                .hud_images
+                .load(crate::images::HUD_CHROME_NAMESPACE, &font_material)
+                .is_some();
+            let scale = normalized_text_scale(def.pixel_height, BOLD_TEXT_SCALE);
+            for (i, (start, text)) in self
+                .window
+                .bold
+                .iter()
+                .enumerate()
+                .filter(|_| bold_font_tex_ok)
+            {
+                let age = now.saturating_sub(*start);
+                let alpha = ((BOLD_MSG_TIME_MS - age) as f32 / 500.0).clamp(0.0, 1.0);
+                let width = text_width(def, text) as f32 * scale;
+                let line_h = def.pixel_height as f32 * scale;
+                let applied = surface.apply_rect(
+                    -width / 2.0,
+                    BOLD_Y + line_h * i as f32,
+                    scale,
+                    scale,
+                    hud_iw4::ALIGN_CENTER,
+                    hud_iw4::ALIGN_VIEWABLE,
+                );
+                cmds.push(text_cmd(
+                    HUD_SMALL_FONT,
+                    hud_iw4::GAME_MSG_WIN0_TEXT_STYLE,
+                    applied,
+                    font_material.clone(),
+                    text.clone(),
+                    [1.0, 1.0, 1.0, alpha],
+                    "killfeed_bold_msg",
+                ));
+            }
         }
-    }
-    if let Some(def) = catalog
-        .as_ref()
-        .and_then(|c| c.font(HUD_SMALL_FONT))
-        .filter(|_| !window.bold.is_empty())
-    {
-        let font_material = asset_core::AssetRef::bare_name(&def.material).to_owned();
-        fonts.insert(HUD_SMALL_FONT.to_owned(), def);
-        let bold_font_tex_ok = hud_images
-            .get(
-                crate::images::HUD_CHROME_NAMESPACE,
-                &font_material,
-                &mut images,
-            )
-            .is_some();
-        let scale = normalized_text_scale(def.pixel_height, BOLD_TEXT_SCALE);
-        for (i, (start, text)) in window.bold.iter().enumerate().filter(|_| bold_font_tex_ok) {
-            let age = now.saturating_sub(*start);
-            let alpha = ((BOLD_MSG_TIME_MS - age) as f32 / 500.0).clamp(0.0, 1.0);
-            let width = text_width(def, text) as f32 * scale;
-            let line_h = def.pixel_height as f32 * scale;
-            let applied = surface.apply_rect(
-                -width / 2.0,
-                BOLD_Y + line_h * i as f32,
-                scale,
-                scale,
-                hud_iw4::ALIGN_CENTER,
-                hud_iw4::ALIGN_VIEWABLE,
-            );
-            cmds.push(text_cmd(
-                HUD_SMALL_FONT,
-                hud_iw4::GAME_MSG_WIN0_TEXT_STYLE,
-                applied.x,
-                applied.y,
-                applied.w,
-                applied.h,
-                font_material.clone(),
-                text.clone(),
-                [1.0, 1.0, 1.0, alpha],
-                "killfeed_bold_msg",
-            ));
-        }
-    }
 
-    let list = Draw2dList { cmds };
-    let (quads, _) = tessellate_fonts(&list, &fonts);
-    if quads.is_empty() {
-        hide(&mut pass);
-        return;
+        let list = Draw2dList { cmds };
+        let (quads, _) = tessellate_fonts(&list, &fonts);
+        if quads.is_empty() {
+            self.hide();
+            return;
+        }
+        self.pass.killfeed = TessJob::Quads(quads);
     }
-    pass.killfeed = TessJob::Quads(quads);
+}
+
+pub(crate) fn update_killfeed(
+    surface: Res<crate::surface::Hud2dSurface>,
+    presentation: net::LocalPresentation,
+    catalog: Option<Res<MenuCatalog>>,
+    strings: Option<Res<PreparedLocalizedStrings>>,
+    view: Option<Res<frame::ViewSubject>>,
+    mut display: KillfeedDisplay,
+) {
+    display.update(surface, presentation, catalog, strings, view);
 }

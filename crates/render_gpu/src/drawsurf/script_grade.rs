@@ -137,18 +137,12 @@ impl GradeGpu {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn draw(
+    pub fn prepare(
         &self,
-        device: &RenderDevice,
         queue: &RenderQueue,
-        cache: &PipelineCache,
-        encoder: &mut CommandEncoder,
-        source: &TextureView,
-        target: &TextureView,
         grading: [f32; 4],
         native: Option<asset_world::T6Vision>,
-    ) {
+    ) -> GradeDraw<'_> {
         let mut rows = [[0.0f32; 4]; 26];
         rows[0] = grading;
         if let Some(native) = native {
@@ -164,42 +158,10 @@ impl GradeGpu {
         }
         queue.write_buffer(&self.uniform, 0, bytemuck::cast_slice(&rows));
         let has_bloom = native.is_some_and(|vision| vision.bloom.is_some());
-        if has_bloom {
-            let image = |index: usize| &self.bloom_targets[index].1;
-            for (pipeline, input, second, output) in [
-                (0, source, source, image(0)),
-                (1, image(0), image(0), image(1)),
-                (1, image(1), image(1), image(2)),
-                (2, image(2), image(2), image(3)),
-                (3, image(3), image(3), image(4)),
-                (4, image(1), image(4), image(5)),
-                (2, image(5), image(5), image(6)),
-                (3, image(6), image(6), image(7)),
-            ] {
-                self.draw_pass(
-                    device,
-                    cache,
-                    encoder,
-                    self.bloom_pipelines[pipeline],
-                    input,
-                    second,
-                    output,
-                );
-            }
+        GradeDraw {
+            gpu: self,
+            has_bloom,
         }
-        self.draw_pass(
-            device,
-            cache,
-            encoder,
-            self.pipeline,
-            source,
-            if has_bloom {
-                &self.bloom_targets[7].1
-            } else {
-                source
-            },
-            target,
-        );
     }
 
     pub fn required_pipelines(
@@ -212,60 +174,93 @@ impl GradeGpu {
             0
         }))
     }
+}
 
-    #[allow(clippy::too_many_arguments)]
-    fn draw_pass(
-        &self,
+pub(super) struct GradeDraw<'a> {
+    gpu: &'a GradeGpu,
+    has_bloom: bool,
+}
+
+impl GradeDraw<'_> {
+    pub fn record(
+        self,
         device: &RenderDevice,
         cache: &PipelineCache,
         encoder: &mut CommandEncoder,
-        pipeline: CachedRenderPipelineId,
         source: &TextureView,
-        second: &TextureView,
         target: &TextureView,
     ) {
-        let group = device.create_bind_group(
-            "gsc_grade",
-            &cache.get_bind_group_layout(&self.layout),
-            &[
-                BindGroupEntry {
-                    binding: 0,
-                    resource: BindingResource::TextureView(source),
-                },
-                BindGroupEntry {
-                    binding: 1,
-                    resource: BindingResource::Sampler(&self.sampler),
-                },
-                BindGroupEntry {
-                    binding: 3,
-                    resource: BindingResource::TextureView(second),
-                },
-                BindGroupEntry {
-                    binding: 2,
-                    resource: self.uniform.as_entire_binding(),
-                },
-            ],
-        );
-        let attachments = [Some(RenderPassColorAttachment {
-            view: target,
-            resolve_target: None,
-            ops: Operations {
-                load: LoadOp::Clear(LinearRgba::BLACK.into()),
-                store: StoreOp::Store,
+        let Self { gpu, has_bloom } = self;
+        let mut draw_pass =
+            |pipeline, source: &TextureView, second: &TextureView, target: &TextureView| {
+                let group = device.create_bind_group(
+                    "gsc_grade",
+                    &cache.get_bind_group_layout(&gpu.layout),
+                    &[
+                        BindGroupEntry {
+                            binding: 0,
+                            resource: BindingResource::TextureView(source),
+                        },
+                        BindGroupEntry {
+                            binding: 1,
+                            resource: BindingResource::Sampler(&gpu.sampler),
+                        },
+                        BindGroupEntry {
+                            binding: 3,
+                            resource: BindingResource::TextureView(second),
+                        },
+                        BindGroupEntry {
+                            binding: 2,
+                            resource: gpu.uniform.as_entire_binding(),
+                        },
+                    ],
+                );
+                let attachments = [Some(RenderPassColorAttachment {
+                    view: target,
+                    resolve_target: None,
+                    ops: Operations {
+                        load: LoadOp::Clear(LinearRgba::BLACK.into()),
+                        store: StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })];
+                let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                    label: Some("gsc_grade"),
+                    color_attachments: &attachments,
+                    ..default()
+                });
+                pass.set_pipeline(
+                    cache
+                        .get_render_pipeline(pipeline)
+                        .expect("grade preflight"),
+                );
+                pass.set_bind_group(0, &group, &[]);
+                pass.draw(0..3, 0..1);
+            };
+        if has_bloom {
+            let image = |index: usize| &gpu.bloom_targets[index].1;
+            for (pipeline, input, second, output) in [
+                (0, source, source, image(0)),
+                (1, image(0), image(0), image(1)),
+                (1, image(1), image(1), image(2)),
+                (2, image(2), image(2), image(3)),
+                (3, image(3), image(3), image(4)),
+                (4, image(1), image(4), image(5)),
+                (2, image(5), image(5), image(6)),
+                (3, image(6), image(6), image(7)),
+            ] {
+                draw_pass(gpu.bloom_pipelines[pipeline], input, second, output);
+            }
+        }
+        draw_pass(
+            gpu.pipeline,
+            source,
+            if has_bloom {
+                &gpu.bloom_targets[7].1
+            } else {
+                source
             },
-            depth_slice: None,
-        })];
-        let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
-            label: Some("gsc_grade"),
-            color_attachments: &attachments,
-            ..default()
-        });
-        pass.set_pipeline(
-            cache
-                .get_render_pipeline(pipeline)
-                .expect("grade preflight"),
+            target,
         );
-        pass.set_bind_group(0, &group, &[]);
-        pass.draw(0..3, 0..1);
     }
 }

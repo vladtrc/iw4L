@@ -33,7 +33,7 @@ impl AuthoredRef {
         }
     }
 
-    pub(crate) fn unresolved<S: IndexSpace>(self) -> AssetEdge<S> {
+    pub fn unresolved<S: IndexSpace>(self) -> AssetEdge<S> {
         AssetEdge::unresolved_presence(self.slot, self.alias)
     }
 }

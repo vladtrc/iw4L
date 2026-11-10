@@ -262,7 +262,9 @@ pub fn apply_existing(rt: &mut CEntityRuntime, next: EntityState, at_time_ms: i3
     let e_type_changed = rt.next_state.e_type != next.e_type;
     let teleport = (rt.next_state.e_flags ^ next.e_flags) & EFLAGS_TELEPORT != 0;
     let other_body = another_body(&rt.next_state, &next);
-    if !was_in || e_type_changed || teleport || other_body {
+    let changed_world = sim::world_graph::world_at(rt.next_state.tr_base)
+        != sim::world_graph::world_at(next.tr_base);
+    if !was_in || e_type_changed || teleport || other_body || changed_world {
         let new_entity = !was_in || e_type_changed || other_body;
         reset_entity(rt, next, at_time_ms, new_entity);
         return;
@@ -279,9 +281,11 @@ pub fn apply_existing(rt: &mut CEntityRuntime, next: EntityState, at_time_ms: i3
 }
 
 pub fn player_state_to_entity_state(client: ClientId, ps: &PlayerState) -> EntityState {
-    let mut es = EntityState::default();
-    es.number = i32::try_from(client.0).unwrap_or(0);
-    es.e_type = ET_PLAYER;
+    let mut es = EntityState {
+        number: i32::try_from(client.0).unwrap_or(0),
+        e_type: ET_PLAYER,
+        ..EntityState::default()
+    };
     es.client_num = es.number;
     es.e_flags = ps.e_flags;
     if ps.pm_type >= playerstate_iw4::PM_TYPE_DEAD {
@@ -347,24 +351,24 @@ pub fn remote_pose_sample(runtime: &CEntityRuntime) -> RemotePoseSample {
 }
 
 pub fn corpse_slot_to_entity_state(slot: &PlayerCorpseSlot) -> EntityState {
-    let mut es = EntityState::default();
-    es.number = slot.entnum;
-    es.e_type = ET_PLAYER_CORPSE;
-    es.client_num = i32::try_from(slot.victim.0).unwrap_or(0);
-    es.time2 = slot.spawn_time_ms;
-    es.e_flags = slot.e_flags;
-    es.weapon_model = slot.weapon_model;
-    es.tr_type = slot.tr_type;
-    es.tr_time = slot.tr_time;
-    es.tr_duration = slot.tr_duration;
-    es.tr_delta = slot.tr_delta;
-    es.tr_base = slot.tr_base;
-    es.apos_tr_type = TR_INTERPOLATE;
-    es.apos_tr_base = slot.viewangles;
-    es.legs_anim = slot.anim.legs_anim;
-    es.torso_anim = slot.anim.torso_anim;
-    es.index = i32::try_from(slot.weapon).unwrap_or(0);
-
-    es.ground_entity_num = slot.ground_entity_num;
-    es
+    EntityState {
+        number: slot.entnum,
+        e_type: ET_PLAYER_CORPSE,
+        client_num: i32::try_from(slot.victim.0).unwrap_or(0),
+        time2: slot.spawn_time_ms,
+        e_flags: slot.e_flags,
+        weapon_model: slot.weapon_model,
+        tr_type: slot.tr_type,
+        tr_time: slot.tr_time,
+        tr_duration: slot.tr_duration,
+        tr_delta: slot.tr_delta,
+        tr_base: slot.tr_base,
+        apos_tr_type: TR_INTERPOLATE,
+        apos_tr_base: slot.viewangles,
+        legs_anim: slot.anim.legs_anim,
+        torso_anim: slot.anim.torso_anim,
+        index: i32::try_from(slot.weapon).unwrap_or(0),
+        ground_entity_num: slot.ground_entity_num,
+        ..EntityState::default()
+    }
 }

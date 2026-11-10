@@ -9,3 +9,6 @@ description = "D3D10/11 DXBC containers: reflection, signatures and Shader Model
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+naga = { version = "30", features = ["wgsl-in"] }

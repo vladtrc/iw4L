@@ -1,3 +1,4 @@
+use community::{Community, CommunityFile, trust_roots, update_url};
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
@@ -14,27 +15,19 @@ use sha2::{Digest, Sha256};
 pub type Result<T> = std::result::Result<T, String>;
 const MAX_BINARY: u64 = 512 * 1024 * 1024;
 const MAX_MANIFEST: u64 = 64 * 1024;
-static SELECTED: OnceLock<Community> = OnceLock::new();
-static COMMUNITIES: OnceLock<CommunityFiles> = OnceLock::new();
-const SELECTION_FILE: &str = "iw4l.community.json";
+const SELECTION_FILE: &str = "community.json";
 
-#[derive(Clone, Debug)]
-pub struct CommunityFile {
-    pub path: PathBuf,
-    pub name: String,
+/// Descriptors live in the games root; the choice lives in the artifacts dir.
+struct CommunityRoots {
+    games: PathBuf,
+    artifacts: PathBuf,
 }
+
+static ROOTS: OnceLock<CommunityRoots> = OnceLock::new();
 
 struct CommunityFiles {
     entries: Vec<CommunityFile>,
     selected: Option<PathBuf>,
-}
-
-pub fn communities() -> &'static [CommunityFile] {
-    COMMUNITIES.get().map_or(&[], |files| &files.entries)
-}
-
-pub fn selected_path() -> Option<&'static Path> {
-    COMMUNITIES.get()?.selected.as_deref()
 }
 
 fn read_community(path: &Path) -> Result<Community> {
@@ -45,7 +38,8 @@ fn read_community(path: &Path) -> Result<Community> {
     Community::parse(&bytes).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-fn discover_communities(root: &Path, explicit: Option<PathBuf>) -> Result<CommunityFiles> {
+fn discover_communities(roots: &CommunityRoots) -> Result<CommunityFiles> {
+    let root = &roots.games;
     let mut paths: Vec<_> = fs::read_dir(root)
         .map_err(|e| e.to_string())?
         .map(|entry| entry.map(|entry| entry.path()).map_err(|e| e.to_string()))
@@ -53,7 +47,7 @@ fn discover_communities(root: &Path, explicit: Option<PathBuf>) -> Result<Commun
         .into_iter()
         .filter(|path| path.extension().is_some_and(|ext| ext == "iw4l-server"))
         .collect();
-    let saved = match File::open(root.join(SELECTION_FILE)) {
+    let saved = match File::open(roots.artifacts.join(SELECTION_FILE)) {
         Ok(file) => match read_bounded(file, MAX_MANIFEST)
             .and_then(|bytes| serde_json::from_slice::<PathBuf>(&bytes).map_err(|e| e.to_string()))
         {
@@ -69,13 +63,6 @@ fn discover_communities(root: &Path, explicit: Option<PathBuf>) -> Result<Commun
             None
         }
     };
-    let explicit = explicit.map(|path| root.join(path));
-    if let Some(path) = &explicit {
-        read_community(path)?;
-        if !paths.contains(path) {
-            paths.push(path.clone());
-        }
-    }
     if let Some(path) = &saved
         && !paths.contains(path)
         && path.is_file()
@@ -93,31 +80,27 @@ fn discover_communities(root: &Path, explicit: Option<PathBuf>) -> Result<Commun
         }
     }
     entries.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.path.cmp(&b.path)));
-    let selected = explicit
-        .or_else(|| saved.filter(|path| entries.iter().any(|entry| entry.path == *path)))
+    let selected = saved
+        .filter(|path| entries.iter().any(|entry| entry.path == *path))
         .or_else(|| (entries.len() == 1).then(|| entries[0].path.clone()));
     Ok(CommunityFiles { entries, selected })
 }
 
-pub fn restart_with_community(path: &Path) -> Result<()> {
-    if !communities().iter().any(|entry| entry.path == path) {
-        return Err("community is not in the installed server list".into());
-    }
+fn restart_with_community(path: &Path) -> Result<()> {
     read_community(path)?;
+    let roots = ROOTS.get().ok_or("community roots are not installed")?;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let root = exe.parent().ok_or("executable has no directory")?;
-    let selection = root.join(SELECTION_FILE);
+    let selection = roots.artifacts.join(SELECTION_FILE);
     let previous = match fs::read(&selection) {
         Ok(bytes) => Some(bytes),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(format!("read community selection: {error}")),
     };
-    let payload =
-        serde_json::to_vec(path.strip_prefix(root).unwrap_or(path)).map_err(|e| e.to_string())?;
-    save_selection(root, &payload)?;
+    let payload = serde_json::to_vec(path.strip_prefix(&roots.games).unwrap_or(path))
+        .map_err(|e| e.to_string())?;
+    save_selection(&roots.artifacts, &payload)?;
     if let Err(error) = Command::new(&exe)
         .arg("menu")
-        .env("IW4L_COMMUNITY", path)
         .env_remove("IW4L_MASTER_HOST_NAME")
         .env_remove("IW4L_MASTER_JOIN")
         .env_remove("IW4L_CMDS")
@@ -125,7 +108,7 @@ pub fn restart_with_community(path: &Path) -> Result<()> {
         .spawn()
     {
         let rollback = match previous {
-            Some(bytes) => save_selection(root, &bytes),
+            Some(bytes) => save_selection(&roots.artifacts, &bytes),
             None => fs::remove_file(selection).map_err(|e| e.to_string()),
         };
         rollback.map_err(|rollback| format!("restart: {error}; restore selection: {rollback}"))?;
@@ -134,55 +117,15 @@ pub fn restart_with_community(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn save_selection(root: &Path, payload: &[u8]) -> Result<()> {
-    let temp = root.join(format!("iw4l.community.{}.tmp", std::process::id()));
-    let result = write_synced(&temp, payload)
-        .and_then(|()| fs::rename(&temp, root.join(SELECTION_FILE)).map_err(|e| e.to_string()));
+fn save_selection(artifacts: &Path, payload: &[u8]) -> Result<()> {
+    let temp = artifacts.join(format!("community.{}.tmp", std::process::id()));
+    let result = write_synced(&temp, payload).and_then(|()| {
+        fs::rename(&temp, artifacts.join(SELECTION_FILE)).map_err(|e| e.to_string())
+    });
     if result.is_err() {
         let _ = fs::remove_file(temp);
     }
     result.map_err(|e| format!("save community selection: {e}"))
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Community {
-    pub schema: u32,
-    pub name: String,
-    pub master: Master,
-    pub updates: Updates,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Master {
-    pub address: String,
-    pub server_name: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Updates {
-    pub url: String,
-    pub ca_pem: String,
-}
-
-impl Community {
-    pub fn parse(bytes: &[u8]) -> Result<Self> {
-        let community: Community =
-            toml::from_str(std::str::from_utf8(bytes).map_err(|e| e.to_string())?)
-                .map_err(|e| e.to_string())?;
-        if community.schema != 1
-            || community.name.trim().is_empty()
-            || community.master.server_name.trim().is_empty()
-            || community.master.address.trim().is_empty()
-        {
-            return Err("unsupported or incomplete community descriptor".into());
-        }
-        trust_roots(&community.updates.ca_pem)?;
-        update_url(&community)?;
-        Ok(community)
-    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -202,10 +145,6 @@ pub struct ManifestFile {
     pub sha256: String,
     pub size: u64,
     pub compressed_size: u64,
-}
-
-pub fn selected() -> Option<&'static Community> {
-    SELECTED.get()
 }
 
 impl Manifest {
@@ -234,7 +173,7 @@ impl Manifest {
     }
 }
 
-pub fn startup() -> Result<Option<Vec<OsString>>> {
+pub fn startup(games: &Path, artifacts: &Path) -> Result<Option<Vec<OsString>>> {
     let mut args: Vec<OsString> = std::env::args_os().skip(1).collect();
     if args.first().is_some_and(|a| a == "--iw4l-replace") {
         if args.len() != 2 {
@@ -249,18 +188,24 @@ pub fn startup() -> Result<Option<Vec<OsString>>> {
     }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let root = exe.parent().ok_or("executable has no directory")?;
-    let files = discover_communities(root, std::env::var_os("IW4L_COMMUNITY").map(PathBuf::from))?;
+    let roots = ROOTS.get_or_init(|| CommunityRoots {
+        games: games.to_owned(),
+        artifacts: artifacts.to_owned(),
+    });
+    let files = discover_communities(roots)?;
     let descriptor = files.selected.clone();
-    COMMUNITIES
-        .set(files)
-        .map_err(|_| "communities already loaded")?;
-    let Some(path) = descriptor else {
+    let selected = descriptor.as_deref().map(read_community).transpose()?;
+    community::install_context(
+        community::CommunityContext {
+            entries: files.entries,
+            selected_path: descriptor,
+            selected: selected.clone(),
+        },
+        restart_with_community,
+    )?;
+    let Some(community) = selected else {
         return Ok(Some(args));
     };
-    let community = read_community(&path)?;
-    SELECTED
-        .set(community.clone())
-        .map_err(|_| "community already selected")?;
     if !cfg!(windows) {
         return Ok(Some(args));
     }
@@ -458,24 +403,6 @@ fn cleanup_helper(root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn update_url(community: &Community) -> Result<reqwest::Url> {
-    let url = reqwest::Url::parse(&community.updates.url).map_err(|e| e.to_string())?;
-    if url.scheme() != "https"
-        || url.host_str().is_none()
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-        || !url.path().ends_with("/manifest.toml")
-    {
-        return Err(
-            "update URL must be an HTTPS manifest.toml without credentials, query or fragment"
-                .into(),
-        );
-    }
-    Ok(url)
-}
-
 fn client(community: &Community) -> Result<(reqwest::blocking::Client, reqwest::Url)> {
     let mut url = update_url(community)?;
     let port = url
@@ -527,20 +454,6 @@ fn client(community: &Community) -> Result<(reqwest::blocking::Client, reqwest::
         .build()
         .map_err(|e| e.to_string())?;
     Ok((client, url))
-}
-
-pub fn trust_roots(pem: &str) -> Result<rustls::RootCertStore> {
-    let certs = rustls_pemfile::certs(&mut std::io::Cursor::new(pem.as_bytes()))
-        .collect::<std::io::Result<Vec<_>>>()
-        .map_err(|e| e.to_string())?;
-    if certs.is_empty() {
-        return Err("community CA contains no certificates".into());
-    }
-    let mut roots = rustls::RootCertStore::empty();
-    for cert in certs {
-        roots.add(cert).map_err(|e| e.to_string())?;
-    }
-    Ok(roots)
 }
 
 fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {

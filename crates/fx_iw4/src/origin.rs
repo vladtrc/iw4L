@@ -78,15 +78,18 @@ pub fn apply_spawn_origin(
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct FxSpawnOffset {
+    pub radius: [f32; 2],
+    pub height: [f32; 2],
+}
+
 #[inline]
 pub fn offset_spawn_origin(
     origin: &mut [f32; 3],
     axis: [[f32; 3]; 3],
     flags: i32,
-    radius_base: f32,
-    radius_amp: f32,
-    height_base: f32,
-    height_amp: f32,
+    offset: FxSpawnOffset,
     seed: u64,
 ) {
     let Some(mode) = elem_spawn_offset_mode(flags) else {
@@ -97,8 +100,8 @@ pub fn offset_spawn_origin(
         FxSpawnOffsetMode::Sphere => {
             let dir = random_dir(seed);
             let radius = sample_float_range(
-                radius_base,
-                radius_amp,
+                offset.radius[0],
+                offset.radius[1],
                 sample_f32(seed, FxRandomChannel::SpawnRadius),
             );
             origin[0] += radius * dir[0];
@@ -107,8 +110,8 @@ pub fn offset_spawn_origin(
         }
         FxSpawnOffsetMode::Cylinder => {
             let radius = sample_float_range(
-                radius_base,
-                radius_amp,
+                offset.radius[0],
+                offset.radius[1],
                 sample_f32(seed, FxRandomChannel::SpawnRadius),
             );
             let yaw = sample_f32(seed, FxRandomChannel::SpawnYaw) * (FX_TWO_PI as f32);
@@ -120,8 +123,8 @@ pub fn offset_spawn_origin(
             origin[1] += rx * axis[1][1] + ry * axis[2][1];
             origin[2] += rx * axis[1][2] + ry * axis[2][2];
             let height = sample_float_range(
-                height_base,
-                height_amp,
+                offset.height[0],
+                offset.height[1],
                 sample_f32(seed, FxRandomChannel::SpawnHeight),
             );
             origin[0] += height * axis[0][0];
@@ -137,10 +140,7 @@ pub fn spawn_origin_world(
     axis: [[f32; 3]; 3],
     spawn_origin: [[f32; 2]; 3],
     flags: i32,
-    radius_base: f32,
-    radius_amp: f32,
-    height_base: f32,
-    height_amp: f32,
+    offset: FxSpawnOffset,
     seed: u64,
 ) -> [f32; 3] {
     let mut origin = apply_spawn_origin(
@@ -150,16 +150,7 @@ pub fn spawn_origin_world(
         seed,
         elem_spawn_relative(flags),
     );
-    offset_spawn_origin(
-        &mut origin,
-        axis,
-        flags,
-        radius_base,
-        radius_amp,
-        height_base,
-        height_amp,
-        seed,
-    );
+    offset_spawn_origin(&mut origin, axis, flags, offset, seed);
     origin
 }
 

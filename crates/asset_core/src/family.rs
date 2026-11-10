@@ -1,71 +1,94 @@
+use std::collections::BTreeMap;
+use std::sync::OnceLock;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[repr(u8)]
-pub enum FamilyId {
-    Iw4 = 0,
-    Iw5 = 1,
-    T5 = 2,
-    T6 = 3,
-}
+pub struct FamilyId(&'static str);
 
 impl FamilyId {
-    pub const ALL: [Self; 4] = [Self::Iw4, Self::T5, Self::Iw5, Self::T6];
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Iw4 => "iw4",
-            Self::Iw5 => "iw5",
-            Self::T5 => "t5",
-            Self::T6 => "t6",
+    pub const IW4: Self = Self("iw4");
+
+    pub const fn new(token: &'static str) -> Self {
+        assert!(Self::valid_token(token), "invalid family token");
+        Self(token)
+    }
+
+    const fn valid_token(token: &str) -> bool {
+        let bytes = token.as_bytes();
+        if bytes.is_empty() || bytes.len() > 64 {
+            return false;
         }
+        let mut i = 0;
+        while i < bytes.len() {
+            let b = bytes[i];
+            if !b.is_ascii_lowercase() && !b.is_ascii_digit() && b != b'_' && b != b'-' {
+                return false;
+            }
+            i += 1;
+        }
+        true
     }
-    pub const fn prefix(self) -> &'static str {
-        self.as_str()
-    }
+
+    /// Resolve a token to an installed family. Tokens come from zone keys,
+    /// asset keys and peers, so an unknown one is refused rather than
+    /// interned: nothing outside the builder can grow the set of families.
     pub fn parse(token: &str) -> Option<Self> {
-        match token {
-            "iw4" => Some(Self::Iw4),
-            "iw5" => Some(Self::Iw5),
-            "t5" => Some(Self::T5),
-            "t6" => Some(Self::T6),
-            _ => None,
-        }
+        FAMILIES
+            .get()?
+            .families
+            .keys()
+            .find(|id| id.0 == token)
+            .copied()
     }
-    pub fn from_prefix(prefix: &str) -> Option<Self> {
-        Self::parse(prefix)
-    }
-    pub const fn from_zone_game(game: Self) -> Self {
-        game
+    pub const fn as_str(self) -> &'static str {
+        self.0
     }
 }
 
-mod sealed {
-    pub trait Sealed {}
+/// How a family's zones are recognised and which ones it always loads.
+/// Asset-level hooks live on `game_family::GameFamily`, which extends this.
+pub trait ZoneFormat: Send + Sync + 'static {
+    fn id(&self) -> FamilyId;
+    fn zone_version(&self) -> u32;
+    fn accepts_zone_header(&self, header: &[u8]) -> bool;
+    fn anchor_zone(&self) -> &'static str;
+    fn localized_zones(&self, language: &str) -> Vec<String>;
 }
-pub trait Family:
-    sealed::Sealed + Copy + Clone + core::fmt::Debug + PartialEq + Eq + 'static
-{
-    const ID: FamilyId;
+
+// Ordered by id, not by registration order: weapon rows and content hashes
+// must not depend on the order the builder adds the games in.
+#[derive(Default)]
+pub struct FamilyRegistry {
+    families: BTreeMap<FamilyId, &'static dyn ZoneFormat>,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Iw4;
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Iw5;
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct T5;
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct T6;
-impl sealed::Sealed for Iw4 {}
-impl Family for Iw4 {
-    const ID: FamilyId = FamilyId::Iw4;
+
+impl FamilyRegistry {
+    pub fn register(&mut self, family: &'static dyn ZoneFormat) {
+        assert!(
+            !self.families.contains_key(&family.id()),
+            "duplicate family {}",
+            family.id().as_str()
+        );
+        self.families.insert(family.id(), family);
+    }
+    pub fn get(&self, id: FamilyId) -> Option<&'static dyn ZoneFormat> {
+        self.families.get(&id).copied()
+    }
+    pub fn iter(&self) -> impl Iterator<Item = &'static dyn ZoneFormat> + '_ {
+        self.families.values().copied()
+    }
 }
-impl sealed::Sealed for Iw5 {}
-impl Family for Iw5 {
-    const ID: FamilyId = FamilyId::Iw5;
+
+/// Filled by `game_family::install` before any discovery or asset load starts.
+static FAMILIES: OnceLock<FamilyRegistry> = OnceLock::new();
+
+pub fn install_families(registry: FamilyRegistry) -> Result<(), &'static str> {
+    FAMILIES
+        .set(registry)
+        .map_err(|_| "families already installed")
 }
-impl sealed::Sealed for T5 {}
-impl Family for T5 {
-    const ID: FamilyId = FamilyId::T5;
-}
-impl sealed::Sealed for T6 {}
-impl Family for T6 {
-    const ID: FamilyId = FamilyId::T6;
+
+pub fn families() -> &'static FamilyRegistry {
+    FAMILIES
+        .get()
+        .expect("builder must install families before discovery")
 }

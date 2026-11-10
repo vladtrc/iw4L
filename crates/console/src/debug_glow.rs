@@ -1,5 +1,5 @@
+use crate::ConsoleRegistry;
 use crate::debug_scalar::debug_scalars;
-use crate::{ConsoleCommand, ConsoleLine, ConsoleRegistry, ConsoleSettings, ConsoleState};
 use bevy::prelude::*;
 use render_frontend::assemble::drawsurf::dof::GlowDvars;
 
@@ -22,44 +22,5 @@ pub(crate) fn register(registry: &mut ConsoleRegistry) {
             registry
                 .register(crate::CommandSpec::new(name).usage(format!("{name} [value] — glow")));
         }
-    }
-}
-
-pub(crate) fn route(
-    mut commands: MessageReader<ConsoleCommand>,
-    mut dvars: ResMut<GlowDvars>,
-    mut console: ResMut<ConsoleState>,
-    settings: Res<ConsoleSettings>,
-    mut line: ResMut<ConsoleLine>,
-) {
-    for cmd in commands.read() {
-        let name = cmd.name.as_str();
-        if !NAMES.contains(&name) {
-            continue;
-        }
-        let parsed = match cmd.args.as_slice() {
-            [] => Ok(None),
-            [value] => value
-                .parse::<f32>()
-                .ok()
-                .filter(|v| v.is_finite())
-                .map(Some)
-                .ok_or(()),
-            _ => Err(()),
-        };
-        let (current, min, max, is_bool) = scalar_current(&dvars, name);
-        let msg = match parsed {
-            Ok(None) => format!("{name} = {current} (domain {min}..{max})"),
-            Ok(Some(value))
-                if (min..=max).contains(&value) && (!is_bool || value == 0.0 || value == 1.0) =>
-            {
-                scalar_assign(&mut dvars, name, value);
-                format!("{name} = {value}")
-            }
-            _ => format!("usage: {name} [finite value {min}..{max}]"),
-        };
-        diag::info!(Console, "{msg}");
-        line.0 = msg.clone();
-        console.echo(msg, settings.log_capacity);
     }
 }

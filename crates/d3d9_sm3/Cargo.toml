@@ -11,3 +11,6 @@ d3d9_state.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+naga = { version = "30", features = ["wgsl-in"] }

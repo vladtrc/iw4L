@@ -364,10 +364,14 @@ fn manifest_summary(trace: &Path) -> String {
         .filter(|command| !command.is_empty())
         .unwrap_or_else(|| "MISSING".into());
     format!(
-        "manifest: {} zone={} role={} git={} focus={} workload={workload:?} elapsed_ms={} buffer_size_kb={}",
+        "manifest: {} zone={} role={} build_git={} runtime_git={} focus={} workload={workload:?} elapsed_ms={} buffer_size_kb={}",
         path.display(),
         field("zone"),
         field("role"),
+        value
+            .pointer("/build/git_sha")
+            .filter(|value| !value.is_null())
+            .map_or_else(|| "MISSING".into(), serde_json::Value::to_string),
         field("git"),
         field("focus"),
         field("elapsed_ms"),

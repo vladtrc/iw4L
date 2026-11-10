@@ -1,6 +1,5 @@
 use bevy::prelude::*;
 use frame::ScopeApp;
-use frame::{WorldGeneration, WorldStamp};
 
 use super::spawn::{WorldSpawnJob, WorldSpawnPhase};
 use std::collections::HashSet;
@@ -66,7 +65,6 @@ impl WorldGpuWait {
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct OverlayWarmup {
-    pub generation: WorldStamp,
     pub initialized: bool,
     pub total: u32,
     pub ready: u32,
@@ -74,7 +72,6 @@ pub struct OverlayWarmup {
 
 #[derive(Resource, Debug, Default, Clone, Copy)]
 pub struct WorldGpuReady {
-    pub spawn: WorldStamp,
     pub images: bool,
     pub pipelines: bool,
     pub waiting_n: u32,
@@ -88,15 +85,13 @@ pub struct WorldGpuReady {
 }
 
 impl WorldGpuReady {
-    fn live_for(&self, spawn: WorldStamp) -> bool {
-        self.spawn.0.is_some() && self.spawn == spawn && self.images && self.pipelines
+    fn is_ready(&self) -> bool {
+        self.images && self.pipelines
     }
 }
 
 #[derive(Resource, Clone, Debug, Default)]
 pub struct GpuSubmitDemand {
-    pub world_generation: WorldStamp,
-
     pub warm_pipelines: bool,
 
     pub overlay_gpu_wait: bool,
@@ -137,7 +132,8 @@ impl PipelineDemandTracker {
 
 #[derive(Resource, Clone, Debug, Default)]
 pub struct GpuLoadProgress {
-    pub generation: WorldStamp,
+    pub skin_failure: Option<&'static str>,
+    pub presented_at: Option<std::time::Instant>,
     pub waiting_n: u32,
     pub pipeline_n: u32,
     pub warmup: OverlayWarmup,
@@ -156,22 +152,8 @@ pub struct GpuImageResidency {
     pub ready: u32,
 }
 
-pub fn spawn_gpu_extract_live(
-    gpu_spawn: WorldStamp,
-    job_spawn: Option<WorldStamp>,
-    overlay_gpu_wait: bool,
-    world_gen: WorldStamp,
-) -> bool {
-    world_gen.0.is_some()
-        && gpu_spawn == world_gen
-        && job_spawn == Some(world_gen)
-        && overlay_gpu_wait
-}
-
 pub(crate) fn publish_gpu_submit_demand(
     spawn: Option<Res<WorldSpawnJob>>,
-    generation: Option<Res<WorldGeneration>>,
-    ready: Res<WorldGpuReady>,
     mut tracker: ResMut<PipelineDemandTracker>,
     mut demand: ResMut<GpuSubmitDemand>,
 ) {
@@ -184,43 +166,31 @@ pub(crate) fn publish_gpu_submit_demand(
                 | WorldSpawnPhase::Gpu
         )
     });
-    let world_generation = generation.map(|g| g.stamp()).unwrap_or_default();
     let overlay_gpu_wait = spawn
         .as_ref()
         .is_some_and(|job| job.phase == WorldSpawnPhase::Gpu);
     let spawn_world = spawn
         .as_ref()
         .map(|job| job.images.pipeline_world_materials.clone())
-        .unwrap_or_default();
+        .unwrap_or_else(|| Arc::new(std::collections::HashSet::new()));
     let spawn_smodel = spawn
         .as_ref()
         .map(|job| job.images.pipeline_smodel_materials.clone())
-        .unwrap_or_default();
+        .unwrap_or_else(|| Arc::new(std::collections::HashSet::new()));
     tracker.sync_spawn(spawn_world, spawn_smodel);
     let (pipeline_world_materials, pipeline_smodel_materials, pipeline_demand_revision) =
         tracker.snapshot();
     *demand = GpuSubmitDemand {
-        world_generation,
         warm_pipelines,
         overlay_gpu_wait,
-        wants_residency: spawn_gpu_extract_live(
-            ready.spawn,
-            spawn.as_ref().map(|job| job.spawn),
-            overlay_gpu_wait,
-            world_generation,
-        ),
+        wants_residency: spawn.is_some() && overlay_gpu_wait,
         pipeline_world_materials,
         pipeline_smodel_materials,
         pipeline_demand_revision,
     };
 }
 
-pub(crate) fn poll(
-    wait: &mut WorldGpuWait,
-    spawn: WorldStamp,
-    gpu: Option<&WorldGpuReady>,
-    gap_ms: f32,
-) -> bool {
+pub(crate) fn poll(wait: &mut WorldGpuWait, gpu: Option<&WorldGpuReady>, gap_ms: f32) -> bool {
     if let Some(gpu) = gpu {
         if wait.pipelines_at_arm.is_none() {
             wait.pipelines_at_arm = Some(gpu.pipeline_n);
@@ -247,7 +217,7 @@ pub(crate) fn poll(
             stage.done();
         }
     }
-    let ready = gpu.is_some_and(|gpu| gpu.live_for(spawn));
+    let ready = gpu.is_some_and(|gpu| gpu.is_ready());
     if ready {
         wait.quiet = wait.quiet.saturating_add(1);
     } else {
@@ -362,22 +332,25 @@ pub(crate) fn extract_images_ready(
 
 pub(crate) fn consume_gpu_load_progress(
     progress: Res<GpuLoadProgress>,
-    generation: Option<Res<WorldGeneration>>,
     demand: Res<GpuSubmitDemand>,
     mut job: Option<ResMut<WorldSpawnJob>>,
     mut ready: ResMut<WorldGpuReady>,
+    mut skin_failure: ResMut<render_scene::SkinFailure>,
+    mut present_ack: ResMut<render_scene::WorldPresentAck>,
 ) {
+    if skin_failure.reason.is_none() {
+        skin_failure.reason = progress.skin_failure;
+    }
+    if present_ack.at.is_none() {
+        present_ack.at = progress.presented_at;
+    }
+
     if let Some(job) = job.as_mut() {
         job.request_pending_shaders(&progress.pending_shaders);
     }
-    let world_gen = generation.map(|g| g.stamp()).unwrap_or(WorldStamp(None));
     ready.waiting_n = progress.waiting_n;
     ready.pipeline_n = progress.pipeline_n;
-    ready.warmup = if progress.generation == world_gen {
-        progress.warmup
-    } else {
-        OverlayWarmup::default()
-    };
+    ready.warmup = progress.warmup;
     ready.working_hits = progress.working_hits;
     ready.working_not_ready = progress.working_not_ready;
     match progress.residency {
@@ -388,15 +361,9 @@ pub(crate) fn consume_gpu_load_progress(
         }
         None => ready.images = false,
     }
-    let job_phase_live = spawn_gpu_extract_live(
-        ready.spawn,
-        job.as_ref().map(|job| job.spawn),
-        demand.overlay_gpu_wait,
-        world_gen,
-    );
+    let job_phase_live = job.is_some() && demand.overlay_gpu_wait;
     ready.pipelines = job_phase_live
         && progress.warmup.initialized
-        && progress.generation == world_gen
         && progress.warmup.ready == progress.warmup.total
         && progress.waiting_n == 0
         && progress.working_hits > 0

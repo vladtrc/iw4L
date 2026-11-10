@@ -8,6 +8,10 @@ use bevy_ecs::prelude::World;
 
 #[derive(Clone)]
 pub(crate) struct RestartPlan {
+    pub anim_trees: Arc<BTreeMap<String, super::animations::ScriptAnimTree>>,
+    pub profile: asset_core::RuntimeProfile,
+    pub campaign_player: Option<crate::ClientId>,
+    pub path_nodes: Arc<[asset_core::PathNode]>,
     pub absent_effects: std::collections::BTreeSet<String>,
     pub natives: NativeRegistry,
     pub entities: Arc<Vec<Vec<(String, String)>>>,
@@ -123,8 +127,19 @@ pub(crate) fn restart_level(world: &mut World, tick: crate::Tick) {
     let spawned: Vec<crate::ScriptModelId> = runtime
         .entities
         .values()
-        .filter(|e| matches!(e.kind, EntityKind::Spawned | EntityKind::Vehicle))
+        .filter(|e| {
+            matches!(
+                e.kind,
+                EntityKind::Spawned | EntityKind::Drone | EntityKind::Actor | EntityKind::Vehicle
+            )
+        })
         .filter_map(|e| e.presence)
+        .collect();
+
+    let animated: Vec<_> = runtime
+        .animators
+        .keys()
+        .filter_map(|id| runtime.entities.get(id)?.presence)
         .collect();
 
     for id in huds {
@@ -135,6 +150,14 @@ pub(crate) fn restart_level(world: &mut World, tick: crate::Tick) {
     }
     {
         let mut frame = FrameWorld::from_world(world);
+        for presence in animated {
+            if let Some(dobj) = frame
+                .collision_owner_mut(presence)
+                .and_then(|row| row.dobj.as_mut())
+            {
+                dobj.clear_script_animation_tree();
+            }
+        }
         for mover in crate::frame::collect_script_movers(frame.ecs()) {
             if spawned.contains(&mover.id) {
                 frame.remove_script_mover_by_number(mover.state.number);
@@ -146,7 +169,7 @@ pub(crate) fn restart_level(world: &mut World, tick: crate::Tick) {
         for number in frame.dropped_item_numbers_sorted() {
             frame.despawn_dropped_item(number);
         }
-        crate::t5_destructible::restart(&mut frame);
+        crate::model_behaviors::restart(&mut frame);
         frame.restart_level_phase();
         for id in frame.client_ids_sorted() {
             let (origin, angles) = frame
@@ -186,7 +209,7 @@ pub(crate) fn restart_level(world: &mut World, tick: crate::Tick) {
             }
         }
     }
-    drop(runtime);
+
     for entry in &plan.entries {
         if let Err(fault) = run_now(
             world,

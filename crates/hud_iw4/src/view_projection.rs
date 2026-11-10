@@ -185,6 +185,10 @@ fn matrix_inverse44(m: &[f32; 16]) -> Option<[f32; 16]> {
     for col in 0..4 {
         let mut pivot = col;
         let mut best = libm::fabsf(a[col][col]);
+        #[expect(
+            clippy::needless_range_loop,
+            reason = "Matrix elimination uses coupled row and column indices."
+        )]
         for r in (col + 1)..4 {
             let v = libm::fabsf(a[r][col]);
             if v > best {
@@ -199,6 +203,10 @@ fn matrix_inverse44(m: &[f32; 16]) -> Option<[f32; 16]> {
             a.swap(col, pivot);
         }
         let inv_p = 1.0 / a[col][col];
+        #[expect(
+            clippy::needless_range_loop,
+            reason = "Matrix elimination uses coupled row and column indices."
+        )]
         for c in 0..8 {
             a[col][c] *= inv_p;
         }
@@ -207,6 +215,10 @@ fn matrix_inverse44(m: &[f32; 16]) -> Option<[f32; 16]> {
                 continue;
             }
             let f = a[r][col];
+            #[expect(
+                clippy::needless_range_loop,
+                reason = "Matrix elimination uses coupled row and column indices."
+            )]
             for c in 0..8 {
                 a[r][c] -= f * a[col][c];
             }

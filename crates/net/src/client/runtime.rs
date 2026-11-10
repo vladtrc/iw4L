@@ -1,4 +1,5 @@
 use frame::ScopeApp;
+use input_iw4::{AdjustAnglesInput, CL_ANGLESPEEDKEY_DEFAULT, CL_PITCHSPEED_DEFAULT};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
@@ -14,14 +15,14 @@ use crate::authority::inbox::{
 use crate::authority::runtime::{AuthorityInputGate, AuthorityWorld, ClientShotSamples};
 use crate::client::frame_clock::{FrameClock, GameActive, GameJoinCensus};
 use crate::client::input::{
-    ClientActionInput, LookState, accumulate_look, build_usercmd, frame_time_msec, key_frame_msec,
+    ClientActionInput, LookState, build_usercmd, frame_time_msec, key_frame_msec,
     remote_control_axes,
 };
 use crate::client::predict::{ClientPrediction, CmdSeq};
 use crate::client::presentation::presented::{
     LocalPresentClient, PresentLocalCensus, PresentedSnapshot, interpolate_player_state,
+    keep_interpolated_player_clear,
 };
-use crate::client::presentation::projectiles::merge_presented_projectiles;
 use crate::client::proxy::{ProxySample, RemoteProxy};
 use crate::client::realtime::ClientRealtime;
 use crate::schedule::ClientSet;
@@ -31,20 +32,19 @@ use sim::Snapshot;
 #[derive(Resource)]
 pub struct ClientPredictionState(pub ClientPrediction);
 
+use crate::{ClientCollision, ClientLevel};
+
 #[derive(Resource, Default)]
 pub struct PendingPresentedEntityEvents {
     pub live: Vec<sim::EntityEventRecord>,
 
     pub archived: Vec<sim::EntityEventRecord>,
-    pub archive_tick: Option<sim::Tick>,
 
     pub in_killcam: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ImpactOccurrence {
-    pub installation: frame::LocalLoadKey,
-    pub timeline: u64,
     pub tick: sim::Tick,
     pub cause: Option<sim::FireCause>,
     pub attacker: i32,
@@ -56,23 +56,18 @@ pub struct ImpactOccurrence {
 #[derive(Message, Clone, Copy, Debug)]
 pub struct AcceptedImpact {
     pub occurrence: ImpactOccurrence,
-    pub world: frame::WorldStamp,
     pub record: sim::PelletFxRecord,
 }
 
 #[derive(Message, Clone, Copy, Debug)]
-pub struct ImpactReconstruction {
-    pub context: frame::PresentationContext,
-    pub retained_from: Option<sim::Tick>,
-}
+pub struct ImpactReconstruction;
 
 #[derive(Resource, Default)]
-pub struct PendingAcceptedImpacts(Vec<(frame::WorldStamp, sim::Tick, sim::PelletFxRecord)>);
+pub struct PendingAcceptedImpacts(Vec<(sim::Tick, sim::PelletFxRecord)>);
 
 #[derive(Resource, Default)]
 pub(crate) struct ImpactCursor {
     replay_tick: Option<sim::Tick>,
-    context: Option<(frame::LocalLoadKey, u64)>,
     seen: std::collections::HashSet<ImpactOccurrence>,
     order: VecDeque<ImpactOccurrence>,
 }
@@ -80,38 +75,21 @@ pub(crate) struct ImpactCursor {
 pub(crate) fn publish_accepted_impacts(
     mut pending: ResMut<PendingAcceptedImpacts>,
     mut cursor: ResMut<ImpactCursor>,
-    installed: Res<frame::InstalledMatch>,
-    timeline: Res<crate::EntityEventCursor>,
     mut impacts: MessageWriter<AcceptedImpact>,
     presented: Res<PresentedSnapshot>,
     mut visuals: ResMut<PendingPelletFx>,
     proxy: Res<RemoteProxyState>,
     mut reconstruction: MessageWriter<ImpactReconstruction>,
 ) {
-    let context = Some((installed.load_key, timeline.timeline()));
-    if cursor.context != context {
-        cursor.context = context;
-        cursor.seen.clear();
-        cursor.order.clear();
-        cursor.replay_tick = None;
-        reconstruction.write(ImpactReconstruction {
-            context: frame::PresentationContext::new(installed.load_key, timeline.timeline()),
-            retained_from: None,
-        });
-    }
     let mut accepted = std::mem::take(&mut pending.0);
     if presented.is_archived_replay()
         && let Some(snapshot) = presented.snapshot()
     {
-        let world = frame::WorldStamp::from_install(installed.request_id);
         let (gap, records) = proxy.0.impact_window(cursor.replay_tick, snapshot.tick);
         if gap.is_some() {
             cursor.seen.clear();
             cursor.order.clear();
-            reconstruction.write(ImpactReconstruction {
-                context: frame::PresentationContext::new(installed.load_key, timeline.timeline()),
-                retained_from: gap,
-            });
+            reconstruction.write(ImpactReconstruction);
         }
         if records.is_empty() && cursor.replay_tick != Some(snapshot.tick) {
             accepted.extend(
@@ -120,26 +98,18 @@ pub(crate) fn publish_accepted_impacts(
                     .pellet_fx
                     .iter()
                     .copied()
-                    .map(|record| (world, snapshot.tick, record)),
+                    .map(|record| (snapshot.tick, record)),
             );
         } else {
-            accepted.extend(
-                records
-                    .into_iter()
-                    .map(|(tick, record)| (world, tick, record)),
-            );
+            accepted.extend(records);
         }
         cursor.replay_tick = Some(snapshot.tick);
     }
-    for (world, tick, record) in accepted {
-        if world != frame::WorldStamp::from_install(installed.request_id)
-            || record.normal == [0.0; 3]
-        {
+    for (tick, record) in accepted {
+        if record.normal == [0.0; 3] {
             continue;
         }
         let occurrence = ImpactOccurrence {
-            installation: installed.load_key,
-            timeline: timeline.timeline(),
             tick: if record.fire_cause.is_some() {
                 sim::Tick(0)
             } else {
@@ -161,40 +131,22 @@ pub(crate) fn publish_accepted_impacts(
             }
         }
         if presented.is_archived_replay() {
-            visuals
-                .0
-                .push((world, crate::EntityEventDomain::Snapshot, record));
+            visuals.0.push(record);
         }
-        impacts.write(AcceptedImpact {
-            occurrence,
-            world,
-            record,
-        });
+        impacts.write(AcceptedImpact { occurrence, record });
     }
     let excess = visuals.0.len().saturating_sub(8192);
     visuals.0.drain(..excess);
 }
 
 #[derive(Resource, Default)]
-pub struct PendingPelletFx(
-    pub(crate)  Vec<(
-        frame::WorldStamp,
-        crate::EntityEventDomain,
-        sim::PelletFxRecord,
-    )>,
-);
+pub struct PendingPelletFx(pub(crate) Vec<sim::PelletFxRecord>);
 
 impl PendingPelletFx {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
-    pub fn take(
-        &mut self,
-    ) -> Vec<(
-        frame::WorldStamp,
-        crate::EntityEventDomain,
-        sim::PelletFxRecord,
-    )> {
+    pub fn take(&mut self) -> Vec<sim::PelletFxRecord> {
         core::mem::take(&mut self.0)
     }
 }
@@ -205,14 +157,13 @@ fn collect_received_entity_events(
     snapshot: &mut Snapshot,
     pending: &mut PendingPresentedEntityEvents,
 ) -> bool {
-    if crate::classify_snapshot(last_tick, snapshot.tick) != crate::SnapshotOrder::New {
+    if last_tick.is_some_and(|last| snapshot.tick.0 <= last.0) {
         return false;
     }
     pending.in_killcam = snapshot
         .meta
         .for_client(local)
         .is_some_and(|m| m.killcam_hud.is_some());
-    pending.archive_tick = pending.in_killcam.then(|| snapshot.view_tick(local));
     if pending.in_killcam {
         pending.archived.append(&mut snapshot.meta.entity_events);
     } else {
@@ -284,6 +235,7 @@ pub struct LastAdoptedSnapshot {
     pub next_snap: Option<Arc<Snapshot>>,
 
     pub applied_this_frame: bool,
+    pub(crate) prediction_ack: Option<CmdSeq>,
 
     pub adopted_at: Option<std::time::Instant>,
 }
@@ -416,6 +368,7 @@ pub struct WeaponSelect {
 
     pub last_primary: u32,
     pub mapped_index: u32,
+    pub pickup_seq: u32,
 }
 
 pub fn follow_held_weapon_select(
@@ -444,7 +397,7 @@ pub fn cycle_weapon_select(
     select: &mut WeaponSelect,
     input: &mut input_iw4::ClientInput,
     ps: &playerstate_iw4::PlayerState,
-    world: &sim::SimWorld,
+    world: &sim::SimContent,
     time: i32,
     next: bool,
 ) {
@@ -503,32 +456,30 @@ pub fn cycle_weapon_select(
     }
 }
 
-#[derive(Resource, Default, Debug, Clone)]
-pub struct ClientPhaseTrace(pub Vec<&'static str>);
-
-fn push_phase(trace: Option<ResMut<ClientPhaseTrace>>, name: &'static str) {
-    if let Some(mut t) = trace {
-        t.0.push(name);
-    }
-}
-
-pub fn listen_prediction_needs_content(pred: &ClientPrediction, authority: &sim::SimWorld) -> bool {
+pub fn listen_prediction_needs_content(
+    pred: &ClientPrediction,
+    level: &ClientLevel,
+    collision: &ClientCollision,
+    authority: &sim::SimWorld,
+) -> bool {
     if !authority.has_world_clip() {
         return false;
     }
-    if !pred.is_armed() || !pred.world().has_world_clip() {
+    if !pred.is_armed() || !collision.0.has_world_clip() {
         return true;
     }
-    if pred.world().content_digest() != authority.content_digest() {
+    if level.content_digest != authority.content_digest() {
         return true;
     }
-    authority.pen_table_loaded() && !pred.world().pen_table_loaded()
+    authority.pen_table_loaded() && !level.content.pen_table_loaded()
 }
 
 pub fn arm_listen_prediction(
     role: Res<RuntimeRole>,
     authority: Option<Res<AuthorityWorld>>,
     mut prediction: ResMut<ClientPredictionState>,
+    mut level: ResMut<ClientLevel>,
+    mut collision: ResMut<ClientCollision>,
 ) {
     if !matches!(*role, RuntimeRole::Listen | RuntimeRole::Client) {
         return;
@@ -536,65 +487,98 @@ pub fn arm_listen_prediction(
     let Some(authority) = authority else {
         return;
     };
-    if !listen_prediction_needs_content(&prediction.0, &authority.0) {
+    if authority.0.input_program_owns(prediction.0.local()) {
+        if prediction.0.is_armed() {
+            prediction.0.disarm();
+        }
         return;
     }
-    prediction.0.arm_from_content(&authority.0);
+    if !listen_prediction_needs_content(&prediction.0, &level, &collision, &authority.0) {
+        return;
+    }
+    prediction.0.arm();
+    *level = ClientLevel::from_world(&authority.0);
+    collision.0 = authority.0.collision_scene();
 }
 
 pub fn advance_cls_realtime(mut cls: ResMut<ClientRealtime>, time: Res<Time<Real>>) {
     cls.advance_listen(time.delta_secs());
 }
 
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct ClientFrameTiming<'w> {
+    clock: ResMut<'w, FrameClock>,
+    prediction: ResMut<'w, ClientPredictionState>,
+    join: ResMut<'w, GameJoinCensus>,
+    cgame_active: Res<'w, GameActive>,
+}
+
+impl ClientFrameTiming<'_> {
+    fn advance(
+        mut self,
+        client_clock: Res<ClientClock>,
+        time: Res<Time>,
+        authority: Option<Res<crate::AuthorityClock>>,
+        role: Res<RuntimeRole>,
+        fixed: Res<Time<Fixed>>,
+        adopted: Option<Res<LastAdoptedSnapshot>>,
+    ) {
+        let was_started = self.clock.started();
+        let adopted_tick = adopted.as_ref().and_then(|a| a.next().map(|s| s.tick));
+
+        let local_authority = authority.as_ref().filter(|_| role.runs_authority());
+        let server_time = local_authority
+            .map(|clock| ServerTime::from_ms(clock.time_ms))
+            .or_else(|| adopted_tick.map(ServerTime::from_tick));
+        if *role == RuntimeRole::Listen && self.cgame_active.0 && was_started {
+            let server = authority.as_ref().expect("listen authority clock").time_ms;
+            self.clock
+                .assign_server_time(server.wrapping_add(fixed.overstep().as_millis() as i32));
+        } else if *role == RuntimeRole::Replay {
+            if self.cgame_active.0
+                && let Some(server) = server_time
+            {
+                self.clock.assign_server_time(
+                    server
+                        .ms()
+                        .wrapping_add(AUTHORITY_MS)
+                        .wrapping_add(client_clock.accumulator_ms as i32),
+                );
+            }
+        } else if *role == RuntimeRole::Client {
+            self.clock
+                .advance_remote(time.delta_secs(), self.cgame_active.0, server_time);
+        } else {
+            self.clock
+                .advance_listen(time.delta_secs(), self.cgame_active.0, server_time);
+        }
+        if self.clock.started() && !was_started {
+            self.join.latch(
+                server_time.map(ServerTime::ms).unwrap_or(0),
+                local_authority
+                    .map(|c| c.tick)
+                    .or_else(|| adopted_tick.map(|t| t.0))
+                    .unwrap_or(0),
+                (time.elapsed_secs() * 1000.0) as i32,
+            );
+        }
+        self.prediction
+            .0
+            .predicted_error_mut()
+            .sync_frame(&self.clock);
+    }
+}
+
 pub fn advance_cg_frame_clock(
-    mut clock: ResMut<FrameClock>,
+    timing: ClientFrameTiming,
     client_clock: Res<ClientClock>,
-    mut prediction: ResMut<ClientPredictionState>,
-    mut join: ResMut<GameJoinCensus>,
     time: Res<Time>,
-    cgame_active: Res<GameActive>,
     authority: Option<Res<crate::AuthorityClock>>,
     role: Res<RuntimeRole>,
     fixed: Res<Time<Fixed>>,
     adopted: Option<Res<LastAdoptedSnapshot>>,
 ) {
-    let was_started = clock.started();
-    let adopted_tick = adopted.as_ref().and_then(|a| a.next().map(|s| s.tick));
-
-    let local_authority = authority.as_ref().filter(|_| role.runs_authority());
-    let server_time = local_authority
-        .map(|clock| ServerTime::from_ms(clock.time_ms))
-        .or_else(|| adopted_tick.map(ServerTime::from_tick));
-    if *role == RuntimeRole::Listen && cgame_active.0 && was_started {
-        let server = authority.as_ref().expect("listen authority clock").time_ms;
-        clock.assign_server_time(server.wrapping_add(fixed.overstep().as_millis() as i32));
-    } else if *role == RuntimeRole::Replay {
-        if cgame_active.0
-            && let Some(server) = server_time
-        {
-            clock.assign_server_time(
-                server
-                    .ms()
-                    .wrapping_add(AUTHORITY_MS)
-                    .wrapping_add(client_clock.accumulator_ms as i32),
-            );
-        }
-    } else if *role == RuntimeRole::Client {
-        clock.advance_remote(time.delta_secs(), cgame_active.0, server_time);
-    } else {
-        clock.advance_listen(time.delta_secs(), cgame_active.0, server_time);
-    }
-    if clock.started() && !was_started {
-        join.latch(
-            server_time.map(ServerTime::ms).unwrap_or(0),
-            local_authority
-                .map(|c| c.tick)
-                .or_else(|| adopted_tick.map(|t| t.0))
-                .unwrap_or(0),
-            (time.elapsed_secs() * 1000.0) as i32,
-        );
-    }
-    prediction.0.predicted_error_mut().sync_frame(&clock);
+    timing.advance(client_clock, time, authority, role, fixed, adopted);
 }
 
 #[derive(Default)]
@@ -602,20 +586,101 @@ pub struct JoinLinkWatch {
     connected: bool,
 }
 
+fn select_timeline(
+    received: Res<ReceivedTicks>,
+    adopted: Res<LastAdoptedSnapshot>,
+    local: Res<LocalPresentClient>,
+    current: Res<State<frame::Timeline>>,
+    mut next: ResMut<NextState<frame::Timeline>>,
+) {
+    let Some(tick) = received.0.iter().rev().find(|tick| {
+        adopted
+            .next()
+            .is_none_or(|old| tick.snapshot.tick.0 > old.tick.0)
+    }) else {
+        return;
+    };
+    let snapshot = &tick.snapshot;
+    let selected = if snapshot
+        .meta
+        .for_client(local.0)
+        .is_some_and(|meta| meta.killcam_hud.is_some())
+    {
+        frame::Timeline::Killcam
+    } else {
+        frame::Timeline::Live
+    };
+    let rewind = adopted.next().is_some_and(|old| {
+        snapshot.view_tick(local.0).0 < old.view_tick(local.0).0
+            || snapshot.meta.world_objects.map_round_epoch != old.meta.world_objects.map_round_epoch
+    });
+    if *current.get() != selected || rewind {
+        perf::instant!("timeline_transition", "iw4l.sim", |ctx| {
+            ctx.arg("from", *current.get() as i64);
+            ctx.arg("to", selected as i64);
+        });
+        next.set(selected);
+    }
+}
+
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct ClientAccountSync<'w> {
+    account: Option<ResMut<'w, crate::LocalAccount>>,
+    receipt: Option<Res<'w, crate::AccountSaveReceipt>>,
+    level: Res<'w, ClientLevel>,
+}
+
+impl ClientAccountSync<'_> {
+    fn poll(
+        &mut self,
+        link: &mut crate::transport::udp_session::UdpClientLink,
+        identity: Option<crate::SessionIdentity>,
+    ) -> Result<(), String> {
+        link.poll_accounts(
+            identity,
+            self.account.as_deref_mut(),
+            &self.level.schemas,
+            self.receipt.as_deref(),
+        )
+    }
+}
+
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct ClientLinkIdentity<'w, 's> {
+    local: ResMut<'w, LocalPresentClient>,
+    prediction: ResMut<'w, ClientPredictionState>,
+    watch: Local<'s, JoinLinkWatch>,
+}
+
+impl ClientLinkIdentity<'_, '_> {
+    fn adopt(&mut self, link: &crate::transport::udp_session::UdpClientLink) {
+        if link.connection.is_some() && !self.watch.connected {
+            self.watch.connected = true;
+            diag::info!(
+                Net,
+                "udp client accepted as client {}",
+                link.assigned_client.map(|c| c.0).unwrap_or(0)
+            );
+        }
+
+        if let Some(id) = link.assigned_client
+            && self.local.0 != id
+        {
+            self.local.0 = id;
+            self.prediction.0.set_local(id);
+        }
+    }
+}
+
 pub fn receive_ticks(
-    mut account: Option<ResMut<crate::LocalAccount>>,
-    receipt: Option<Res<crate::AccountSaveReceipt>>,
+    mut accounts: ClientAccountSync,
     mut link: Option<ResMut<crate::transport::udp_session::UdpClientLink>>,
     loopback: Option<ResMut<ListenLoopback>>,
     mut received: ResMut<ReceivedTicks>,
     adopted: Res<LastAdoptedSnapshot>,
-    mut local: ResMut<LocalPresentClient>,
-    mut prediction: ResMut<ClientPredictionState>,
-    trace: Option<ResMut<ClientPhaseTrace>>,
-    mut watch: Local<JoinLinkWatch>,
+    mut identity: ClientLinkIdentity,
     mut reliable: ReliableInbound,
 ) {
-    push_phase(trace, "Receive");
     if let Some(link) = link.as_mut() {
         match link.recv_ticks() {
             Ok(ticks) => {
@@ -631,30 +696,19 @@ pub fn receive_ticks(
                 }
             }
         }
-        if let Err(error) = link.poll_accounts(
+        if let Err(error) = accounts.poll(
+            link,
             reliable
                 .bridge
                 .as_ref()
                 .map(|bridge| bridge.state().identity()),
-            account.as_deref_mut(),
-            prediction.0.world().persistent_data().schemas(),
-            receipt.as_deref(),
         ) {
             reliable.fail(&error);
         }
         for payload in link.take_controls() {
-            reliable.apply(link.assigned_client.unwrap_or(local.0), &payload, |index| {
-                adopted.sound_alias_name(index).is_some()
-            });
+            reliable.apply(&payload, |index| adopted.sound_alias_name(index).is_some());
         }
-        note_join_link(&mut watch, link);
-
-        if let Some(id) = link.assigned_client {
-            if local.0 != id {
-                local.0 = id;
-                prediction.0.set_local(id);
-            }
-        }
+        identity.adopt(link);
         return;
     }
     if let Some(mut loopback) = loopback {
@@ -669,128 +723,169 @@ pub fn receive_ticks(
     }
 }
 
-fn note_join_link(watch: &mut JoinLinkWatch, link: &crate::transport::udp_session::UdpClientLink) {
-    if link.connection.is_some() && !watch.connected {
-        watch.connected = true;
-        diag::info!(
-            Net,
-            "udp client accepted as client {}",
-            link.assigned_client.map(|c| c.0).unwrap_or(0)
+#[derive(Resource, Default)]
+pub struct RemoteProxyState(pub RemoteProxy);
+
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct SnapshotEvents<'w> {
+    entity_events: ResMut<'w, PendingPresentedEntityEvents>,
+    pellet_fx: ResMut<'w, PendingPelletFx>,
+    accepted: ResMut<'w, PendingAcceptedImpacts>,
+}
+
+impl SnapshotEvents<'_> {
+    fn collect_entities(
+        &mut self,
+        last_tick: Option<sim::Tick>,
+        local: sim::ClientId,
+        snapshot: &mut Snapshot,
+    ) -> bool {
+        collect_received_entity_events(last_tick, local, snapshot, &mut self.entity_events)
+    }
+
+    fn publish_impacts(&mut self, snapshot: &Snapshot, role: RuntimeRole, local: sim::ClientId) {
+        self.accepted.0.extend(
+            snapshot
+                .meta
+                .pellet_fx
+                .iter()
+                .copied()
+                .map(|record| (snapshot.tick, record)),
+        );
+        self.pellet_fx.0.extend(
+            snapshot
+                .meta
+                .pellet_fx
+                .iter()
+                .filter(|record| {
+                    role == RuntimeRole::Replay
+                        || record.attacker != local.0 as i32
+                        || u32::from(record.surf_type) == weapon_iw4::SURF_TYPE_FLESH
+                })
+                .copied(),
         );
     }
 }
 
-#[derive(Resource, Default)]
-pub struct RemoteProxyState(pub RemoteProxy);
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct ClientSnapshotAdoption<'w> {
+    received: ResMut<'w, ReceivedTicks>,
+    last_adopted: ResMut<'w, LastAdoptedSnapshot>,
+    proxy: ResMut<'w, RemoteProxyState>,
+    pending: ResMut<'w, PendingClientSends>,
+    collision: ResMut<'w, ClientCollision>,
+}
 
-pub fn reconcile_prediction(
-    mut received: ResMut<ReceivedTicks>,
-    mut prediction: ResMut<ClientPredictionState>,
-    local: Res<LocalPresentClient>,
-    mut reliable: ReliableInbound,
-    mut last_adopted: ResMut<LastAdoptedSnapshot>,
-    mut proxy: ResMut<RemoteProxyState>,
-    mut pending: ResMut<PendingClientSends>,
-    mut entity_events: ResMut<PendingPresentedEntityEvents>,
-    mut pellet_fx: ResMut<PendingPelletFx>,
-    mut accepted: ResMut<PendingAcceptedImpacts>,
-    role: Res<RuntimeRole>,
-    cg_clock: Res<FrameClock>,
-    trace: Option<ResMut<ClientPhaseTrace>>,
-) {
-    push_phase(trace, "Reconcile");
-    let render_time_ms = (*role != RuntimeRole::Replay && cg_clock.started())
-        .then(|| cg_clock.time().saturating_add(cg_clock.frametime()));
-    last_adopted.applied_this_frame = false;
-    while let Some(mut tick) = received.0.pop_front() {
-        if !collect_received_entity_events(
-            last_adopted.next().map(|last| last.tick),
-            local.0,
-            &mut tick.snapshot,
-            &mut entity_events,
-        ) {
-            continue;
-        }
-        perf::net_leg("snap_adopt", tick.snapshot.tick.0, 0);
-        let match_key = crate::signon::live_match_key(reliable.bridge.as_deref());
-        let same_match = if match_key.is_none() {
-            matches!(*role, RuntimeRole::Listen | RuntimeRole::Replay)
-        } else {
-            tick.snapshot.meta.world_objects.map_round_epoch == match_key.match_epoch
-        };
-        if same_match {
-            accepted.0.extend(
-                tick.snapshot
-                    .meta
-                    .pellet_fx
-                    .iter()
-                    .copied()
-                    .map(|record| (reliable.generation.stamp(), tick.snapshot.tick, record)),
-            );
-            pellet_fx
-                .0
-                .extend(tick.snapshot.meta.pellet_fx.iter().copied().map(|record| {
-                    (
-                        reliable.generation.stamp(),
-                        crate::EntityEventDomain::Snapshot,
-                        record,
-                    )
-                }));
-        }
-        reliable.apply(local.0, &tick.frame.reliable, |index| {
-            sim::name_in_occupied(&tick.snapshot.meta.sound_aliases, index).is_some()
-        });
-        let ack = tick.ack_for(local.0);
-        if let Some(acked) = ack {
-            pending.clear_acknowledged(acked);
-        }
-        last_adopted.applied_this_frame = true;
-        last_adopted.adopted_at = Some(std::time::Instant::now());
-        if let Some(old_next) = last_adopted.next_snap.take() {
-            last_adopted.snap = Some(old_next);
-        }
-        let snap = Arc::new(tick.snapshot);
-        proxy.0.push_arc(Arc::clone(&snap), render_time_ms);
-        perf::net_leg("proxy_delay", snap.tick.0, proxy.0.delay_ms() as u32);
-        last_adopted.next_snap = Some(snap);
-        let newest = !received.0.iter().any(|pending| {
-            pending.snapshot.tick.0 > last_adopted.next().expect("next snapshot").tick.0
-        });
-        if newest {
-            prediction
-                .0
-                .on_authority(last_adopted.next().expect("next_snap just stored"), ack);
-        } else {
-            prediction.0.retire_acks(ack);
-        }
-        for cmd in tick.frame.svc_sounds {
-            reliable.svc.sound.write(crate::SvcLocalSound {
-                stop: cmd.stop,
-                index: cmd.index,
+impl ClientSnapshotAdoption<'_> {
+    fn reconcile(
+        mut self,
+        mut prediction: ResMut<ClientPredictionState>,
+        local: Res<LocalPresentClient>,
+        mut reliable: ReliableInbound,
+        mut events: SnapshotEvents,
+        role: Res<RuntimeRole>,
+        cg_clock: Res<FrameClock>,
+    ) {
+        let render_time_ms = (*role != RuntimeRole::Replay && cg_clock.started())
+            .then(|| cg_clock.time().saturating_add(cg_clock.frametime()));
+        self.last_adopted.applied_this_frame = false;
+        while let Some(mut tick) = self.received.0.pop_front() {
+            if !events.collect_entities(
+                self.last_adopted.next().map(|last| last.tick),
+                local.0,
+                &mut tick.snapshot,
+            ) {
+                continue;
+            }
+            perf::instant!("net_leg", "iw4l.sim", |ctx| {
+                let (leg, key, bytes): (&str, u32, u32) = ("snap_adopt", tick.snapshot.tick.0, 0);
+                ctx.arg("leg", leg);
+                ctx.arg("key", i64::from(key));
+                ctx.arg("bytes", i64::from(bytes));
             });
-        }
-        for cmd in tick.frame.svc_card_slots {
-            reliable.svc.card.write(crate::SvcCardSlotCmd {
-                client: cmd.client,
-                slot: cmd.slot,
+            let match_key = crate::signon::live_match_key(reliable.bridge.as_deref());
+            let same_match = if match_key.is_none() {
+                matches!(*role, RuntimeRole::Listen | RuntimeRole::Replay)
+            } else {
+                tick.snapshot.meta.world_objects.map_round_epoch == match_key.match_epoch
+            };
+            if same_match {
+                events.publish_impacts(&tick.snapshot, *role, local.0);
+            }
+            reliable.apply(&tick.frame.reliable, |index| {
+                sim::name_in_occupied(&tick.snapshot.meta.sound_aliases, index).is_some()
             });
-        }
-        for cmd in tick.frame.svc_hud_splashes {
-            reliable.svc.splash.write(cmd);
-        }
-        for cmd in tick.frame.svc_game_notifies {
-            reliable.svc.notify.write(cmd);
-        }
-        for cmd in tick.frame.svc_open_menus {
-            reliable.svc.menu.write(crate::SvcOpenMenuCmd {
-                cs_index: cmd.cs_index,
+            let ack = tick.ack_for(local.0);
+            if let Some(acked) = ack {
+                self.pending.clear_acknowledged(acked);
+            }
+            self.last_adopted.applied_this_frame = true;
+            self.last_adopted.adopted_at = Some(std::time::Instant::now());
+            if let Some(old_next) = self.last_adopted.next_snap.take() {
+                self.last_adopted.snap = Some(old_next);
+            }
+            let snap = Arc::new(tick.snapshot);
+            self.proxy.0.push_arc(Arc::clone(&snap), render_time_ms);
+            perf::instant!("net_leg", "iw4l.sim", |ctx| {
+                let (leg, key, bytes): (&str, u32, u32) =
+                    ("proxy_delay", snap.tick.0, self.proxy.0.delay_ms() as u32);
+                ctx.arg("leg", leg);
+                ctx.arg("key", i64::from(key));
+                ctx.arg("bytes", i64::from(bytes));
             });
-        }
-        if let Some(cmd) = tick.frame.svc_scores {
-            reliable.scores.parsed = crate::parse_scoreboard_cmd(&cmd);
-            reliable.scores.cmd = Some(cmd);
+            self.last_adopted.next_snap = Some(snap);
+            let newest = !self.received.0.iter().any(|pending| {
+                pending.snapshot.tick.0 > self.last_adopted.next().expect("next snapshot").tick.0
+            });
+            if newest {
+                self.last_adopted.prediction_ack = ack;
+                self.collision
+                    .0
+                    .adopt_snapshot(self.last_adopted.next().expect("next_snap just stored"));
+            } else {
+                prediction.0.retire_acks(ack);
+            }
+            for cmd in tick.frame.svc_sounds {
+                reliable.svc.sound.write(crate::SvcLocalSound {
+                    stop: cmd.stop,
+                    index: cmd.index,
+                });
+            }
+            for cmd in tick.frame.svc_card_slots {
+                reliable.svc.card.write(crate::SvcCardSlotCmd {
+                    client: cmd.client,
+                    slot: cmd.slot,
+                });
+            }
+            for cmd in tick.frame.svc_hud_splashes {
+                reliable.svc.splash.write(cmd);
+            }
+            for cmd in tick.frame.svc_game_notifies {
+                reliable.svc.notify.write(cmd);
+            }
+            for cmd in tick.frame.svc_open_menus {
+                reliable.svc.menu.write(crate::SvcOpenMenuCmd {
+                    cs_index: cmd.cs_index,
+                });
+            }
+            if let Some(cmd) = tick.frame.svc_scores {
+                reliable.scores.parsed = crate::parse_scoreboard_cmd(&cmd);
+                reliable.scores.cmd = Some(cmd);
+            }
         }
     }
+}
+
+pub fn reconcile_prediction(
+    adoption: ClientSnapshotAdoption,
+    prediction: ResMut<ClientPredictionState>,
+    local: Res<LocalPresentClient>,
+    reliable: ReliableInbound,
+    events: SnapshotEvents,
+    role: Res<RuntimeRole>,
+    cg_clock: Res<FrameClock>,
+) {
+    adoption.reconcile(prediction, local, reliable, events, role, cg_clock);
 }
 
 #[derive(bevy::prelude::Message, Clone, Copy, Debug)]
@@ -800,16 +895,11 @@ pub struct ReliableControlEvent(pub sim::SimEvent);
 pub struct SvcFrameWriters<'w> {
     sound: MessageWriter<'w, crate::SvcLocalSound>,
     audio: MessageWriter<'w, crate::SvcScriptAudio>,
+    objective: MessageWriter<'w, crate::SvcObjective>,
     card: MessageWriter<'w, crate::SvcCardSlotCmd>,
     menu: MessageWriter<'w, crate::SvcOpenMenuCmd>,
     splash: MessageWriter<'w, crate::SvcHudSplash>,
     notify: MessageWriter<'w, crate::SvcGameNotify>,
-}
-
-#[derive(Message, Clone, Debug)]
-pub struct FireCommandVerdicts {
-    pub world: frame::WorldStamp,
-    pub results: Vec<sim::FireCommandResult>,
 }
 
 #[derive(bevy::ecs::system::SystemParam)]
@@ -817,9 +907,7 @@ pub struct ReliableInbound<'w> {
     actions: ResMut<'w, ClientActionInbox>,
     ack: ResMut<'w, ClientReliableAck>,
     events: MessageWriter<'w, ReliableControlEvent>,
-    fire: MessageWriter<'w, FireCommandVerdicts>,
-    generation: Res<'w, frame::WorldGeneration>,
-    fire_verdicts: Res<'w, crate::FireVerdictState>,
+
     svc: SvcFrameWriters<'w>,
     scores: ResMut<'w, crate::Scoreboard>,
     signon: ResMut<'w, crate::SignonState>,
@@ -842,12 +930,7 @@ impl ReliableInbound<'_> {
         ));
     }
 
-    fn apply(
-        &mut self,
-        local: sim::ClientId,
-        payload: &crate::ReliablePayload,
-        sound_ready: impl Fn(u8) -> bool,
-    ) {
+    fn apply(&mut self, payload: &crate::ReliablePayload, sound_ready: impl Fn(u8) -> bool) {
         if payload.dropped_oldest != 0 {
             self.fail("ReliableControlOverflow: outcome unknown");
             return;
@@ -869,24 +952,12 @@ impl ReliableInbound<'_> {
                 continue;
             }
             match row {
-                crate::ReliableRow::FireCommands(results) => {
-                    if results.iter().any(|result| result.client != local) {
-                        self.fail("FireResultRecipientMismatch: connection retired");
-                        return;
-                    }
-                    if let Err(reason) = self.fire_verdicts.apply(self.generation.stamp(), results)
-                    {
-                        self.fail(reason);
-                        return;
-                    }
-                    self.fire.write(FireCommandVerdicts {
-                        world: self.generation.stamp(),
-                        results: results.clone(),
-                    });
-                }
                 crate::ReliableRow::Failure(_) => unreachable!("terminal handled before sequence"),
                 crate::ReliableRow::ScriptAudio(cmd) => {
                     self.svc.audio.write(crate::SvcScriptAudio(cmd.clone()));
+                }
+                crate::ReliableRow::Objective(cmd) => {
+                    self.svc.objective.write(crate::SvcObjective(cmd.clone()));
                 }
                 crate::ReliableRow::Sound(cmd) => {
                     // Reliable controls can overtake the snapshot that publishes
@@ -920,25 +991,6 @@ impl ReliableInbound<'_> {
                 crate::ReliableRow::Scores(cmd) => {
                     self.scores.parsed = crate::parse_scoreboard_cmd(cmd);
                     self.scores.cmd = Some(cmd.clone());
-                }
-                crate::ReliableRow::ActionOutcome {
-                    request_id,
-                    verdict,
-                } => {
-                    match verdict {
-                        crate::ActionVerdict::PayloadMismatch => {
-                            self.fail("ActionPayloadMismatch: connection retired");
-                            return;
-                        }
-                        crate::ActionVerdict::Expired => {
-                            self.fail("ActionOutcomeUnknown: request expired");
-                            return;
-                        }
-                        crate::ActionVerdict::Applied
-                        | crate::ActionVerdict::Accepted
-                        | crate::ActionVerdict::Refused => {}
-                    }
-                    self.actions.retire(local, *request_id);
                 }
                 crate::ReliableRow::Event(event) => {
                     self.events.write(ReliableControlEvent(*event));
@@ -994,239 +1046,339 @@ fn use_reload_as_reload(
     actions.use_reload_down = down;
 }
 
-pub fn sample_client_input(
-    time: Res<Time<Real>>,
-    mut actions: ResMut<ClientActionInput>,
-    mut look: ResMut<LookState>,
-    mut template: ResMut<ClientCmdTemplate>,
-    mut select: ResMut<WeaponSelect>,
-    prediction: Res<ClientPredictionState>,
-    presented: Res<PresentedSnapshot>,
-    local: Res<LocalPresentClient>,
-    gate: Res<AuthorityInputGate>,
-    cls: Res<ClientRealtime>,
-    clock: Res<FrameClock>,
-    mut action_inbox: Option<ResMut<ClientActionInbox>>,
-    mut request_ids: Option<ResMut<crate::ActionRequestIds>>,
-    view: Option<Res<frame::ViewSubject>>,
-    trace: Option<ResMut<ClientPhaseTrace>>,
-    aim_cursor: (ResMut<LocationCursor>, Res<crate::ViewweaponAim>),
-) {
-    let (mut cursor, aim) = aim_cursor;
-    push_phase(trace, "Input");
-    if !gate.local_cmds_enabled {
-        actions.client.weapon_cycles.clear();
-        actions.client.action_slots.clear();
-        return;
-    }
-    actions.frame_msec = key_frame_msec(time.delta_secs());
-    actions.now_msec = frame_time_msec(time.elapsed_secs());
-    let ps = prediction
-        .0
-        .predicted_local()
-        .or_else(|| presented.player(local.0));
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct LocalCommandSource<'w> {
+    presentation: crate::client::presentation::presented::LocalPresentation<'w>,
+    prediction: Res<'w, ClientPredictionState>,
+    gate: Res<'w, AuthorityInputGate>,
+    authority: Option<Res<'w, AuthorityWorld>>,
+}
 
-    let frozen = ps.is_some_and(|ps| (ps.pm_flags & 0x800) != 0)
-        || presented
-            .snapshot()
-            .and_then(|snapshot| snapshot.meta.for_client(local.0))
-            .is_none_or(|meta| meta.controls.frozen);
-
-    if frozen {
-        actions.mouse_x = 0.0;
-        actions.mouse_y = 0.0;
-        actions.pad_move = [0.0; 2];
-        actions.pad_look = [0.0; 2];
+impl LocalCommandSource<'_> {
+    fn enabled(&self) -> bool {
+        self.gate.local_cmds_enabled
+            && !self
+                .authority
+                .as_ref()
+                .is_some_and(|a| a.0.input_program_owns(self.client_id()))
     }
-    if let Some(ps) = ps {
-        let world = prediction.0.world();
-        let eye = [
-            ps.origin[0],
-            ps.origin[1],
-            ps.origin[2] + ps.view_height_current,
-        ];
-        let visible = |point: [f32; 3]| {
-            let hit =
-                world.trace_world(eye, point, [0.0; 3], [0.0; 3], hud_iw4::OVERHEAD_TRACE_MASK);
-            hit.fraction >= 1.0 && hit.startsolid == 0
-        };
-        let angles = [
-            look.angles[0] as f32 / input_iw4::ANGLE2SHORT,
-            look.angles[1] as f32 / input_iw4::ANGLE2SHORT,
-        ];
-        let (sp, cp) = angles[0].to_radians().sin_cos();
-        let (sy, cy) = angles[1].to_radians().sin_cos();
-        let forward = [cp * cy, cp * sy, -sp];
-        let in_front = |origin: [f32; 3], radius: f32| {
-            let d = [
-                origin[0] - ps.origin[0],
-                origin[1] - ps.origin[1],
-                origin[2] - ps.origin[2],
-            ];
-            d[0] * forward[0] + d[1] * forward[1] + d[2] * forward[2] + radius >= 0.0
-        };
-        let mut targets: Vec<crate::client::pad_aim::AimTarget> = Vec::new();
-        if actions.pad_aim_assist > 0 {
-            const RADIUS: f32 = 10.0;
-            let snapshot = presented.snapshot();
-            let team = |id: sim::ClientId| {
-                snapshot
-                    .and_then(|s| s.meta.for_client(id))
-                    .map(|m| m.client_state_team)
-            };
-            let teams = snapshot.is_some_and(|s| s.meta.kind.is_team());
-            let mine = team(local.0);
-            for id in snapshot
-                .into_iter()
-                .flat_map(|s| s.players.iter().map(|(id, _)| *id))
+
+    fn client_id(&self) -> sim::ClientId {
+        self.presentation.client_id()
+    }
+
+    fn player(&self) -> Option<&playerstate_iw4::PlayerState> {
+        self.prediction
+            .0
+            .predicted_local()
+            .or_else(|| self.presentation.player())
+    }
+
+    fn snapshot(&self) -> Option<&Snapshot> {
+        self.presentation.snapshot()
+    }
+
+    fn presented_player(&self, id: sim::ClientId) -> Option<&playerstate_iw4::PlayerState> {
+        self.presentation.presented.player(id)
+    }
+
+    fn shellshock(&self) -> Option<&hud_iw4::ShockParams> {
+        self.presentation.shellshock()
+    }
+}
+
+struct InputFrameTimes {
+    key_frame_msec: u32,
+    key_now_msec: i32,
+    client_frame_secs: f32,
+    game_msec: i32,
+}
+
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct ClientInputClocks<'w> {
+    real: Res<'w, Time<Real>>,
+    client: Res<'w, ClientRealtime>,
+    game: Res<'w, FrameClock>,
+}
+
+impl ClientInputClocks<'_> {
+    fn capture(&self) -> InputFrameTimes {
+        InputFrameTimes {
+            key_frame_msec: key_frame_msec(self.real.delta_secs()),
+            key_now_msec: frame_time_msec(self.real.elapsed_secs()),
+            client_frame_secs: self.client.frametime_secs(),
+            game_msec: self.game.time(),
+        }
+    }
+}
+
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct ClientCommandSampler<'w> {
+    actions: ResMut<'w, ClientActionInput>,
+    look: ResMut<'w, LookState>,
+    template: ResMut<'w, ClientCmdTemplate>,
+    select: ResMut<'w, WeaponSelect>,
+    action_inbox: Option<ResMut<'w, ClientActionInbox>>,
+    cursor: ResMut<'w, LocationCursor>,
+}
+
+impl ClientCommandSampler<'_> {
+    fn sample(
+        mut self,
+        source: LocalCommandSource,
+        clocks: ClientInputClocks,
+        view: Option<Res<frame::ViewSubject>>,
+        aim: Res<crate::ViewweaponAim>,
+        level: Res<ClientLevel>,
+        collision: Res<ClientCollision>,
+    ) {
+        if !source.enabled() {
+            self.template.ready = false;
+            self.actions.client.weapon_cycles.clear();
+            self.actions.client.action_slots.clear();
+            self.actions.client.command_notifications.clear();
+            return;
+        }
+        for command in std::mem::take(&mut self.actions.client.command_notifications) {
+            if let Some(inbox) = self.action_inbox.as_mut()
+                && let Err(error) = inbox.push(
+                    source.client_id(),
+                    sim::ClientAction::InputCommand { command },
+                )
             {
-                if id == local.0 || (teams && team(id) == mine) {
-                    continue;
-                }
-                let Some(other) = presented.player(id).filter(|o| o.pm_type == 0) else {
-                    continue;
-                };
-                let o = other.origin;
-                let head = [o[0], o[1], o[2] + other.view_height_current];
-                if !in_front(o, RADIUS) || !visible(head) {
-                    continue;
-                }
-                let top = other.view_height_current + 8.0;
-                targets.push(crate::client::pad_aim::AimTarget {
-                    key: u64::from(id.0),
-                    mins: [o[0] - RADIUS, o[1] - RADIUS, o[2]],
-                    maxs: [o[0] + RADIUS, o[1] + RADIUS, o[2] + top],
-                    aim: [o[0], o[1], o[2] + top * 0.75],
-                    velocity: other.velocity,
-                });
+                diag::warn!(Net, "input command notification: not queued — {error}");
             }
         }
-        let ranges = world
-            .weapon_combat_row(playerstate_iw4::get_viewmodel_weapon_index(ps))
-            .map_or(weapon_iw4::AimAssistRanges::NONE, |facts| facts.aim_assist);
-        let view = crate::client::pad_aim::AimView {
-            eye,
-            angles,
-            velocity: ps.velocity,
-            ads_lerp: ps.f_weapon_pos_frac,
-            fov_scale: actions.fov_scale.max(0.01),
-            ranges,
-            dt: cls.frametime_secs(),
-        };
-        let ads = actions.client.using_ads || actions.client.kb.speed.active;
-        crate::client::pad_aim::pad_look_frame(&mut actions, &view, &targets, ads);
-    } else {
-        actions.pad_look_delta = [0.0; 2];
-    }
-    if frozen {
-        actions.pad_look_delta = [0.0; 2];
-    }
-    let choose_direction = presented
-        .snapshot()
-        .and_then(|snapshot| snapshot.meta.for_client(local.0))
-        .and_then(|meta| meta.location_selection.as_ref())
-        .map(|selection| selection.choose_direction);
-    let location_input = choose_direction.is_some().then(|| {
-        let mouse = (actions.mouse_x, actions.mouse_y);
-        let pad = LocationPad::capture(&actions);
-        actions.mouse_x = 0.0;
-        actions.mouse_y = 0.0;
-        actions.pad_look_delta = [0.0; 2];
-        actions.pad_move = [0.0; 2];
-        actions.pad_turn_rate = [0.0; 2];
-        actions.pad_lockon = None;
-        actions.pad_autoaim = None;
-        (mouse, pad)
-    });
-    let remote_mouse = presented
-        .snapshot()
-        .and_then(|snapshot| snapshot.meta.for_client(local.0))
-        .and_then(|meta| meta.remote_missile)
-        .filter(|link| link.unlink_at_ms.is_none())
-        .map(|_| {
-            let mouse = (actions.mouse_x, actions.mouse_y);
-            actions.mouse_x = 0.0;
-            actions.mouse_y = 0.0;
-            actions.pad_look_delta = [0.0; 2];
-            mouse
-        });
-    let look_state = ps
-        .zip(presented.shellshock(local.0))
-        .map(|(ps, shock)| {
-            hud_iw4::update_shellshock_look_control(
-                clock.time(),
-                ps.shellshock_time,
-                ps.shellshock_duration,
-                shock.look,
-            )
-        })
-        .unwrap_or(hud_iw4::ShellshockLookState {
-            sensitivity: 1.0,
-            max_pitch_speed: 0.0,
-            max_yaw_speed: 0.0,
-        });
-    actions.shellshock_look_scale = look_state.sensitivity;
-    actions.cgame_max_pitch_speed = look_state.max_pitch_speed;
-    actions.cgame_max_yaw_speed = look_state.max_yaw_speed;
-    let now_msec = actions.now_msec;
-    let frame_msec = actions.frame_msec;
-    let cl_yawspeed = actions.cl_yawspeed;
-    let max_pitch = actions.cgame_max_pitch_speed;
-    let max_yaw = actions.cgame_max_yaw_speed;
-    accumulate_look(
-        cls.frametime_secs(),
-        now_msec,
-        frame_msec,
-        &mut actions.client,
-        &mut look,
-        cl_yawspeed,
-        frozen,
-        max_pitch,
-        max_yaw,
-    );
-    if std::mem::take(&mut actions.client.center_view) {
+        let times = clocks.capture();
+        self.actions.frame_msec = times.key_frame_msec;
+        self.actions.now_msec = times.key_now_msec;
+        let ps = source.player();
+
+        let frozen = ps.is_some_and(|ps| (ps.pm_flags & 0x800) != 0)
+            || source
+                .snapshot()
+                .and_then(|snapshot| snapshot.meta.for_client(source.client_id()))
+                .is_none_or(|meta| meta.controls.frozen);
+
+        if frozen {
+            self.actions.mouse_x = 0.0;
+            self.actions.mouse_y = 0.0;
+            self.actions.pad_move = [0.0; 2];
+            self.actions.pad_look = [0.0; 2];
+        }
         if let Some(ps) = ps {
-            look.angles[0] = (-ps.delta_angles[0] * input_iw4::ANGLE2SHORT) as i32;
-        }
-    }
-    let ps_weapon = ps.map(|ps| ps.weapon).unwrap_or(0);
-    let life_sequence = presented
-        .snapshot()
-        .and_then(|snapshot| snapshot.meta.for_client(local.0))
-        .map(|meta| meta.life_sequence.0)
-        .unwrap_or(0);
-    if actions.stance_life != Some(life_sequence) {
-        actions.client.stance_latch = 0;
-        actions.stance_life = Some(life_sequence);
-        actions.stance_event_sequence = ps.map_or(0, |ps| ps.event_sequence);
-    } else if let Some(ps) = ps {
-        let pending = ps
-            .event_sequence
-            .wrapping_sub(actions.stance_event_sequence);
-        if pending > 0 {
-            let events = [ps.events_0, ps.events_1, ps.events_2, ps.events_3];
-            for age in (0..pending.min(4)).rev() {
-                let seq = ps.event_sequence.wrapping_sub(1 + age);
-                match EntityEventKind(events[(seq & 3) as usize]) {
-                    EntityEventKind::STANCE_FORCE_STAND => actions.client.stance_latch = 0,
-                    EntityEventKind::STANCE_FORCE_CROUCH => {
-                        actions.client.stance_latch = playerstate_iw4::buttons::CROUCH as i32;
+            let world = &collision.0;
+            let eye = [
+                ps.origin[0],
+                ps.origin[1],
+                ps.origin[2] + ps.view_height_current,
+            ];
+            let visible = |point: [f32; 3]| {
+                let hit =
+                    world.trace_world(eye, point, [0.0; 3], [0.0; 3], hud_iw4::OVERHEAD_TRACE_MASK);
+                hit.fraction >= 1.0 && hit.startsolid == 0
+            };
+            let angles = [
+                self.look.angles[0] as f32 / input_iw4::ANGLE2SHORT,
+                self.look.angles[1] as f32 / input_iw4::ANGLE2SHORT,
+            ];
+            let (sp, cp) = angles[0].to_radians().sin_cos();
+            let (sy, cy) = angles[1].to_radians().sin_cos();
+            let forward = [cp * cy, cp * sy, -sp];
+            let in_front = |origin: [f32; 3], radius: f32| {
+                let d = [
+                    origin[0] - ps.origin[0],
+                    origin[1] - ps.origin[1],
+                    origin[2] - ps.origin[2],
+                ];
+                d[0] * forward[0] + d[1] * forward[1] + d[2] * forward[2] + radius >= 0.0
+            };
+            let mut targets: Vec<crate::client::pad_aim::AimTarget> = Vec::new();
+            if self.actions.pad_aim_assist > 0 {
+                const RADIUS: f32 = 10.0;
+                let snapshot = source.snapshot();
+                let team = |id: sim::ClientId| {
+                    snapshot
+                        .and_then(|s| s.meta.for_client(id))
+                        .map(|m| m.client_state_team)
+                };
+                let teams = snapshot.is_some_and(|s| s.meta.kind.is_team());
+                let mine = team(source.client_id());
+                for id in snapshot
+                    .into_iter()
+                    .flat_map(|s| s.players.iter().map(|(id, _)| *id))
+                {
+                    if id == source.client_id() || (teams && team(id) == mine) {
+                        continue;
                     }
-                    EntityEventKind::STANCE_FORCE_PRONE => {
-                        actions.client.stance_latch = playerstate_iw4::buttons::PRONE as i32;
+                    let Some(other) = source.presented_player(id).filter(|o| o.pm_type == 0) else {
+                        continue;
+                    };
+                    let o = other.origin;
+                    let head = [o[0], o[1], o[2] + other.view_height_current];
+                    if !in_front(o, RADIUS) || !visible(head) {
+                        continue;
                     }
-                    _ => {}
+                    let top = other.view_height_current + 8.0;
+                    targets.push(crate::client::pad_aim::AimTarget {
+                        key: u64::from(id.0),
+                        mins: [o[0] - RADIUS, o[1] - RADIUS, o[2]],
+                        maxs: [o[0] + RADIUS, o[1] + RADIUS, o[2] + top],
+                        aim: [o[0], o[1], o[2] + top * 0.75],
+                        velocity: other.velocity,
+                    });
                 }
             }
-            actions.stance_event_sequence = ps.event_sequence;
+            let ranges = level
+                .content
+                .weapon_combat_row(playerstate_iw4::get_viewmodel_weapon_index(ps))
+                .map_or(weapon_iw4::AimAssistRanges::NONE, |facts| facts.aim_assist);
+            let view = crate::client::pad_aim::AimView {
+                eye,
+                angles,
+                velocity: ps.velocity,
+                ads_lerp: ps.f_weapon_pos_frac,
+                fov_scale: self.actions.fov_scale.max(0.01),
+                ranges,
+                dt: times.client_frame_secs,
+            };
+            let ads = self.actions.client.using_ads || self.actions.client.kb.speed.active;
+            crate::client::pad_aim::pad_look_frame(&mut self.actions, &view, &targets, ads);
+        } else {
+            self.actions.pad_look_delta = [0.0; 2];
         }
-    }
-    follow_held_weapon_select(&mut select, ps_weapon, life_sequence, clock.time());
-    if let Some(ps) = ps {
-        if select.index == ps.weapon {
-            select.mapped_index = if prediction
-                .0
-                .world()
+        if frozen {
+            self.actions.pad_look_delta = [0.0; 2];
+        }
+        let choose_direction = source
+            .snapshot()
+            .and_then(|snapshot| snapshot.meta.for_client(source.client_id()))
+            .and_then(|meta| meta.location_selection.as_ref())
+            .map(|selection| selection.choose_direction);
+        let location_input = choose_direction.is_some().then(|| {
+            let mouse = (self.actions.mouse_x, self.actions.mouse_y);
+            let pad = LocationPad::capture(&self.actions);
+            self.actions.mouse_x = 0.0;
+            self.actions.mouse_y = 0.0;
+            self.actions.pad_look_delta = [0.0; 2];
+            self.actions.pad_move = [0.0; 2];
+            self.actions.pad_turn_rate = [0.0; 2];
+            self.actions.pad_lockon = None;
+            self.actions.pad_autoaim = None;
+            (mouse, pad)
+        });
+        let remote_mouse = source
+            .snapshot()
+            .and_then(|snapshot| snapshot.meta.for_client(source.client_id()))
+            .and_then(|meta| meta.remote_missile)
+            .filter(|link| link.unlink_at_ms.is_none())
+            .map(|_| {
+                let mouse = (self.actions.mouse_x, self.actions.mouse_y);
+                self.actions.mouse_x = 0.0;
+                self.actions.mouse_y = 0.0;
+                self.actions.pad_look_delta = [0.0; 2];
+                mouse
+            });
+        let look_state = ps
+            .zip(source.shellshock())
+            .map(|(ps, shock)| {
+                hud_iw4::update_shellshock_look_control(
+                    times.game_msec,
+                    ps.shellshock_time,
+                    ps.shellshock_duration,
+                    shock.look,
+                )
+            })
+            .unwrap_or(hud_iw4::ShellshockLookState {
+                sensitivity: 1.0,
+                max_pitch_speed: 0.0,
+                max_yaw_speed: 0.0,
+            });
+        self.actions.shellshock_look_scale = look_state.sensitivity;
+        self.actions.cgame_max_pitch_speed = look_state.max_pitch_speed;
+        self.actions.cgame_max_yaw_speed = look_state.max_yaw_speed;
+        let now_msec = self.actions.now_msec;
+        let frame_msec = self.actions.frame_msec;
+        let cl_yawspeed = self.actions.cl_yawspeed;
+        let max_pitch = self.actions.cgame_max_pitch_speed;
+        let max_yaw = self.actions.cgame_max_yaw_speed;
+        self.look.accumulate_keyboard(
+            &mut self.actions.client.kb,
+            AdjustAnglesInput {
+                dt: times.client_frame_secs,
+                now_msec,
+                frame_msec,
+                cl_yawspeed,
+                cl_pitchspeed: CL_PITCHSPEED_DEFAULT,
+                cl_anglespeedkey: CL_ANGLESPEEDKEY_DEFAULT,
+                cgame_max_yaw_speed: max_yaw,
+                cgame_max_pitch_speed: max_pitch,
+                frozen,
+            },
+        );
+        if std::mem::take(&mut self.actions.client.center_view)
+            && let Some(ps) = ps
+        {
+            self.look.angles[0] = (-ps.delta_angles[0] * input_iw4::ANGLE2SHORT) as i32;
+        }
+        let ps_weapon = ps.map(|ps| ps.weapon).unwrap_or(0);
+        let life_sequence = source
+            .snapshot()
+            .and_then(|snapshot| snapshot.meta.for_client(source.client_id()))
+            .map(|meta| meta.life_sequence.0)
+            .unwrap_or(0);
+        if self.actions.stance_life != Some(life_sequence) {
+            self.actions.client.stance_latch = 0;
+            self.actions.stance_life = Some(life_sequence);
+            self.actions.stance_event_sequence = ps.map_or(0, |ps| ps.event_sequence);
+        } else if let Some(ps) = ps {
+            let pending = ps
+                .event_sequence
+                .wrapping_sub(self.actions.stance_event_sequence);
+            if pending > 0 {
+                let events = [ps.events_0, ps.events_1, ps.events_2, ps.events_3];
+                for age in (0..pending.min(4)).rev() {
+                    let seq = ps.event_sequence.wrapping_sub(1 + age);
+                    match EntityEventKind(events[(seq & 3) as usize]) {
+                        EntityEventKind::STANCE_FORCE_STAND => self.actions.client.stance_latch = 0,
+                        EntityEventKind::STANCE_FORCE_CROUCH => {
+                            self.actions.client.stance_latch =
+                                playerstate_iw4::buttons::CROUCH as i32;
+                        }
+                        EntityEventKind::STANCE_FORCE_PRONE => {
+                            self.actions.client.stance_latch =
+                                playerstate_iw4::buttons::PRONE as i32;
+                        }
+                        _ => {}
+                    }
+                }
+                self.actions.stance_event_sequence = ps.event_sequence;
+            }
+        }
+        follow_held_weapon_select(&mut self.select, ps_weapon, life_sequence, times.game_msec);
+        if let Some(ps) = ps
+            && let Some(snapshot) = source.snapshot()
+            && let Some(pickup) = snapshot
+                .meta
+                .item_pickups
+                .iter()
+                .filter(|item| {
+                    item.seq > self.select.pickup_seq
+                        && item.picker == source.client_id().0 as i32
+                        && ps.weapons.contains(&(item.weapon as i32))
+                })
+                .max_by_key(|item| item.seq)
+        {
+            self.select.pickup_seq = pickup.seq;
+            self.select.index = pickup.weapon;
+            self.select.mapped_index = pickup.weapon;
+            self.select.time = times.game_msec;
+        }
+        if let Some(ps) = ps
+            && self.select.index == ps.weapon
+        {
+            self.select.mapped_index = if level
+                .content
                 .weapon_combat_row(ps.weapon)
                 .is_some_and(|facts| facts.inventory_type == 3)
             {
@@ -1235,152 +1387,164 @@ pub fn sample_client_input(
                 ps.weapon
             };
         }
-    }
-    let slots = std::mem::take(&mut actions.client.action_slots);
-    if let (Some(inbox), Some(ids)) = (action_inbox.as_mut(), request_ids.as_mut()) {
-        for &slot in &slots {
-            let request_id = ids.allocate();
-            let action = sim::ClientAction::ActionSlot {
-                request_id,
-                slot: slot as u8,
-            };
-            if let Err(error) = inbox.push(local.0, action) {
-                diag::warn!(Net, "action_slot: not queued — {error}");
-            }
-        }
-    }
-    if let Some(ps) = ps.filter(|_| !frozen) {
-        for slot in slots {
-            if !input_iw4::weapon_select::weapon_cycle_allowed(ps, clock.time(), select.time, 0, 0)
-            {
-                continue;
-            }
-            let target = match ps.action_slot_type.get(slot).copied() {
-                Some(1) => ps.action_slot_param[slot].max(0) as u32,
-                Some(2) => match prediction.0.world().weapon_combat_row(select.index) {
-                    Some(facts) if facts.inventory_type == 3 => select.mapped_index,
-                    Some(facts) => facts.alternate_weapon,
-                    None => 0,
-                },
-                _ => 0,
-            };
-            if target == 0 {
-                continue;
-            }
-            let parent = if ps.weapons.contains(&(target as i32)) {
-                target
-            } else {
-                select.mapped_index
-            };
-            let owned = ps.weapons.contains(&(parent as i32))
-                && (parent == target
-                    || prediction
-                        .0
-                        .world()
-                        .weapon_combat_row(parent)
-                        .is_some_and(|f| f.alternate_weapon == target));
-            if !owned {
-                continue;
-            }
-            select.index = target;
-            select.mapped_index = parent;
-            select.time = clock.time();
-            input_iw4::set_ads(&mut actions.client, false);
-        }
-    }
-    let cycles = std::mem::take(&mut actions.client.weapon_cycles);
-    let in_killcam = view.is_some_and(|v| v.in_killcam());
-    if let Some(ps) = ps {
-        for next in cycles {
-            if next && gamemode_iw4::copycat_weapnext_bind_active(ps.pm_type, in_killcam) {
-                if let (Some(inbox), Some(ids)) = (action_inbox.as_mut(), request_ids.as_mut()) {
-                    let request_id = ids.allocate();
-                    if let Err(error) =
-                        inbox.push(local.0, sim::ClientAction::UseCopycat { request_id })
-                    {
-                        diag::warn!(Net, "use_copycat: not queued — {error}");
-                    }
+        let slots = std::mem::take(&mut self.actions.client.action_slots);
+        if let Some(inbox) = self.action_inbox.as_mut() {
+            for &slot in &slots {
+                let action = sim::ClientAction::ActionSlot { slot: slot as u8 };
+                if let Err(error) = inbox.push(source.client_id(), action) {
+                    diag::warn!(Net, "action_slot: not queued — {error}");
                 }
             }
-            cycle_weapon_select(
-                &mut select,
-                &mut actions.client,
-                ps,
-                prediction.0.world(),
-                clock.time(),
-                next,
-            );
         }
-    }
-    actions.client.airborne =
-        ps.is_some_and(|ps| ps.ground_entity_num == playerstate_iw4::ENTITYNUM_NONE);
-    let mut cmd = build_usercmd(&mut actions, &look, 0);
-    use_reload_as_reload(&mut actions, &mut cmd, ps);
-    look.angles = cmd.angles;
-    if !frozen
-        && aim.live
-        && ps.is_some_and(|ps| aim.weapon == playerstate_iw4::get_viewmodel_weapon_index(ps))
-    {
-        cmd.gun_angle_offset = aim.angle_offset;
-    }
-    if let Some((mouse_x, mouse_y)) = remote_mouse {
-        cmd.remote_control = remote_control_axes(&actions, mouse_x, mouse_y);
-        cmd.buttons |= playerstate_iw4::buttons::REMOTE_CONTROL;
-    }
+        if let Some(ps) = ps.filter(|_| !frozen) {
+            for slot in slots {
+                if !input_iw4::weapon_select::weapon_cycle_allowed(
+                    ps,
+                    times.game_msec,
+                    self.select.time,
+                    0,
+                    0,
+                ) {
+                    continue;
+                }
+                let target = match ps.action_slot_type.get(slot).copied() {
+                    Some(1) => ps.action_slot_param[slot].max(0) as u32,
+                    Some(2) => match level.content.weapon_combat_row(self.select.index) {
+                        Some(facts) if facts.inventory_type == 3 => self.select.mapped_index,
+                        Some(facts) => facts.alternate_weapon,
+                        None => 0,
+                    },
+                    _ => 0,
+                };
+                if target == 0 {
+                    continue;
+                }
+                let parent = if ps.weapons.contains(&(target as i32)) {
+                    target
+                } else {
+                    self.select.mapped_index
+                };
+                let owned = ps.weapons.contains(&(parent as i32))
+                    && (parent == target
+                        || level
+                            .content
+                            .weapon_combat_row(parent)
+                            .is_some_and(|f| f.alternate_weapon == target));
+                if !owned {
+                    continue;
+                }
+                self.select.index = target;
+                self.select.mapped_index = parent;
+                self.select.time = times.game_msec;
+                input_iw4::set_ads(&mut self.actions.client, false);
+            }
+        }
+        let cycles = std::mem::take(&mut self.actions.client.weapon_cycles);
+        let in_killcam = view.is_some_and(|v| v.in_killcam());
+        if let Some(ps) = ps {
+            for next in cycles {
+                if next
+                    && gamemode_iw4::copycat_weapnext_bind_active(ps.pm_type, in_killcam)
+                    && let Some(inbox) = self.action_inbox.as_mut()
+                    && let Err(error) =
+                        inbox.push(source.client_id(), sim::ClientAction::UseCopycat)
+                {
+                    diag::warn!(Net, "use_copycat: not queued — {error}");
+                }
+                cycle_weapon_select(
+                    &mut self.select,
+                    &mut self.actions.client,
+                    ps,
+                    &level.content,
+                    times.game_msec,
+                    next,
+                );
+            }
+        }
+        self.actions.client.airborne =
+            ps.is_some_and(|ps| ps.ground_entity_num == playerstate_iw4::ENTITYNUM_NONE);
+        let mut cmd = build_usercmd(&mut self.actions, &self.look, 0);
+        use_reload_as_reload(&mut self.actions, &mut cmd, ps);
+        self.look.angles = cmd.angles;
+        if !frozen
+            && aim.live
+            && ps.is_some_and(|ps| aim.weapon == playerstate_iw4::get_viewmodel_weapon_index(ps))
+        {
+            cmd.gun_angle_offset = aim.angle_offset;
+        }
+        if let Some((mouse_x, mouse_y)) = remote_mouse {
+            cmd.remote_control = remote_control_axes(&self.actions, mouse_x, mouse_y);
+            cmd.buttons |= playerstate_iw4::buttons::REMOTE_CONTROL;
+        }
 
-    cmd.weapon = select.index as u16;
-    cmd.weapon_mapped = select.mapped_index as u16;
-    if let Some(loadout) = presented
-        .snapshot()
-        .and_then(|snapshot| snapshot.meta.for_client(local.0))
-        .and_then(|meta| meta.loadout.as_ref())
-    {
-        if actions.client.kb.frag.active || actions.client.kb.frag.was_pressed {
-            cmd.off_hand_index = loadout.lethal as u16;
-        } else if actions.client.kb.smoke.active || actions.client.kb.smoke.was_pressed {
-            cmd.off_hand_index = loadout.tactical as u16;
-        }
-    }
-    match location_input {
-        Some(((mouse_x, mouse_y), pad)) => {
-            let held = cmd.buttons;
-            let directing =
-                choose_direction == Some(true) && held & playerstate_iw4::buttons::ADS != 0;
-            let cancel = if choose_direction == Some(true) {
-                playerstate_iw4::buttons::MELEE_CHARGE
-            } else {
-                playerstate_iw4::buttons::ADS | playerstate_iw4::buttons::MELEE_CHARGE
-            };
-            cmd.selected_location = cursor.step(
-                &actions,
-                mouse_x,
-                mouse_y,
-                pad,
-                cls.frametime_secs(),
-                choose_direction == Some(true),
-                directing,
-            );
-            if choose_direction != Some(true) {
-                cmd.selected_location[2] = 0;
-            }
-            cmd.buttons &= playerstate_iw4::buttons::CROUCH | playerstate_iw4::buttons::PRONE;
-            if held & playerstate_iw4::buttons::ATTACK != 0 {
-                cmd.buttons |= playerstate_iw4::buttons::LOCATION_SELECT;
-            } else if held & cancel != 0 {
-                cmd.buttons |= playerstate_iw4::buttons::LOCATION_CANCEL;
+        cmd.weapon = self.select.index as u16;
+        cmd.weapon_mapped = self.select.mapped_index as u16;
+        if let Some(loadout) = source
+            .snapshot()
+            .and_then(|snapshot| snapshot.meta.for_client(source.client_id()))
+            .and_then(|meta| meta.loadout.as_ref())
+        {
+            if self.actions.client.kb.frag.active || self.actions.client.kb.frag.was_pressed {
+                cmd.off_hand_index = loadout.lethal as u16;
+            } else if self.actions.client.kb.smoke.active
+                || self.actions.client.kb.smoke.was_pressed
+            {
+                cmd.off_hand_index = loadout.tactical as u16;
             }
         }
-        None => *cursor = LocationCursor::default(),
+        match location_input {
+            Some((mouse, pad)) => {
+                let held = cmd.buttons;
+                let directing =
+                    choose_direction == Some(true) && held & playerstate_iw4::buttons::ADS != 0;
+                let cancel = if choose_direction == Some(true) {
+                    playerstate_iw4::buttons::MELEE_CHARGE
+                } else {
+                    playerstate_iw4::buttons::ADS | playerstate_iw4::buttons::MELEE_CHARGE
+                };
+                cmd.selected_location = self.cursor.step(
+                    self.actions.sensitivity,
+                    mouse,
+                    pad,
+                    times.client_frame_secs,
+                    choose_direction == Some(true),
+                    directing,
+                );
+                if choose_direction != Some(true) {
+                    cmd.selected_location[2] = 0;
+                }
+                cmd.buttons &= playerstate_iw4::buttons::CROUCH | playerstate_iw4::buttons::PRONE;
+                if held & playerstate_iw4::buttons::ATTACK != 0 {
+                    cmd.buttons |= playerstate_iw4::buttons::LOCATION_SELECT;
+                } else if held & cancel != 0 {
+                    cmd.buttons |= playerstate_iw4::buttons::LOCATION_CANCEL;
+                }
+            }
+            None => *self.cursor = LocationCursor::default(),
+        }
+        if cmd.buttons & playerstate_iw4::buttons::MELEE_CHARGE != 0
+            && let (Some(ps), Some(snapshot)) = (ps, source.snapshot())
+            && let Some((yaw, dist)) =
+                melee_charge_target(ps, source.client_id(), snapshot, &collision.0)
+        {
+            cmd.melee_charge_yaw = yaw;
+            cmd.melee_charge_dist = dist;
+        }
+        self.template.cmd = cmd;
+        self.template.ready = true;
     }
-    if cmd.buttons & playerstate_iw4::buttons::MELEE_CHARGE != 0
-        && let (Some(ps), Some(snapshot)) = (ps, presented.snapshot())
-        && let Some((yaw, dist)) = melee_charge_target(ps, local.0, snapshot, prediction.0.world())
-    {
-        cmd.melee_charge_yaw = yaw;
-        cmd.melee_charge_dist = dist;
-    }
-    template.cmd = cmd;
-    template.ready = true;
+}
+
+pub fn sample_client_input(
+    sampler: ClientCommandSampler,
+    source: LocalCommandSource,
+    clocks: ClientInputClocks,
+    view: Option<Res<frame::ViewSubject>>,
+    aim: Res<crate::ViewweaponAim>,
+    level: Res<ClientLevel>,
+    collision: Res<ClientCollision>,
+) {
+    sampler.sample(source, clocks, view, aim, level, collision);
 }
 
 const AIM_AUTOMELEE_RANGE: f32 = 128.0;
@@ -1390,7 +1554,7 @@ fn melee_charge_target(
     ps: &playerstate_iw4::PlayerState,
     local: sim::ClientId,
     snapshot: &Snapshot,
-    world: &sim::SimWorld,
+    world: &sim::CollisionScene,
 ) -> Option<(f32, u8)> {
     if ps.pm_flags & playerstate_iw4::pm_flags::PRONE != 0 {
         return None;
@@ -1510,18 +1674,17 @@ impl LocationPad {
 }
 
 impl LocationCursor {
-    #[allow(clippy::too_many_arguments)]
     fn step(
         &mut self,
-        input: &ClientActionInput,
-        mouse_x: f32,
-        mouse_y: f32,
+        sensitivity: f32,
+        mouse: (f32, f32),
         pad: LocationPad,
         dt: f32,
         choose_direction: bool,
         directing: bool,
     ) -> [u8; 3] {
-        let scale = LOCATION_CURSOR_SPEED * input.sensitivity * 0.002;
+        let (mouse_x, mouse_y) = mouse;
+        let scale = LOCATION_CURSOR_SPEED * sensitivity * 0.002;
         let further = |a: f32, b: f32| if a.abs() >= b.abs() { a } else { b };
         let (right, up) = if choose_direction {
             (pad.movement[1], pad.movement[0])
@@ -1624,7 +1787,6 @@ pub fn enforce_client_work_limits(
     cls: Res<ClientRealtime>,
     mut signon: ResMut<crate::SignonState>,
     bridge: Option<Res<crate::MasterBridge>>,
-    actions: Res<ClientActionInbox>,
     mut stalls: Local<BacklogStalls>,
 ) {
     if signon.phase.is_failed() {
@@ -1644,9 +1806,7 @@ pub fn enforce_client_work_limits(
         stalls.clear();
         None
     };
-    let reason = if actions.timed_out() {
-        Some("ActionOutcomeUnknown: authority outcome deadline exceeded")
-    } else if stall.is_some_and(|counted| counted >= BACKLOG_STALLS_BEFORE_FAIL) {
+    let reason = if stall.is_some_and(|counted| counted >= BACKLOG_STALLS_BEFORE_FAIL) {
         Some("InputBacklogExceeded")
     } else {
         None
@@ -1687,47 +1847,89 @@ fn queued_command_duration(times: impl IntoIterator<Item = i32>) -> i32 {
     duration
 }
 
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct PredictionSceneSource<'w, 's> {
+    level: Res<'w, ClientLevel>,
+    collision: Res<'w, ClientCollision>,
+    entities: Query<'w, 's, (&'static crate::CEntity, &'static crate::CEntityRuntime)>,
+    items: Query<'w, 's, &'static mut crate::client::prediction_scene::PredictedItem>,
+}
+
+impl PredictionSceneSource<'_, '_> {
+    fn build(
+        &mut self,
+        snapshot: Option<&Snapshot>,
+    ) -> crate::client::prediction_scene::PredictionScene<'_> {
+        crate::client::prediction_scene::PredictionScene {
+            level: &self.level,
+            collision: &self.collision.0,
+            bodies: crate::client::prediction_scene::player_bodies(&self.entities, snapshot),
+            items: self
+                .items
+                .iter_mut()
+                .map(|item| item.into_inner())
+                .collect(),
+        }
+    }
+}
+
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct LocalCommandPrediction<'w> {
+    prediction: ResMut<'w, ClientPredictionState>,
+    template: Res<'w, ClientCmdTemplate>,
+    actions: ResMut<'w, ClientActionInput>,
+    gate: Res<'w, AuthorityInputGate>,
+    pending: ResMut<'w, PendingClientSends>,
+    capture: ResMut<'w, crate::LocalCommandCapture>,
+    proxy: Res<'w, RemoteProxyState>,
+    cls: Res<'w, ClientRealtime>,
+    cg_clock: Res<'w, FrameClock>,
+}
+
+impl LocalCommandPrediction<'_> {
+    fn generate(mut self, mut scene_source: PredictionSceneSource, adopted: &LastAdoptedSnapshot) {
+        if !self.gate.local_cmds_enabled
+            || !self.prediction.0.is_armed()
+            || !self.template.ready
+            || !self.cg_clock.started()
+            || !self.pending.has_command_capacity(self.cg_clock.time())
+        {
+            return;
+        }
+
+        let msec = self.cls.frametime();
+        if msec <= 0 {
+            return;
+        }
+
+        let sample = self.proxy.0.shot_sample(self.cg_clock.time());
+        let mut scene = scene_source.build(adopted.next());
+        let generated = self.prediction.0.predict(
+            self.template.cmd,
+            ServerTime::from_ms(self.cg_clock.time()),
+            &mut scene,
+        );
+        if let Some((seq, cmd)) = generated {
+            self.actions.consume_edges();
+            self.capture
+                .push(self.prediction.0.local(), seq, cmd, sample);
+            self.pending.push(seq, cmd, sample);
+        }
+    }
+}
+
 pub fn predict_local_move(
     time: Res<Time>,
     mut clock: ResMut<ClientClock>,
     role: Res<RuntimeRole>,
-    mut prediction: ResMut<ClientPredictionState>,
-    template: Res<ClientCmdTemplate>,
-    mut actions: ResMut<ClientActionInput>,
-    gate: Res<AuthorityInputGate>,
-    mut pending: ResMut<PendingClientSends>,
-    proxy: Res<RemoteProxyState>,
-    cls: Res<ClientRealtime>,
-    cg_clock: Res<FrameClock>,
-    trace: Option<ResMut<ClientPhaseTrace>>,
+    command: LocalCommandPrediction,
+    scene: PredictionSceneSource,
+    adopted: Res<LastAdoptedSnapshot>,
 ) {
-    push_phase(trace, "Predict");
-
     if *role != RuntimeRole::Replay {
         let _tick = clock.tick(time.delta_secs() * 1000.0);
     }
-    if !gate.local_cmds_enabled
-        || !prediction.0.is_armed()
-        || !template.ready
-        || !cg_clock.started()
-        || !pending.has_command_capacity(cg_clock.time())
-    {
-        return;
-    }
-
-    let msec = cls.frametime();
-    if msec <= 0 {
-        return;
-    }
-
-    let sample = proxy.0.shot_sample(cg_clock.time());
-    if let Some((seq, cmd)) = prediction
-        .0
-        .predict(template.cmd, ServerTime::from_ms(cg_clock.time()))
-    {
-        actions.consume_edges();
-        pending.push(seq, cmd, sample);
-    }
+    command.generate(scene, &adopted);
 }
 
 pub fn flush_bootstrap_applied(
@@ -1746,71 +1948,92 @@ pub fn flush_bootstrap_applied(
     }
 }
 
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct ClientCommandSender<'w> {
+    link: Option<ResMut<'w, crate::transport::udp_session::UdpClientLink>>,
+    inbox: ResMut<'w, ClientCommandInbox>,
+    action_inbox: Option<ResMut<'w, ClientActionInbox>>,
+    pacer: ResMut<'w, GameplaySendPacer>,
+}
+
+impl ClientCommandSender<'_> {
+    fn send(
+        &mut self,
+        pending: &PendingClientSends,
+        local: &LocalPresentClient,
+        reliable_ack: &ClientReliableAck,
+        cls: &ClientRealtime,
+    ) {
+        if let Some(link) = self.link.as_mut() {
+            if link.connection.is_none() || !link.has_entered_match() {
+                return;
+            }
+
+            if let Some(inbox) = self.action_inbox.as_deref_mut() {
+                inbox.ack(link.action_ack());
+            }
+            let actions = self
+                .action_inbox
+                .as_deref()
+                .map_or(&[][..], |inbox| inbox.pending());
+            let now_ms = cls.realtime();
+            let newest = pending.newest_seq();
+            let gameplay_due = self.pacer.gameplay_due(now_ms, newest);
+
+            let ack_due = reliable_ack.0 != self.pacer.last_sent_ack;
+            let control_due = ack_due
+                || (!actions.is_empty()
+                    && self.pacer.last_control_ms.is_none_or(|last| {
+                        now_ms.saturating_sub(last) >= GAMEPLAY_SEND_INTERVAL_MS
+                    }));
+            if !gameplay_due && !control_due {
+                return;
+            }
+
+            let (cmds, retry_cursor) = if gameplay_due {
+                self.pacer.command_window(pending)
+            } else {
+                (Vec::new(), None)
+            };
+            let window = &cmds;
+            if let Err(e) = link.send_commands(window, actions, reliable_ack.0) {
+                diag::warn!(Net, "udp send cmds: {e}");
+                return;
+            }
+            if gameplay_due {
+                self.pacer.note_sent(now_ms, newest, reliable_ack.0);
+                self.pacer.retry_cursor = retry_cursor;
+            } else {
+                self.pacer.last_sent_ack = reliable_ack.0;
+            }
+            if control_due {
+                self.pacer.last_control_ms = Some(now_ms);
+            }
+            return;
+        }
+
+        if !self
+            .pacer
+            .gameplay_due(cls.realtime(), pending.newest_seq())
+        {
+            return;
+        }
+        self.pacer
+            .note_sent(cls.realtime(), pending.newest_seq(), reliable_ack.0);
+        for (seq, cmd, sample) in pending.iter().copied() {
+            self.inbox.push(local.0, Some(seq), cmd, Some(sample));
+        }
+    }
+}
+
 pub fn send_pending_commands(
-    link: Option<ResMut<crate::transport::udp_session::UdpClientLink>>,
-    mut inbox: ResMut<ClientCommandInbox>,
-    mut action_inbox: Option<ResMut<ClientActionInbox>>,
+    mut sender: ClientCommandSender,
     reliable_ack: Res<ClientReliableAck>,
-    mut pacer: ResMut<GameplaySendPacer>,
     cls: Res<ClientRealtime>,
     pending: Res<PendingClientSends>,
     local: Res<LocalPresentClient>,
-    trace: Option<ResMut<ClientPhaseTrace>>,
 ) {
-    push_phase(trace, "Send");
-    if let Some(mut link) = link {
-        if link.connection.is_none() || !link.has_entered_match() {
-            return;
-        }
-
-        let actions: Vec<_> = action_inbox
-            .as_deref()
-            .map(|inbox| inbox.pending_for(local.0).collect())
-            .unwrap_or_default();
-        let now_ms = cls.realtime();
-        let newest = pending.newest_seq();
-        let gameplay_due = pacer.gameplay_due(now_ms, newest);
-
-        let ack_due = reliable_ack.0 != pacer.last_sent_ack;
-        let control_due = ack_due || link.has_unsent_actions(&actions);
-        if !gameplay_due && !control_due {
-            return;
-        }
-
-        let (cmds, retry_cursor) = if gameplay_due {
-            pacer.command_window(&pending)
-        } else {
-            (Vec::new(), None)
-        };
-        let window = &cmds;
-        if let Err(e) = link.send_commands(window, &actions, reliable_ack.0) {
-            diag::warn!(Net, "udp send cmds: {e}");
-            return;
-        }
-        if let Some(inbox) = action_inbox.as_deref_mut() {
-            for action in &actions {
-                inbox.mark_dispatched(local.0, sim::action_request_id(action));
-            }
-        }
-        if gameplay_due {
-            pacer.note_sent(now_ms, newest, reliable_ack.0);
-            pacer.retry_cursor = retry_cursor;
-        } else {
-            pacer.last_sent_ack = reliable_ack.0;
-        }
-        if control_due {
-            pacer.last_control_ms = Some(now_ms);
-        }
-        return;
-    }
-
-    if !pacer.gameplay_due(cls.realtime(), pending.newest_seq()) {
-        return;
-    }
-    pacer.note_sent(cls.realtime(), pending.newest_seq(), reliable_ack.0);
-    for (seq, cmd, sample) in pending.iter().copied() {
-        inbox.push(local.0, Some(seq), cmd, Some(sample));
-    }
+    sender.send(&pending, &local, &reliable_ack, &cls);
 }
 
 pub const MAX_GAMEPLAY_SENDS_PER_SEC: i32 = 60;
@@ -1890,20 +2113,260 @@ impl GameplaySendPacer {
 #[derive(Resource, Debug, Default, Clone, Copy)]
 pub struct ClientReliableAck(pub u16);
 
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct PresentationTimeline<'w> {
+    clock: Res<'w, ClientClock>,
+    cg_clock: Res<'w, FrameClock>,
+    role: Res<'w, RuntimeRole>,
+    last_adopted: Res<'w, LastAdoptedSnapshot>,
+    proxy: Res<'w, RemoteProxyState>,
+}
+
+impl PresentationTimeline<'_> {
+    fn frame_interpolation(&self) -> f32 {
+        self.clock.accumulator_ms / AUTHORITY_MS as f32
+    }
+
+    fn previous_for_interpolation(&self, snapshot: &Snapshot) -> Option<Arc<Snapshot>> {
+        if *self.role == RuntimeRole::Replay {
+            self.last_adopted
+                .snap
+                .clone()
+                .filter(|previous| previous.tick.0 < snapshot.tick.0)
+        } else {
+            None
+        }
+    }
+
+    fn render_time(&self, snapshot: &Snapshot) -> i32 {
+        if *self.role == RuntimeRole::Replay {
+            (snapshot.tick.0 as i32 + 1) * AUTHORITY_MS + self.clock.accumulator_ms as i32
+        } else {
+            self.cg_clock.time()
+        }
+    }
+
+    fn body_time(&self, snapshot: &Snapshot, archived: bool) -> i32 {
+        if *self.role == RuntimeRole::Replay {
+            snapshot.tick.0 as i32 * AUTHORITY_MS - AUTHORITY_MS + self.clock.accumulator_ms as i32
+        } else if archived {
+            self.cg_clock.time().saturating_sub(self.proxy.0.delay_ms())
+        } else {
+            self.cg_clock.time().saturating_sub(AUTHORITY_MS)
+        }
+    }
+}
+
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct PresentationPublisher<'w, 's> {
+    entities: Query<'w, 's, &'static mut crate::CEntityRuntime>,
+    presented: ResMut<'w, PresentedSnapshot>,
+    census: ResMut<'w, PresentLocalCensus>,
+}
+
+impl PresentationPublisher<'_, '_> {
+    fn publish(
+        &mut self,
+        timeline: &PresentationTimeline,
+        local: &LocalPresentClient,
+        prediction: &ClientPredictionState,
+        collision: &ClientCollision,
+        has_world: Option<Res<State<frame::MatchScope>>>,
+    ) {
+        if has_world.is_some_and(|world| *world.get() != frame::MatchScope::Live) {
+            self.presented.clear();
+            *self.census = PresentLocalCensus {
+                choice: Some("no_next"),
+                snapshot_delta_time: None,
+                predicted_delta_time: prediction.0.predicted_local().map(|ps| ps.delta_time),
+            };
+            return;
+        }
+        let Some(snap_arc) = timeline.last_adopted.next_snap.clone() else {
+            *self.census = PresentLocalCensus {
+                choice: Some("no_next"),
+                snapshot_delta_time: None,
+                predicted_delta_time: prediction.0.predicted_local().map(|ps| ps.delta_time),
+            };
+            return;
+        };
+        let archived = snap_arc
+            .players
+            .iter()
+            .any(|(id, ps)| *id == local.0 && !ps.is_live_frame());
+        let snap_arc = if archived {
+            timeline
+                .proxy
+                .0
+                .snapshot_at(local.0, timeline.cg_clock.time())
+                .unwrap_or(snap_arc)
+        } else {
+            snap_arc
+        };
+        let snapshot = snap_arc.as_ref();
+        let snapshot_local = snapshot
+            .players
+            .iter()
+            .find(|(id, _)| *id == local.0)
+            .map(|(_, ps)| ps);
+        let predicted_ps = prediction.0.predicted_local().copied();
+        let previous = self.presented.player(local.0).copied();
+        let armed = *timeline.role != RuntimeRole::Replay && prediction.0.is_armed();
+        let frame_interpolation = timeline.frame_interpolation();
+        let interpolation_previous = timeline.previous_for_interpolation(snapshot);
+        let interpolated = interpolation_previous.as_deref().and_then(|previous| {
+            let previous_local = previous
+                .players
+                .iter()
+                .find(|(id, _)| *id == local.0)
+                .map(|(_, ps)| ps)?;
+            let next_local = snapshot_local?;
+            (previous_local.is_live_frame() && next_local.is_live_frame())
+                .then(|| interpolate_player_state(previous_local, next_local, frame_interpolation))
+        });
+        let interpolated = interpolated.map(|pose| {
+            let next = snapshot_local.expect("interpolation needs a decoded player");
+            let scene = collision.0.player_collision();
+            keep_interpolated_player_clear(pose, next, |pose| {
+                let backend = scene.backend(&[], local.0.0 as u16, pose.origin);
+                let mut stance = *pose;
+                let height = movement_iw4::sync_stance_tail(&mut stance);
+                let hit = movement_iw4::CollisionBackend::trace(
+                    &backend,
+                    movement_iw4::GroundTraceInput {
+                        start: pose.origin,
+                        end: pose.origin,
+                        mins: [-15.0, -15.0, 0.0],
+                        maxs: [15.0, 15.0, height],
+                        tracemask: sim::MASK_PLAYER_SOLID,
+                    },
+                );
+                hit.startsolid == 0 && hit.allsolid == 0
+            })
+        });
+        *self.census = PresentLocalCensus {
+            choice: Some(if interpolated.is_some() {
+                "interpolated"
+            } else if armed {
+                PresentedSnapshot::presentation_local_choice(
+                    snapshot_local,
+                    predicted_ps.as_ref(),
+                    previous.as_ref(),
+                )
+            } else {
+                PresentedSnapshot::presentation_local_choice_unarmed(snapshot_local)
+            }),
+            snapshot_delta_time: snapshot_local.map(|ps| ps.delta_time),
+            predicted_delta_time: predicted_ps.as_ref().map(|ps| ps.delta_time),
+        };
+        let mut predicted = match interpolated {
+            Some(interpolated) => interpolated,
+            None if armed => PresentedSnapshot::presentation_local_player_state(
+                snapshot_local,
+                predicted_ps,
+                previous,
+            ),
+            None => PresentedSnapshot::presentation_local_player_state_unarmed(snapshot_local),
+        };
+        let render_time_ms = timeline.render_time(snapshot);
+
+        let body_time_ms = timeline.body_time(snapshot, archived);
+
+        let mut remote_poses = HashMap::new();
+        let mut remote_provenance = HashMap::new();
+        for (id, _) in &snapshot.players {
+            if *id == local.0 && !archived {
+                continue;
+            }
+            match timeline.proxy.0.interpolate_at(*id, render_time_ms) {
+                ProxySample::Pose { ps, provenance } => {
+                    remote_poses.insert(*id, ps);
+                    remote_provenance.insert(*id, provenance);
+                }
+                ProxySample::Starved { held, provenance } => {
+                    if let Some(held_ps) = held {
+                        remote_poses.insert(*id, held_ps);
+                    }
+                    remote_provenance.insert(*id, provenance);
+                }
+            }
+        }
+
+        if archived && let Some(seat) = remote_poses.remove(&local.0) {
+            predicted = seat;
+        }
+        for mut runtime in &mut self.entities {
+            runtime.presented_player = None;
+            if runtime.pose_e_type as i32 == entity_iw4::ET_PLAYER
+                && let Ok(number) = u32::try_from(runtime.next_state.client_num)
+                && let Some(ps) = remote_poses.get(&sim::ClientId(number))
+            {
+                runtime.origin = ps.origin;
+                runtime.angles = ps.viewangles;
+                let provenance = remote_provenance[&sim::ClientId(number)];
+                let sample_time = match provenance.outcome {
+                    crate::PresentationSampleOutcome::Exact { snapshot }
+                    | crate::PresentationSampleOutcome::Starved {
+                        held_snapshot: Some(snapshot),
+                        ..
+                    } => snapshot.0 as i32 * AUTHORITY_MS,
+                    crate::PresentationSampleOutcome::Interpolated { .. } => {
+                        provenance.effective_time.0
+                    }
+                    crate::PresentationSampleOutcome::Starved {
+                        held_snapshot: None,
+                        ..
+                    } => unreachable!("a timeline.proxy pose always has a source snapshot"),
+                };
+                runtime.presented_player = Some((
+                    crate::player_state_to_entity_state(sim::ClientId(number), ps),
+                    sample_time,
+                ));
+            } else {
+                runtime.present_pose(body_time_ms);
+            }
+        }
+
+        let view_offset = if archived {
+            [0.0; 3]
+        } else {
+            prediction
+                .0
+                .predicted_error()
+                .offset_for_pm_type(predicted.pm_type)
+        };
+        self.presented.publish_proxied(
+            snap_arc,
+            local.0,
+            predicted,
+            remote_poses,
+            remote_provenance,
+        );
+        self.presented.set_view_offset(view_offset);
+        self.presented
+            .set_snapshot_interpolation(interpolation_previous, frame_interpolation);
+        self.presented.set_trajectory_sample(
+            archived.then_some(body_time_ms),
+            archived
+                .then(|| {
+                    timeline
+                        .proxy
+                        .0
+                        .snapshot_after(local.0, timeline.cg_clock.time())
+                })
+                .flatten(),
+        );
+    }
+}
+
 pub fn publish_presented(
-    clock: Res<ClientClock>,
-    cg_clock: Res<FrameClock>,
-    mut entities: Query<&mut crate::CEntityRuntime>,
-    role: Res<RuntimeRole>,
-    prediction: Res<ClientPredictionState>,
-    last_adopted: Res<LastAdoptedSnapshot>,
-    proxy: Res<RemoteProxyState>,
+    mut publisher: PresentationPublisher,
+    timeline: PresentationTimeline,
     local: Res<LocalPresentClient>,
+    prediction: Res<ClientPredictionState>,
+    collision: Res<ClientCollision>,
     has_world: Option<Res<State<frame::MatchScope>>>,
-    mut presented: ResMut<PresentedSnapshot>,
-    mut present_census: ResMut<PresentLocalCensus>,
     phase: Option<ResMut<crate::UpdatePhaseCensus>>,
-    trace: Option<ResMut<ClientPhaseTrace>>,
 ) {
     let publish_started = std::time::Instant::now();
     struct PublishStamp<'a> {
@@ -1922,198 +2385,8 @@ pub fn publish_presented(
         started: publish_started,
         phase,
     };
-    push_phase(trace, "Present");
 
-    if has_world.is_some_and(|world| *world.get() != frame::MatchScope::Live) {
-        presented.clear();
-        *present_census = PresentLocalCensus {
-            choice: Some("no_next"),
-            snapshot_delta_time: None,
-            predicted_delta_time: prediction.0.predicted_local().map(|ps| ps.delta_time),
-        };
-        return;
-    }
-    let Some(snap_arc) = last_adopted.next_snap.clone() else {
-        *present_census = PresentLocalCensus {
-            choice: Some("no_next"),
-            snapshot_delta_time: None,
-            predicted_delta_time: prediction.0.predicted_local().map(|ps| ps.delta_time),
-        };
-        return;
-    };
-    let archived = snap_arc
-        .players
-        .iter()
-        .any(|(id, ps)| *id == local.0 && !ps.is_live_frame());
-    let snap_arc = if archived {
-        proxy
-            .0
-            .snapshot_at(local.0, cg_clock.time())
-            .unwrap_or(snap_arc)
-    } else {
-        snap_arc
-    };
-    let snapshot = snap_arc.as_ref();
-    let snapshot_local = snapshot
-        .players
-        .iter()
-        .find(|(id, _)| *id == local.0)
-        .map(|(_, ps)| ps);
-    let predicted_ps = prediction.0.predicted_local().copied();
-    let previous = presented.player(local.0).copied();
-    let armed = *role != RuntimeRole::Replay && prediction.0.is_armed();
-    let frame_interpolation = clock.accumulator_ms / AUTHORITY_MS as f32;
-    let interpolation_previous = if *role == RuntimeRole::Replay {
-        last_adopted
-            .snap
-            .clone()
-            .filter(|previous| previous.tick.0 < snapshot.tick.0)
-    } else {
-        None
-    };
-    let interpolated = interpolation_previous.as_deref().and_then(|previous| {
-        let previous_local = previous
-            .players
-            .iter()
-            .find(|(id, _)| *id == local.0)
-            .map(|(_, ps)| ps)?;
-        let next_local = snapshot_local?;
-        (previous_local.is_live_frame() && next_local.is_live_frame())
-            .then(|| interpolate_player_state(previous_local, next_local, frame_interpolation))
-    });
-    *present_census = PresentLocalCensus {
-        choice: Some(if interpolated.is_some() {
-            "interpolated"
-        } else if armed {
-            PresentedSnapshot::presentation_local_choice(
-                snapshot_local,
-                predicted_ps.as_ref(),
-                previous.as_ref(),
-            )
-        } else {
-            PresentedSnapshot::presentation_local_choice_unarmed(snapshot_local)
-        }),
-        snapshot_delta_time: snapshot_local.map(|ps| ps.delta_time),
-        predicted_delta_time: predicted_ps.as_ref().map(|ps| ps.delta_time),
-    };
-    let mut predicted = match interpolated {
-        Some(interpolated) => interpolated,
-        None if armed => PresentedSnapshot::presentation_local_player_state(
-            snapshot_local,
-            predicted_ps,
-            previous,
-        ),
-        None => PresentedSnapshot::presentation_local_player_state_unarmed(snapshot_local),
-    };
-    let render_time_ms = if *role == RuntimeRole::Replay {
-        (snapshot.tick.0 as i32 + 1) * AUTHORITY_MS + clock.accumulator_ms as i32
-    } else {
-        cg_clock.time()
-    };
-
-    let body_time_ms = if *role == RuntimeRole::Replay {
-        snapshot.tick.0 as i32 * AUTHORITY_MS - AUTHORITY_MS + clock.accumulator_ms as i32
-    } else if archived {
-        cg_clock.time().saturating_sub(proxy.0.delay_ms())
-    } else {
-        cg_clock.time().saturating_sub(AUTHORITY_MS)
-    };
-
-    let mut remote_poses = HashMap::new();
-    let mut remote_provenance = HashMap::new();
-    for (id, _) in &snapshot.players {
-        if *id == local.0 && !archived {
-            continue;
-        }
-        match proxy.0.interpolate_at(*id, render_time_ms) {
-            ProxySample::Pose { ps, provenance } => {
-                remote_poses.insert(*id, ps);
-                remote_provenance.insert(*id, provenance);
-            }
-            ProxySample::Starved { held, provenance } => {
-                if let Some(held_ps) = held {
-                    remote_poses.insert(*id, held_ps);
-                }
-                remote_provenance.insert(*id, provenance);
-            }
-        }
-    }
-
-    if archived {
-        if let Some(seat) = remote_poses.remove(&local.0) {
-            predicted = seat;
-        }
-    }
-    for mut runtime in &mut entities {
-        runtime.presented_player = None;
-        if runtime.pose_e_type as i32 == entity_iw4::ET_PLAYER
-            && let Ok(number) = u32::try_from(runtime.next_state.client_num)
-            && let Some(ps) = remote_poses.get(&sim::ClientId(number))
-        {
-            runtime.origin = ps.origin;
-            runtime.angles = ps.viewangles;
-            let provenance = remote_provenance[&sim::ClientId(number)];
-            let sample_time = match provenance.outcome {
-                crate::PresentationSampleOutcome::Exact { snapshot }
-                | crate::PresentationSampleOutcome::Starved {
-                    held_snapshot: Some(snapshot),
-                    ..
-                } => snapshot.0 as i32 * AUTHORITY_MS,
-                crate::PresentationSampleOutcome::Interpolated { .. } => {
-                    provenance.effective_time.0
-                }
-                crate::PresentationSampleOutcome::Starved {
-                    held_snapshot: None,
-                    ..
-                } => unreachable!("a proxy pose always has a source snapshot"),
-            };
-            runtime.presented_player = Some((
-                crate::player_state_to_entity_state(sim::ClientId(number), ps),
-                sample_time,
-            ));
-        } else {
-            runtime.present_pose(body_time_ms);
-        }
-    }
-
-    let mut predicted_projectiles = Vec::new();
-    prediction
-        .0
-        .world()
-        .visit_projectiles(|projectile| predicted_projectiles.push(*projectile));
-    let merged_projectiles = if archived {
-        merge_presented_projectiles(snapshot.projectiles.as_slice(), &[], local.0)
-    } else {
-        merge_presented_projectiles(
-            snapshot.projectiles.as_slice(),
-            &predicted_projectiles,
-            local.0,
-        )
-    };
-    let view_offset = if archived {
-        [0.0; 3]
-    } else {
-        prediction
-            .0
-            .predicted_error()
-            .offset_for_pm_type(predicted.pm_type)
-    };
-    presented.publish_proxied(
-        snap_arc,
-        local.0,
-        predicted,
-        remote_poses,
-        remote_provenance,
-    );
-    presented.set_presented_projectiles(merged_projectiles);
-    presented.set_view_offset(view_offset);
-    presented.set_snapshot_interpolation(interpolation_previous, frame_interpolation);
-    presented.set_trajectory_sample(
-        archived.then_some(body_time_ms),
-        archived
-            .then(|| proxy.0.snapshot_after(local.0, cg_clock.time()))
-            .flatten(),
-    );
+    publisher.publish(&timeline, &local, &prediction, &collision, has_world);
 }
 
 fn release_timeline(
@@ -2130,20 +2403,52 @@ fn release_client(
     mut signon: ResMut<crate::SignonState>,
     mut admission: ResMut<crate::ClientAdmission>,
     mut events: ResMut<Messages<ReliableControlEvent>>,
-    mut fire_verdicts: ResMut<Messages<FireCommandVerdicts>>,
-    fire_state: Res<crate::FireVerdictState>,
 ) {
     actions.clear();
     presented.clear();
     *signon = crate::SignonState::default();
     *admission = crate::ClientAdmission::default();
     events.clear();
-    fire_verdicts.clear();
-    fire_state.clear();
-    perf::cgame_hold("no_next", 0);
+    perf::instant!("cgame_hold", "iw4l.sim", |ctx| {
+        let (present_choice, presented_has_ps): (&str, i64) = ("no_next", 0);
+        ctx.arg("present_choice", present_choice);
+        ctx.arg("presented_has_ps", presented_has_ps);
+    });
 }
 
 pub fn register_client_runtime(app: &mut App) {
+    app.add_systems(
+        OnEnter(frame::Timeline::Live),
+        reconstruct_impacts.after(frame::ScopeSet::Install),
+    )
+    .add_systems(
+        OnEnter(frame::Timeline::Killcam),
+        reconstruct_impacts.after(frame::ScopeSet::Install),
+    );
+    app.add_systems(OnExit(frame::Timeline::Killcam), release_timeline);
+    app.add_systems(
+        PreUpdate,
+        (
+            advance_cls_realtime.in_set(ClientSet::Load),
+            receive_ticks
+                .in_set(frame::InMatch)
+                .in_set(ClientSet::Receive),
+            crate::signon::drive_client_admission_facts
+                .in_set(ClientSet::Receive)
+                .after(receive_ticks),
+            crate::signon::drive_signon
+                .in_set(ClientSet::Receive)
+                .after(crate::signon::drive_client_admission_facts),
+            crate::signon::drive_map_loaded
+                .in_set(frame::InMatch)
+                .in_set(ClientSet::Receive)
+                .after(crate::signon::drive_client_admission_facts),
+            select_timeline
+                .in_set(frame::InMatch)
+                .in_set(ClientSet::Receive)
+                .after(crate::signon::drive_map_loaded),
+        ),
+    );
     app.add_systems(
         OnExit(frame::MatchScope::Live),
         release_client
@@ -2151,7 +2456,7 @@ pub fn register_client_runtime(app: &mut App) {
             .after(crate::signon::release_match_protocol),
     );
     app.add_systems(
-        OnExit(frame::Timeline::Running),
+        OnExit(frame::Timeline::Live),
         release_timeline.in_set(frame::ScopeSet::Release),
     );
     app.add_systems(
@@ -2163,39 +2468,41 @@ pub fn register_client_runtime(app: &mut App) {
     );
     app.init_resource::<crate::SignonState>()
         .init_resource::<crate::ClientAdmission>()
+        .scoped::<ClientLevel>(frame::MatchScope::Live)
+        .scoped::<ClientCollision>(frame::MatchScope::Live)
         .scoped::<ClientPredictionState>(frame::MatchScope::Live)
         .scoped::<ClientClock>(frame::MatchScope::Live)
-        .scoped::<FrameClock>(frame::Timeline::Running)
-        .scoped::<GameActive>(frame::Timeline::Running)
-        .scoped::<GameJoinCensus>(frame::Timeline::Running)
+        .scoped::<FrameClock>(frame::Timeline::Live)
+        .scoped::<GameActive>(frame::Timeline::Live)
+        .scoped::<GameJoinCensus>(frame::Timeline::Live)
         .init_resource::<ClientRealtime>()
-        .scoped::<ReceivedTicks>(frame::Timeline::Running)
-        .scoped::<LastAdoptedSnapshot>(frame::Timeline::Running)
-        .scoped::<PresentLocalCensus>(frame::Timeline::Running)
-        .scoped::<PendingPresentedEntityEvents>(frame::Timeline::Running)
-        .scoped::<PendingPelletFx>(frame::Timeline::Running)
-        .scoped::<PendingAcceptedImpacts>(frame::Timeline::Running)
-        .scoped::<ImpactCursor>(frame::Timeline::Running)
-        .scoped_message::<AcceptedImpact>(frame::Timeline::Running)
-        .scoped_message::<ImpactReconstruction>(frame::Timeline::Running)
+        .scoped::<ReceivedTicks>(frame::MatchScope::Live)
+        .scoped::<LastAdoptedSnapshot>(frame::Timeline::Live)
+        .scoped::<PresentLocalCensus>(frame::Timeline::Live)
+        .scoped::<PendingPresentedEntityEvents>(frame::Timeline::Live)
+        .scoped::<PendingPelletFx>(frame::Timeline::Live)
+        .scoped::<PendingAcceptedImpacts>(frame::Timeline::Live)
+        .scoped::<ImpactCursor>(frame::Timeline::Live)
+        .scoped_message::<AcceptedImpact>(frame::Timeline::Live)
+        .scoped_message::<ImpactReconstruction>(frame::Timeline::Live)
         .scoped::<PendingClientSends>(frame::MatchScope::Live)
+        .scoped::<crate::LocalCommandCapture>(frame::MatchScope::Live)
         .init_resource::<ClientCmdTemplate>()
         .scoped::<WeaponSelect>(frame::MatchScope::Live)
         .init_resource::<LocationCursor>()
         .scoped::<ClientReliableAck>(frame::MatchScope::Live)
         .scoped::<GameplaySendPacer>(frame::MatchScope::Live)
         .add_message::<ReliableControlEvent>()
-        .scoped_message::<FireCommandVerdicts>(frame::MatchScope::Live)
-        .init_resource::<crate::FireVerdictState>()
-        .scoped::<RemoteProxyState>(frame::Timeline::Running)
+        .scoped::<RemoteProxyState>(frame::Timeline::Live)
         .scoped::<ClientShotSamples>(frame::MatchScope::Live)
-        .scoped::<crate::Scoreboard>(frame::Timeline::Running)
-        .scoped_message::<crate::SvcLocalSound>(frame::Timeline::Running)
-        .scoped_message::<crate::SvcScriptAudio>(frame::Timeline::Running)
-        .scoped_message::<crate::SvcCardSlotCmd>(frame::Timeline::Running)
-        .scoped_message::<crate::SvcOpenMenuCmd>(frame::Timeline::Running)
-        .scoped_message::<crate::SvcHudSplash>(frame::Timeline::Running)
-        .scoped_message::<crate::SvcGameNotify>(frame::Timeline::Running);
+        .scoped::<crate::Scoreboard>(frame::Timeline::Live)
+        .scoped_message::<crate::SvcLocalSound>(frame::Timeline::Live)
+        .scoped_message::<crate::SvcScriptAudio>(frame::Timeline::Live)
+        .scoped_message::<crate::SvcObjective>(frame::Timeline::Live)
+        .scoped_message::<crate::SvcCardSlotCmd>(frame::Timeline::Live)
+        .scoped_message::<crate::SvcOpenMenuCmd>(frame::Timeline::Live)
+        .scoped_message::<crate::SvcHudSplash>(frame::Timeline::Live)
+        .scoped_message::<crate::SvcGameNotify>(frame::Timeline::Live);
     crate::client::frame_census::register_update_phase_census(app);
     app.configure_sets(
         Update,
@@ -2211,24 +2518,16 @@ pub fn register_client_runtime(app: &mut App) {
     .add_systems(
         Update,
         (
-            advance_cls_realtime.in_set(ClientSet::Load),
+            replay_client_prediction
+                .in_set(frame::InMatch)
+                .in_set(ClientSet::Reconcile)
+                .after(crate::client::presentation::entities::sync_client_entities)
+                .before(advance_cg_frame_clock)
+                .before(enforce_client_work_limits),
             advance_cg_frame_clock
                 .in_set(frame::InMatch)
                 .in_set(ClientSet::Reconcile)
                 .after(reconcile_prediction),
-            receive_ticks
-                .in_set(frame::InMatch)
-                .in_set(ClientSet::Receive),
-            crate::signon::drive_client_admission_facts
-                .in_set(ClientSet::Receive)
-                .after(receive_ticks),
-            crate::signon::drive_signon
-                .in_set(ClientSet::Receive)
-                .after(crate::signon::drive_client_admission_facts),
-            crate::signon::drive_map_loaded
-                .in_set(frame::InMatch)
-                .in_set(ClientSet::Receive)
-                .after(crate::signon::drive_client_admission_facts),
             reconcile_prediction
                 .in_set(frame::InMatch)
                 .in_set(ClientSet::Reconcile),
@@ -2258,9 +2557,30 @@ pub fn register_client_runtime(app: &mut App) {
 
 pub fn register_listen_prediction_arm(app: &mut App) {
     app.add_systems(
-        Update,
+        PreUpdate,
         arm_listen_prediction
             .in_set(frame::InMatch)
             .in_set(ClientSet::Load),
     );
+}
+
+fn reconstruct_impacts(mut reconstruction: MessageWriter<ImpactReconstruction>) {
+    reconstruction.write(ImpactReconstruction);
+}
+
+fn replay_client_prediction(
+    mut prediction: ResMut<ClientPredictionState>,
+    adopted: Res<LastAdoptedSnapshot>,
+    mut scene_source: PredictionSceneSource,
+) {
+    if !adopted.applied_this_frame {
+        return;
+    }
+    let Some(snapshot) = adopted.next() else {
+        return;
+    };
+    let mut scene = scene_source.build(Some(snapshot));
+    prediction
+        .0
+        .on_authority(snapshot, adopted.prediction_ack, &mut scene);
 }

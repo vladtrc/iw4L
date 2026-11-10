@@ -18,9 +18,8 @@ pub use alloc::{
     FX_MARK_OFF_MATERIAL, FX_MARK_OFF_NATIVE_COLOR, FX_MARK_OFF_ORIGIN, FX_MARK_OFF_POINT_COUNT,
     FX_MARK_OFF_POINTS, FX_MARK_OFF_RADIUS, FX_MARK_OFF_TEX_COORD_AXIS, FX_MARK_OFF_TRI_COUNT,
     FX_MARK_OFF_TRIS, FX_MARK_STAGING_POINT_STRIDE, FX_MARK_STAGING_TRI_STRIDE,
-    FX_MARKS_INIT_ALLOCED_COUNT, FX_MARKS_INIT_FRAME_COUNT, FxAllocMarkRefuse, FxAllocMarkRequest,
-    FxMarkConstructed, alloc_and_construct_mark, mark_point_groups_for_count,
-    mark_world_brushes_invokes_callback,
+    FX_MARKS_INIT_ALLOCED_COUNT, FX_MARKS_INIT_FRAME_COUNT, FxAllocMarkRequest, FxMarkConstructed,
+    alloc_and_construct_mark, mark_point_groups_for_count, mark_world_brushes_invokes_callback,
 };
 pub use allow::{
     FxMarkAllow, GFX_SURFACE_MATERIAL_OFF, MarkWorldAllowCensus, R_ALLOW_MARKS_GAME_FLAGS_MASK,
@@ -36,19 +35,18 @@ pub use box_surfaces::{
     mark_box_surfaces_words,
 };
 pub use clip::{
-    FxMarkEmitRefuse, FxMarkStagingPoint, FxMarkStagingTri, FxWorldMarkPoint, MarkWorldClipCensus,
-    MarkWorldStaging, mark_chop_world_poly_behind_plane, mark_chop_world_triangle_points,
-    mark_clip_world_surfaces, mark_clip_world_triangle, mark_clip_world_triangle_points,
+    FxMarkEmitRefuse, FxMarkStagingPoint, FxMarkStagingTri, FxWorldMarkPoint, MarkProjection,
+    MarkReceiverAttributes, MarkReceiverGeometry, MarkStagingBuffer, MarkTriangleAttributes,
+    MarkWorldClipCensus, MarkWorldStaging, mark_chop_world_poly_behind_plane,
+    mark_chop_world_triangle_points, mark_clip_world_triangle, mark_clip_world_triangle_points,
     mark_context_from_smodel, mark_context_from_world_surface, mark_context_lmap,
-    mark_context_primary_light, mark_context_probe, mark_emit_brush_fragment,
-    mark_fragment_clip_planes, mark_is_triangle_rejected, mark_setup_world_clip_points,
-    mark_stage_world_surfaces,
+    mark_context_primary_light, mark_context_probe, mark_fragment_clip_planes,
+    mark_is_triangle_rejected, mark_setup_world_clip_points,
 };
 pub use copy::{
-    FX_MARK_CONTEXT_SIZE, FX_POINT_GROUP_CHAIN_NONE, FX_TRI_GROUP_CHAIN_NONE, FxMarkCopyCensus,
-    FxPointGroup, FxTriGroup, copy_mark_points, copy_mark_tris, copy_staging_into_scratch,
-    link_scratch_point_groups, link_scratch_tri_groups, mark_contexts_equal,
-    mark_tri_groups_for_staging, mark_tri_pack_count,
+    FX_MARK_CONTEXT_SIZE, FX_POINT_GROUP_CHAIN_NONE, FX_TRI_GROUP_CHAIN_NONE, FxPointGroup,
+    FxTriGroup, copy_mark_points, copy_mark_tris, link_scratch_point_groups,
+    link_scratch_tri_groups, mark_contexts_equal, mark_tri_groups_for_staging, mark_tri_pack_count,
 };
 pub use generate::{
     FxGenerateMarkVertsPacked, MarkFragmentsAgainst, MarkGenerateAddEntity, MarkGoDispatch,
@@ -62,12 +60,11 @@ pub use limits::{
     GFX_MARK_SURF_VERT_LIMIT, GFX_SURFACE_LIGHTMAP_NONE, GFX_WORLD_VERTEX_STRIDE,
     R_MARK_CHOP_BEHIND, R_MARK_CHOP_MAX_POINTS, R_MARK_CHOP_ON_PLANE, R_MARK_CLIP_PLANE_COUNT,
     R_MARK_FRAGMENTS_CLIP_SURF_STRIDE, R_MARK_FRAGMENTS_MAX_POINTS, R_MARK_FRAGMENTS_MAX_TRIS,
-    R_MARK_FRAGMENTS_WORLD_SURF_STACK, R_MARK_TRI_REJECT_LEN_SQ_SCALE, R_WARN_GFX_MARK_SURF_LIMIT,
+    R_MARK_FRAGMENTS_WORLD_SURF_STACK, R_MARK_TRI_REJECT_LEN_SQ_SCALE,
 };
 pub use mesh::{
     GFX_MARK_MESH_BINORMAL_SIGN, GFX_MARK_MESH_VERTEX_STRIDE, GFX_MARK_SURF_STRIDE,
-    GFX_MARK_SURF_TECHNIQUE_NIBBLE, GfxMarkMeshBudget, GfxMarkMeshRefuse,
-    R_WARN_GFX_MARK_INDEX_LIMIT, R_WARN_GFX_MARK_VERT_LIMIT, add_mark_mesh_draw_surf,
+    GFX_MARK_SURF_TECHNIQUE_NIBBLE, GfxMarkMeshBudget, add_mark_mesh_draw_surf,
     generate_mark_verts_begin, mark_context_is_world_list, mark_mesh_index_reserve,
     pack_mark_model_vertex, pack_mark_world_vertex, reserve_mark_mesh_indices,
     reserve_mark_mesh_verts,

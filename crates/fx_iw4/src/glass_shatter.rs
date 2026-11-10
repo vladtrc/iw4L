@@ -178,13 +178,7 @@ pub fn glass_life_fade(age_msec: i32, life_msec: i32, fade_msec: i32) -> f32 {
 }
 
 pub fn glass_scale_color_alpha(rgba: [u8; 4], fade: f32) -> [u8; 4] {
-    let fade = if fade < 0.0 {
-        0.0
-    } else if fade > 1.0 {
-        1.0
-    } else {
-        fade
-    };
+    let fade = fade.clamp(0.0, 1.0);
     let a = (rgba[3] as f32 * fade) as u8;
     [rgba[0], rgba[1], rgba[2], a]
 }

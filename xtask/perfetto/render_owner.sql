@@ -3,7 +3,6 @@ WITH plans AS (
   SELECT
     ts,
     EXTRACT_ARG(arg_set_id, 'debug.frame_id') AS frame_id,
-    EXTRACT_ARG(arg_set_id, 'debug.world_generation') AS world_generation,
     EXTRACT_ARG(arg_set_id, 'debug.owner_kind') AS owner_kind,
     EXTRACT_ARG(arg_set_id, 'debug.owner_id') AS owner_id,
     EXTRACT_ARG(arg_set_id, 'debug.model') AS model,
@@ -55,7 +54,6 @@ submit_bounds AS (
 )
 SELECT
   k.frame_id,
-  p.world_generation,
   p.owner_kind,
   k.owner_id,
   p.model,

@@ -1,6 +1,7 @@
 mod sort;
-mod state;
+pub mod state;
 pub use state::compile_material_state;
+pub mod compiler;
 mod technique;
 
 use render_material::{
@@ -21,11 +22,42 @@ fn program_hash(program: &[u8]) -> u64 {
     hash
 }
 
-pub fn compile_material_catalog(source: &crate::MaterialDefinitions) -> RuntimeMaterialCatalog {
+pub fn compile_material_catalog(
+    source: &crate::MaterialDefinitions,
+) -> Result<RuntimeMaterialCatalog, compiler::MaterialCompileError> {
+    for family in source
+        .materials
+        .iter()
+        .map(|material| material.namespace)
+        .chain(
+            source
+                .technique_set_facts()
+                .iter()
+                .map(|facts| facts.namespace),
+        )
+    {
+        compiler::compiler_for(family)
+            .ok_or(compiler::MaterialCompileError::UnknownFamily(family))?;
+    }
+    for material in &source.materials {
+        if let Some(entries) = &material.native_state_bits_entry {
+            let expected = compiler::compiler_for(material.namespace)
+                .expect("validated material compiler")
+                .selector_count();
+            if expected != Some(entries.len()) {
+                return Err(compiler::MaterialCompileError::InvalidSelectorCount {
+                    family: material.namespace,
+                    expected,
+                    actual: entries.len(),
+                });
+            }
+        }
+    }
     let mut technique_sets = Vec::new();
     let mut vertex_decls = Vec::<(u32, RuntimeVertexDecl)>::new();
     for facts in source.technique_set_facts() {
-        let compiler = technique::compiler_for(facts.namespace);
+        let compiler =
+            compiler::compiler_for(facts.namespace).expect("validated material compiler");
         let mut slots = vec![None; TECHNIQUE_SLOT_COUNT];
         if let Some(graph) = facts.table.as_ref().and_then(|table| table.graph.as_ref()) {
             for (slot_index, technique) in graph.slots.iter().enumerate().take(TECHNIQUE_SLOT_COUNT)
@@ -130,25 +162,37 @@ pub fn compile_material_catalog(source: &crate::MaterialDefinitions) -> RuntimeM
                 pass_states: material
                     .state_bits
                     .iter()
-                    .map(|words| technique::compiler_for(material.namespace).compile_state(*words))
+                    .map(|words| {
+                        compiler::compiler_for(material.namespace)
+                            .expect("validated material compiler")
+                            .compile_state(*words)
+                    })
                     .collect(),
                 camera_region: material.camera_region,
-                draw_rules: technique::compiler_for(material.namespace)
-                    .draw_rules(material, source.is_unlit(material).unwrap_or(false)),
+                draw_rules: compiler::compiler_for(material.namespace)
+                    .expect("validated material compiler")
+                    .draw_rules(
+                        &compiler::MaterialDrawInputs {
+                            camera_region: material.camera_region,
+                            info_game_flags: material.info_game_flags,
+                            sort_key: material.sort_key,
+                        },
+                        material.is_unlit().unwrap_or(false),
+                    ),
                 sort_key: material.sort_key,
                 info_game_flags: material.info_game_flags,
                 texture_atlas: material.texture_atlas.unwrap_or([1, 1]),
                 state_flags: material.state_flags,
                 surface_type_bits: material.surface_type_bits,
-                unlit: source.is_unlit(material).unwrap_or(false),
-                takes_model_lighting: source.takes_model_lighting(material) == Some(true),
+                unlit: material.is_unlit().unwrap_or(false),
+                takes_model_lighting: material.takes_model_lighting() == Some(true),
                 uses_model_lighting_const: material
                     .route
                     .is_some_and(|route| route.uses_model_lighting_const),
-                square_color_map: source.color_map_transform(material)
+                square_color_map: material.color_map_transform()
                     == crate::ColorMapTransform::Square,
-                shadow_only: source.is_shadowcaster(material),
-                cull_mode: match source.cull_face(material) {
+                shadow_only: material.is_shadowcaster(),
+                cull_mode: match material.cull_face() {
                     Some(crate::MaterialCullFace::Back) => Some(0),
                     Some(crate::MaterialCullFace::Front) => Some(1),
                     Some(crate::MaterialCullFace::None) | None => None,
@@ -251,7 +295,7 @@ pub fn compile_material_catalog(source: &crate::MaterialDefinitions) -> RuntimeM
         })
         .collect();
 
-    RuntimeMaterialBuild {
+    Ok(RuntimeMaterialBuild {
         materials,
         material_indices_by_name,
         material_indices_by_key,
@@ -259,67 +303,62 @@ pub fn compile_material_catalog(source: &crate::MaterialDefinitions) -> RuntimeM
         shader_programs,
         vertex_decls,
         sorted_materials,
-        iw5_remap: crate::iw5_tech_map::leftover_selector_census(
-            source
+        native_diagnostics: {
+            let families: std::collections::BTreeSet<_> = source
                 .materials
                 .iter()
-                .filter_map(|material| material.iw5_state_bits_entry.as_ref()),
-        ),
-        t5_remap: crate::t5_tech_map::leftover_t5_selector_census(
-            source
-                .materials
-                .iter()
-                .filter_map(|material| material.t5_state_bits_entry.as_ref()),
-        ),
-        iw5_fallback_n: source
-            .technique_set_facts()
-            .iter()
-            .filter(|facts| facts.iw5_fallback_table.is_some())
-            .count() as u32,
-        t5_fallback_n: source
-            .technique_set_facts()
-            .iter()
-            .filter(|facts| facts.t5_fallback_table.is_some())
-            .count() as u32,
+                .map(|material| material.namespace)
+                .chain(
+                    source
+                        .technique_set_facts()
+                        .iter()
+                        .map(|facts| facts.namespace),
+                )
+                .chain(source.argument_gaps.keys().copied())
+                .collect();
+            families
+                .into_iter()
+                .map(|family| {
+                    let entries: Vec<_> = source
+                        .materials
+                        .iter()
+                        .filter(|material| material.namespace == family)
+                        .filter_map(|material| material.native_state_bits_entry.as_deref())
+                        .collect();
+                    (
+                        family,
+                        render_material::NativeMaterialDiagnostics {
+                            selector_census: compiler::compiler_for(family)
+                                .and_then(|compiler| compiler.selector_census(&entries)),
+                            fallback_count: source
+                                .technique_set_facts()
+                                .iter()
+                                .filter(|facts| {
+                                    facts.namespace == family && facts.fallback_table.is_some()
+                                })
+                                .count() as u32,
+                            argument_gaps: source
+                                .argument_gaps
+                                .get(&family)
+                                .cloned()
+                                .unwrap_or_else(BTreeMap::new),
+                        },
+                    )
+                })
+                .collect()
+        },
         sorted_first_skip,
         skip_tech,
         skip_cause,
-        leftover_iw5_arg_n: source.leftover_iw5_arg_n,
-        leftover_iw5_arg: source.leftover_iw5_arg_top(),
-        leftover_iw5_arg2: source.leftover_iw5_arg_ranked(1),
-        leftover_t5_arg_n: source.leftover_t5_arg_n,
-        leftover_t5_arg: source.leftover_t5_arg_top(),
-        leftover_t5_arg2: source.leftover_t5_arg_ranked(1),
-        leftover_t5_arg3: source.leftover_t5_arg_ranked(2),
-        leftover_t5_arg4: source.leftover_t5_arg_ranked(3),
-        leftover_t5_arg5: source.leftover_t5_arg_ranked(4),
-        leftover_t5_dest6: source.leftover_t5_arg_dest(6),
-        leftover_t5_dest7: source.leftover_t5_arg_dest(7),
-        leftover_t5_dest17: source.leftover_t5_arg_dest(17),
-        leftover_t5_dest18: source.leftover_t5_arg_dest(18),
-        leftover_t5_dest19: source.leftover_t5_arg_dest(19),
-        leftover_t5_dest9: source.leftover_t5_arg_dest(9),
-        leftover_t5_dest10: source.leftover_t5_arg_dest(10),
-        leftover_t5_dest11: source.leftover_t5_arg_dest(11),
-        leftover_t5_dest20: source.leftover_t5_arg_dest(20),
-        leftover_t5_dest24: source.leftover_t5_arg_dest(24),
-        leftover_t5_dest25: source.leftover_t5_arg_dest(25),
-        leftover_t5_dest26: source.leftover_t5_arg_dest(26),
-        leftover_t5_dest27: source.leftover_t5_arg_dest(27),
         leftover_unknown_n: remaining_unknown_arg_n(source),
     }
-    .publish()
+    .publish())
 }
 
 fn remaining_unknown_arg_n(source: &crate::MaterialDefinitions) -> u32 {
     let mut n = 0u32;
     for facts in source.technique_set_facts() {
-        for table in facts
-            .table
-            .iter()
-            .chain(facts.iw5_fallback_table.iter())
-            .chain(facts.t5_fallback_table.iter())
-        {
+        for table in facts.table.iter().chain(facts.fallback_table.iter()) {
             let Some(graph) = &table.graph else {
                 continue;
             };

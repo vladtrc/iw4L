@@ -1,8 +1,6 @@
 use super::*;
 
-pub(super) fn native_curve(
-    row: &CapturedAlias,
-) -> Result<SpatialPlaybackPolicy, SpatialPolicyFailure> {
+pub fn native_curve(row: &CapturedAlias) -> Result<SpatialPlaybackPolicy, SpatialPolicyFailure> {
     let curve = row
         .volume_falloff
         .as_ref()
@@ -34,7 +32,7 @@ pub(super) fn native_curve(
     })
 }
 
-pub(super) fn iw_speaker_gains(row: &CapturedAlias) -> Option<[[f32; 2]; 2]> {
+pub fn iw_speaker_gains(row: &CapturedAlias) -> Option<[[f32; 2]; 2]> {
     row.stereo_speaker_gains.filter(|gains| {
         gains
             .iter()

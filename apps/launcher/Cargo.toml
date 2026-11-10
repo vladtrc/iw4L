@@ -1,0 +1,28 @@
+[package]
+name = "launcher"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "The binary. Process entry only: allocator, argv, env, log init; assembly lives in bootstrap."
+
+[[bin]]
+name = "iw4l"
+path = "src/main.rs"
+
+[features]
+default = ["all-games"]
+all-games = ["t5", "t6", "iw5"]
+t5 = ["bootstrap/t5"]
+t6 = ["bootstrap/t6"]
+iw5 = ["bootstrap/iw5"]
+bevy-debug = ["bootstrap/bevy-debug"]
+bevy-trace = ["bootstrap/bevy-trace"]
+
+[dependencies]
+updater.workspace = true
+diag.workspace = true
+asset_transport.workspace = true
+bootstrap = { workspace = true, default-features = false }
+
+[lints]
+workspace = true

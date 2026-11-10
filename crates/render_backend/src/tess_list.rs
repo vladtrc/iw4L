@@ -216,8 +216,8 @@ pub const XMODEL_TESS_SAMPLER_IMAGE7_SHIFT: u32 = 26;
 pub fn xmodel_tess_sampler_packed_word(sampler_flags: u8, lut_low5: u32, image_byte7: u8) -> u32 {
     let f = u32::from(sampler_flags);
     let mut packed = (f & 0x80) | 0x54;
-    packed = packed * 2 | (f & 0x40);
-    packed = packed * 2 | (f & 0x20);
+    packed = (packed * 2) | (f & 0x40);
+    packed = (packed * 2) | (f & 0x20);
     (packed << 16) | lut_low5 | (u32::from(image_byte7) << XMODEL_TESS_SAMPLER_IMAGE7_SHIFT)
 }
 

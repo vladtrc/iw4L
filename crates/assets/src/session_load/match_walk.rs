@@ -2,28 +2,54 @@ use super::*;
 
 static NEXT_PRODUCTS_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-pub(super) async fn walk_prepared_match(
+pub async fn load_prepared_match(
     zone_ff: Result<PathBuf, String>,
     common_mp: Result<PathBuf, String>,
     progress: LoadProgress,
     families: frame::AssetFamilies,
-) -> (MatchLoadOutcome, Option<Arc<CommonSet>>) {
-    let mut image_trees = games_root_from_env()
-        .map(|root| asset_transport::NamespaceTrees::discover(&root))
-        .unwrap_or_default();
-    if let Ok(path) = &common_mp {
-        image_trees.adopt_zone(path);
-    }
+) -> MatchLoadOutcome {
+    load_prepared_match_with_atlas(zone_ff, common_mp, progress, families, Default::default()).await
+}
+
+/// The match load, with the other worlds of a merged map (`atlas_worlds`)
+/// drawn alongside the match's, each at its slab.
+pub async fn load_prepared_match_with_atlas(
+    zone_ff: Result<PathBuf, String>,
+    common_mp: Result<PathBuf, String>,
+    progress: LoadProgress,
+    families: frame::AssetFamilies,
+    atlas: atlas_worlds::AtlasLoad,
+) -> MatchLoadOutcome {
     if let Ok(path) = &zone_ff {
-        image_trees.adopt_zone(path);
+        let family = asset_transport::zone_game_for_path(path);
+        if family.is_none_or(|family| !families.enabled(family.as_str())) {
+            return MatchLoadOutcome::Refused(format!(
+                "Map family is disabled or unavailable: {}",
+                path.display()
+            ));
+        }
     }
-    image_trees.retain(|ns| families.enabled(ns.as_str()));
+    let mut image_trees = games_root()
+        .map(|root| asset_transport::NamespaceTrees::discover(&root))
+        .unwrap_or_else(|_| asset_transport::NamespaceTrees::default());
+    let atlas_worlds::AtlasLoad {
+        space: atlas_space,
+        regions: atlas_regions,
+        zones: atlas_zones,
+        doors: atlas_doors,
+        replacements: atlas_replacements,
+        trims: atlas_trims,
+        refusal: atlas_refusal,
+    } = atlas;
+    if let Some(error) = atlas_refusal {
+        return MatchLoadOutcome::Refused(error);
+    }
     let zone_name = zone_ff
         .as_ref()
         .ok()
         .and_then(|path| path.file_stem())
         .map(|stem| stem.to_string_lossy().into_owned())
-        .unwrap_or_default();
+        .unwrap_or(String::new());
 
     let pool = load_pool();
     let map_open = {
@@ -47,12 +73,58 @@ pub(super) async fn walk_prepared_match(
         })
     };
 
+    let opened_map = map_open.await;
+    if progress.is_canceled() {
+        drop(opened_map);
+        diag::info!(
+            World,
+            "match walk: canceled before the map walk — load retargeted"
+        );
+        return MatchLoadOutcome::Canceled;
+    }
+    let profile = match &opened_map {
+        Ok((_, image)) => match image.runtime_profile() {
+            Ok(profile) => profile,
+            Err(error) => return MatchLoadOutcome::Refused(error),
+        },
+        Err(error) => return MatchLoadOutcome::Refused(error.clone()),
+    };
+    let common_mp = if profile == asset_core::RuntimeProfile::Campaign {
+        let path = &opened_map.as_ref().unwrap().0;
+        find_zone_for_tree(path, profile.common_zone()).map(|found| found.path)
+    } else {
+        common_mp
+    };
+    let runtime_common = match &common_mp {
+        Ok(path) => path,
+        Err(error) => return MatchLoadOutcome::Refused(error.clone()),
+    };
+    image_trees.adopt_zone(runtime_common);
+    if let Ok(path) = &zone_ff {
+        image_trees.adopt_zone(path);
+    }
+    for (_, _, path) in &atlas_zones {
+        image_trees.adopt_zone(path);
+    }
+    image_trees.retain(|ns| families.enabled(ns.as_str()));
+    diag::info!(
+        World,
+        "runtime profile: {} common={}",
+        profile.token(),
+        runtime_common.display()
+    );
+    if profile == asset_core::RuntimeProfile::Campaign && !atlas_zones.is_empty() {
+        return MatchLoadOutcome::Refused(
+            "Campaign worlds cannot be composed as multiplayer atlas regions".into(),
+        );
+    }
     let mut donor_report = Vec::new();
     let key = CommonKey::for_match(
         zone_ff.as_ref().ok().map(PathBuf::as_path),
         common_mp.as_ref().ok().map(PathBuf::as_path),
         &mut donor_report,
         families,
+        profile,
     );
     let waiting = progress.begin_scoped(StageId::CommonAssets, "shared common", None);
     let (common, reach) = ensure_common(key).await;
@@ -62,17 +134,17 @@ pub(super) async fn walk_prepared_match(
             World,
             "match walk: canceled while the common set was prepared — load retargeted"
         );
-        return (MatchLoadOutcome::Canceled, None);
+        return MatchLoadOutcome::Canceled;
     }
 
     common.start_donor_images();
 
     let cloning = std::time::Instant::now();
     let CommonProducts {
+        campaign_hud,
         scripts: mut iw4_scripts,
-        mut t5_scene_models,
         material_seed,
-        shared_surfaces,
+        mut map_payloads,
         scene_models: mut common_scene_models,
         light_defs: common_light_defs,
         pen_table: common_pen_table,
@@ -88,27 +160,20 @@ pub(super) async fn walk_prepared_match(
         mut world_weapons,
         mut projectile_meshes,
         mut xanims,
-        mut player_anim_sources,
         fx: common_fx,
         fx_models: common_fx_models,
         impact_fx: common_impact,
-        t5_xanims,
-        t5_player_anim_sources,
-        iw5_player_anim_sources,
-        t6_player_anim_sources,
-        t5_fx,
-        t5_impact_fx,
-        t6_impact_fx,
-        iw5_materials,
-        mut iw5_scene_models,
-        iw5_shared_surfaces,
-        strings,
+        seed_xanims,
+        seed_fx,
+        seed_impact_fx,
+        material_donors,
+        mut strings,
         counts:
             CommonCounts {
                 startup_count,
-                t5_mat_count,
-                t5_reuse_mat,
-                t5_xanim_n,
+                seed_mat_count,
+                seed_reuse_mat,
+                seed_xanim_n,
                 foreign_count,
                 seed_mat,
                 seed_img,
@@ -119,7 +184,10 @@ pub(super) async fn walk_prepared_match(
         localize_report,
     } = common.products.clone();
     let clone_ms = cloning.elapsed().as_secs_f32() * 1000.0;
-    let iw5_mat_n = iw5_materials.materials.len();
+    let material_donor_n: usize = material_donors
+        .iter()
+        .map(|donor| donor.materials.materials.len())
+        .sum();
     common_report.append(&mut donor_report);
     common_report.push(format!(
         "common set: {reach} for {} (prepared in {:.0}ms, {:.1}s ago); match copy {clone_ms:.0}ms; {} donor image batches and {} kept payloads ({:.1}MiB) shared, not decoded again",
@@ -136,24 +204,34 @@ pub(super) async fn walk_prepared_match(
         load_jobs::open(JobKind::ImageDecode).namespace("iw4"),
     );
 
-    let opened_map = map_open.await;
-    if progress.is_canceled() {
-        drop(opened_map);
-        diag::info!(
-            World,
-            "match walk: canceled before the map walk — load retargeted"
-        );
-        return (MatchLoadOutcome::Canceled, None);
-    }
+    let atlas_walks;
+    let mut atlas_report = Vec::new();
     let (loaded, map_namespace) = match opened_map {
         Ok((path, image)) => {
             let game = image.game;
-            let shared_surfaces = match game {
-                asset_core::ZoneGame::Iw5 => iw5_shared_surfaces,
-                _ => shared_surfaces,
+            let Some(selected) = lane(game) else {
+                return MatchLoadOutcome::Refused(format!(
+                    "zone lane not installed: {}",
+                    game.as_str()
+                ));
             };
+            let shared_surfaces = map_payloads.take_surfaces(game);
+            atlas_walks = match atlas_worlds::walk_atlas_worlds(
+                atlas_zones,
+                &atlas_regions,
+                &material_seed,
+                &common_film_visions,
+                &progress,
+            ) {
+                Ok(walks) => walks,
+                Err(_) if progress.is_canceled() => return MatchLoadOutcome::Canceled,
+                Err(error) => return MatchLoadOutcome::Refused(error),
+            };
+            if progress.is_canceled() {
+                return MatchLoadOutcome::Canceled;
+            }
             (
-                lane(game).load_world(
+                selected.load_world(
                     &path,
                     &image,
                     &progress,
@@ -161,21 +239,25 @@ pub(super) async fn walk_prepared_match(
                     material_seed,
                     &common_film_visions,
                 ),
-                Some(asset_core::AssetNamespace::from_zone_game(game)),
+                Some(game),
             )
         }
         Err(gap) => {
-            return (MatchLoadOutcome::Refused(gap), Some(common));
+            return MatchLoadOutcome::Refused(gap);
         }
     };
 
     let Some(map_family) = map_namespace else {
-        return (
-            MatchLoadOutcome::Refused("map family missing".into()),
-            Some(common),
-        );
+        return MatchLoadOutcome::Refused("map family missing".into());
+    };
+    let Some(map_script_policy) = crate::map_script_family(map_family) else {
+        return MatchLoadOutcome::Refused(format!(
+            "map script policy not installed: {}",
+            map_family.as_str()
+        ));
     };
     let LoadedWorld {
+        weapon_assets,
         scripts: map_scripts,
         mut world,
         mut materials,
@@ -191,26 +273,19 @@ pub(super) async fn walk_prepared_match(
         gaps,
     } = loaded;
     world.source_namespace = map_namespace;
-    if player_anim_sources.family() != Some(map_family) {
-        player_anim_sources = match map_family {
-            asset_core::FamilyId::Iw5 => iw5_player_anim_sources,
-            asset_core::FamilyId::T5 => t5_player_anim_sources,
-            asset_core::FamilyId::T6 => t6_player_anim_sources,
-            _ => asset_anim::PlayerAnimSources::default(),
-        };
-        player_anim_sources.compile();
-        report.push(player_anim_sources.compile_report_line());
-        report.push(player_anim_sources.parse_report_line());
-    }
+    let mut player_anim_sources = map_payloads.take_animations(map_family);
+    player_anim_sources.compile();
+    report.push(player_anim_sources.compile_report_line());
+    report.push(player_anim_sources.parse_report_line());
     report.append(&mut common_report);
     report.extend(image_trees.report_lines());
 
-    if facts.team_settings.allies.is_none() && facts.team_settings.axis.is_none() {
-        if let Some(name) = facts.t5_teamset.as_ref() {
-            if let Some(icons) = teamsets.get(name) {
-                facts.team_settings = icons.clone();
-            }
-        }
+    if facts.team_settings.allies.is_none()
+        && facts.team_settings.axis.is_none()
+        && let Some(name) = facts.t5_teamset.as_ref()
+        && let Some(icons) = teamsets.get(name)
+    {
+        facts.team_settings = icons.clone();
     }
     if facts.t5_teamset.is_some() {
         facts.script_sound.attackers = facts
@@ -222,35 +297,14 @@ pub(super) async fn walk_prepared_match(
             .defenders
             .or_else(|| facts.team_settings.defenders.clone());
     }
-    if map_namespace == Some(asset_core::AssetNamespace::T5) {
-        facts.objective_visuals = asset_game::ObjectiveVisuals::t5(
-            facts.team_settings.allies_charset.as_deref(),
-            facts.team_settings.axis_charset.as_deref(),
-        );
+    if let Some(make) = asset_game::team_family(map_family).and_then(|family| family.objectives) {
+        facts.objective_visuals = make(&facts.team_settings);
     }
-    if map_family == asset_core::FamilyId::T6 {
-        facts.objective_visuals = asset_game::ObjectiveVisuals::t6(
-            facts.team_settings.allies_charset.as_deref(),
-            facts.team_settings.axis_charset.as_deref(),
-        );
-        let mut native_objectives = asset_world::MapXModelSceneCatalog::default();
-        for name in facts.objective_visuals.model_names() {
-            if !matches!(
-                world.map_xmodel_scene_assets.get_name(name),
-                Some(asset_world::MapXModelSceneAsset::T6(_))
-            ) && let Some(index) = world_weapons.index_by_name(map_family, name)
-                && let Some(model) = world_weapons.get_at(index)
-            {
-                native_objectives.set_capture_zone(world_weapons.zone_of(index));
-                native_objectives.insert(
-                    asset_world::MapXModelAssetKey(name.to_owned()),
-                    asset_world::MapXModelSceneAsset::T6(model.skel.clone()),
-                );
-            }
-        }
-        world
-            .map_xmodel_scene_assets
-            .absorb_captured(native_objectives);
+    if let Some(complete) =
+        asset_world::world_family(map_family).and_then(|policy| policy.complete_objective_models)
+    {
+        let names: Vec<_> = facts.objective_visuals.model_names().collect();
+        complete(&mut world.map_xmodel_scene_assets, &names, &world_weapons);
     }
     match (
         facts.t5_teamset.as_deref(),
@@ -268,37 +322,24 @@ pub(super) async fn walk_prepared_match(
         _ => {}
     }
 
-    if matches!(
-        map_namespace,
-        Some(
-            asset_core::AssetNamespace::T5
-                | asset_core::AssetNamespace::Iw5
-                | asset_core::AssetNamespace::T6
-        )
-    ) && !foreign_faction_rows(&mut iw4_scripts, &facts.team_settings)
+    if map_script_policy.project_factions
+        && !foreign_faction_rows(&mut iw4_scripts, &facts.team_settings)
     {
-        report.push(format!(
-            "team rows gap: {FACTION_TABLE} lacks {IW4_ALLIES_CHARSET}/{IW4_AXIS_CHARSET}; IW4 scripts show IW4 teams"
-        ));
+        report.push(format!("team rows gap: {FACTION_TABLE} lacks {IW4_ALLIES_CHARSET}/{IW4_AXIS_CHARSET}; IW4 scripts show IW4 teams"));
     }
-    let map_scripts = match map_namespace {
-        Some(asset_core::AssetNamespace::T5 | asset_core::AssetNamespace::T6) => {
-            let scripts =
-                treyarch_map_under_iw4_rules(&map_scripts, &zone_name, &facts, map_family);
-            report.push(format!(
-                "map script: maps/mp/{zone_name} written from the {map_family:?} map's declarations; native gametype scripts left out"
-            ));
-            scripts
-        }
-        _ => map_scripts,
+    let map_scripts = if let Some(compile) = map_script_policy.compile {
+        let scripts = compile(&map_scripts, &zone_name, &facts);
+        report.push(format!("map script: maps/mp/{zone_name} written from the {map_family:?} map's declarations; native gametype scripts left out"));
+        scripts
+    } else {
+        map_scripts
     };
     let mut scripts = iw4_scripts;
     scripts.overlay(map_scripts);
     scripts.insert_source("iw4l_maps/barrels", crate::map_scripts::BARRELS.to_owned());
-    scripts.insert_source(
-        "iw4l_t6/equipment",
-        crate::map_scripts::T6_EQUIPMENT.to_owned(),
-    );
+    for (module, source) in crate::map_script_builtin_sources() {
+        scripts.insert_source(module, source.to_owned());
+    }
     report.push(format!(
         "GSC source assets: {} (map overrides common_mp)",
         scripts.len()
@@ -318,9 +359,31 @@ pub(super) async fn walk_prepared_match(
         asset_transport::process_resident_bytes().unwrap_or(0),
     ));
 
+    if profile == asset_core::RuntimeProfile::Campaign {
+        let before = weapons.len();
+        weapons.overlay_authored(weapon_assets.weapons);
+        let world_added = world_weapons.absorb(weapon_assets.world_models);
+        projectile_meshes.absorb(weapon_assets.projectiles);
+        common_tracers.absorb_definitions(weapon_assets.tracers);
+        report.push(format!("campaign weapon publication: common={before} merged={} map_world_models_added={world_added}", weapons.len()));
+        let clips: Vec<_> = weapons
+            .native_script_aliases()
+            .filter_map(|(name, id)| {
+                weapons
+                    .clip_model_of(id)
+                    .map(|model| format!("{name}={model}"))
+            })
+            .collect();
+        report.push(format!(
+            "campaign weapon clip models: {} ({})",
+            clips.len(),
+            clips.join(", ")
+        ));
+    }
+
     let common_xanim_count = xanims.len();
     let map_xanim_count = map_xanims.len();
-    let t5_xanim_added = xanims.absorb(t5_xanims);
+    let seed_xanim_added = xanims.absorb(seed_xanims);
     xanims.absorb_local(map_xanims);
     weapons.resolve_sz_xanim_edges(&xanims);
     let weapon_clip_indices = weapons.bound_weapon_xanim_indices();
@@ -343,9 +406,9 @@ pub(super) async fn walk_prepared_match(
             xanims.name_at(*index).unwrap_or("<unknown>")
         ));
     }
-    let t6_alt_raises = weapons.time_t6_alternate_raises(&xanims);
+    let alternate_raises = weapons.complete_alternate_raise_times(&xanims);
     report.push(format!(
-        "T6 alternate raises timed by their clips: {t6_alt_raises}"
+        "alternate raises timed by clips: {alternate_raises}"
     ));
     let (note_actions, inline_note_actions) = weapons.resolve_notetrack_actions(&xanims);
     report.push(format!(
@@ -353,7 +416,7 @@ pub(super) async fn walk_prepared_match(
     ));
     let sz_xanims = weapons.sz_xanim_edge_census();
     report.push(format!(
-        "XAnim generation: common={common_xanim_count} t5={t5_xanim_n} t5_keys={t5_xanim_added} collide={} map={map_xanim_count} merged={}",
+        "XAnim generation: common={common_xanim_count} seeded={seed_xanim_n} seeded_keys={seed_xanim_added} collide={} map={map_xanim_count} merged={}",
         xanims.collide_name_count(),
         xanims.len()
     ));
@@ -392,23 +455,23 @@ pub(super) async fn walk_prepared_match(
     ));
 
     let before_unrouted = materials.unrouted_material_count();
-    let promoted = materials.promote_iw5_fallback_tables();
-    let t5_alias_map = materials.absorb_t5_feature_token_donors();
+    let promoted = materials.promote_fallback_tables();
+    let feature_aliases_map = materials.absorb_feature_variant_donors();
     let stub_routed = materials.reroute_stub_materials();
     let after_unrouted = materials.unrouted_material_count();
     let takes_ml = materials
         .materials
         .iter()
-        .filter(|m| materials.takes_model_lighting(m) == Some(true))
+        .filter(|m| m.takes_model_lighting() == Some(true))
         .count();
-    let t5_fb = materials
+    let feature_fallbacks = materials
         .technique_set_facts()
         .iter()
-        .filter(|facts| facts.t5_fallback_table.is_some())
+        .filter(|facts| facts.fallback_table.is_some())
         .count();
     report.push(format!(
-        "material route: iw5_promoted={promoted} \
-             t5_tech_alias={t5_alias_map} t5_fallback={t5_fb} stub_routed={stub_routed} \
+        "material route: fallback_tables_promoted={promoted} \
+             feature_variant_aliases={feature_aliases_map} feature_variant_fallbacks={feature_fallbacks} stub_routed={stub_routed} \
              unrouted {before_unrouted}→{after_unrouted}; takes_model_lighting={takes_ml}"
     ));
 
@@ -422,35 +485,51 @@ pub(super) async fn walk_prepared_match(
     let map_new = pool_mat.saturating_sub(seed_mat);
 
     let mut global = materials;
-    let iw5_linked = global.absorb_asset_population_host_materials_win(iw5_materials);
-    let provisional_map_ids: Vec<usize> = (0..global.materials.len()).collect();
-    if iw5_mat_n > 0 {
-        iw5_scene_models.remap_walk_materials(&iw5_linked);
+    let mut material_donor_linked = 0;
+    for CommonMaterialDonor {
+        family,
+        materials,
+        mut scene,
+    } in material_donors
+    {
+        let linked = global.absorb_asset_population_host_materials_win(materials);
+        material_donor_linked += linked.len();
+        scene.remap_walk_materials(&linked);
+        report.push(format!(
+            "{} deferred common materials: linked={}",
+            family.as_str(),
+            linked.len()
+        ));
+        let before_runtime = common_scene_models.len().saturating_sub(1);
+        common_scene_models.insert(before_runtime, scene);
     }
+    let atlas_worlds = match atlas_worlds::absorb_atlas_worlds(
+        &mut world,
+        &mut global,
+        atlas_walks,
+        atlas_worlds::AtlasGeometry {
+            space: atlas_space,
+            doors: atlas_doors,
+            replacements: atlas_replacements,
+            trims: atlas_trims,
+        },
+        &mut atlas_report,
+    ) {
+        Ok(worlds) => worlds,
+        Err(error) => return MatchLoadOutcome::Refused(error),
+    };
+    report.extend(atlas_report);
+    let provisional_map_ids: Vec<usize> = (0..global.materials.len()).collect();
     let mut scene_names = scripts.asset_names();
     scene_names.extend(facts.objective_visuals.model_names().map(str::to_owned));
-    common_scene_models.retain_names(&scene_names);
-    t5_scene_models.retain_names(&scene_names);
-    iw5_scene_models.retain_names(&scene_names);
-    match map_namespace {
-        Some(asset_core::AssetNamespace::T5) => world
-            .map_xmodel_scene_assets
-            .absorb_captured(t5_scene_models),
-        Some(asset_core::AssetNamespace::Iw5) => world
-            .map_xmodel_scene_assets
-            .absorb_captured(iw5_scene_models),
-        _ => {}
+    for mut scene in common_scene_models {
+        scene.retain_family(map_family);
+        scene.retain_names(&scene_names);
+        world.map_xmodel_scene_assets.absorb_captured(scene);
     }
-    world
-        .map_xmodel_scene_assets
-        .absorb_captured(common_scene_models);
-    report.push(format!(
-        "iw5 leftover materials: donor={iw5_mat_n} linked={} pool={}",
-        iw5_linked.len(),
-        global.materials.len(),
-    ));
-    let promoted = global.promote_iw5_fallback_tables();
-    let t5_alias = global.absorb_t5_feature_token_donors();
+    report.push(format!("deferred common materials: donor={material_donor_n} linked={material_donor_linked} pool={}", global.materials.len()));
+    let promoted = global.promote_fallback_tables();
+    let feature_aliases = global.absorb_feature_variant_donors();
     global.reroute_stub_materials();
     let mat_refs = global.material_ref_census();
     let img_refs = global.image_ref_census();
@@ -468,13 +547,13 @@ pub(super) async fn walk_prepared_match(
         .into_iter()
         .map(|id| finalized_ids.get(id).copied().flatten())
         .collect::<Vec<_>>();
-    let t5_fb = global
+    let feature_fallbacks = global
         .technique_set_facts()
         .iter()
-        .filter(|facts| facts.t5_fallback_table.is_some())
+        .filter(|facts| facts.fallback_table.is_some())
         .count();
     report.push(format!(
-            "material generation: startup={startup_count} t5={t5_mat_count} t5_reuse={t5_reuse_mat} foreign={foreign_count} common_pool={seed_mat} map_new={map_new} pooled={pool_mat} global={} common_reuse={common_reuse_mat} map_reuse={map_reuse_mat} unresolved_aliases={} iw5_promoted={promoted} t5_tech_alias={t5_alias} t5_fallback={t5_fb}",
+            "material generation: startup={startup_count} seed={seed_mat_count} seed_reuse={seed_reuse_mat} foreign={foreign_count} common_pool={seed_mat} map_new={map_new} pooled={pool_mat} global={} common_reuse={common_reuse_mat} map_reuse={map_reuse_mat} unresolved_aliases={} fallback_tables_promoted={promoted} feature_variant_aliases={feature_aliases} feature_variant_fallbacks={feature_fallbacks}",
             global.materials.len(),
             finalized_ids.iter().filter(|id| id.is_none()).count(),
         ));
@@ -630,11 +709,11 @@ pub(super) async fn walk_prepared_match(
     let common_fx_model_n = common_fx_models.len();
     let map_fx_model_n = world.fx_models.len();
     let common_fx_model_added = world.fx_models.absorb(common_fx_models);
-    let leftover_t5_fx_n = t5_fx.len();
-    let leftover_t5_fx_gaps = t5_fx.capture_gaps;
-    world.fx.absorb_missing(t5_fx);
+    let leftover_seed_fx_n = seed_fx.len();
+    let leftover_seed_fx_gaps = seed_fx.capture_gaps;
+    world.fx.absorb_missing(seed_fx);
     report.push(format!(
-        "leftover t5 fx absorb_missing: donor={leftover_t5_fx_n} gaps={leftover_t5_fx_gaps} host now {}",
+        "seeded common fx absorb_missing: donor={leftover_seed_fx_n} gaps={leftover_seed_fx_gaps} host now {}",
         world.fx.len()
     ));
     let fx_model_walked_n = world.fx_models.len();
@@ -659,11 +738,13 @@ pub(super) async fn walk_prepared_match(
         "weapon projectile FX after absorb: bound={} unresolved={} absent={}",
         projectile_fx.bound, projectile_fx.unresolved, projectile_fx.absent,
     ));
-    link_materials_after_absorb(
-        &global,
-        &mut world,
-        &mut weapons,
-        &mut common_tracers,
+    MatchMaterialLinker {
+        materials: &global,
+        world: &mut world,
+        weapons: &mut weapons,
+        tracers: &mut common_tracers,
+    }
+    .resolve(
         &mut bodies,
         &mut world_weapons,
         &mut fpv_meshes,
@@ -681,9 +762,22 @@ pub(super) async fn walk_prepared_match(
         &player_anim_sources,
         &xanims,
     );
-    weapons.resolve_fpv_soldiers(&fpv_meshes, &soldiers);
     let assembly_started = std::time::Instant::now();
-    let assemblies = weapons.resolve_fpv_assemblies(&fpv_meshes, &xanims);
+    let assemblies = if profile == asset_core::RuntimeProfile::Campaign {
+        let census =
+            weapons.resolve_script_viewmodels(&fpv_meshes, &xanims, &scripts.script_viewmodels());
+        report.push(format!(
+            "campaign viewmodels prepared: {}",
+            weapons
+                .script_viewmodel_names()
+                .collect::<Vec<_>>()
+                .join(" ")
+        ));
+        census
+    } else {
+        weapons.resolve_fpv_soldiers(&fpv_meshes, &soldiers);
+        weapons.resolve_fpv_assemblies(&fpv_meshes, &xanims)
+    };
     report.push(format!(
         "FPV assemblies: built={} kit sides linked={} refused={} clip track tables={} elapsed_ms={:.1}",
         assemblies.built,
@@ -721,7 +815,7 @@ pub(super) async fn walk_prepared_match(
             .into(),
     );
     decode_fx_colour_maps(&world.fx, &mut global, &image_trees, &progress, &mut report);
-    world.family_impact_fx = [t5_impact_fx, t6_impact_fx].into_iter().flatten().collect();
+    world.family_impact_fx = seed_impact_fx;
     if world.impact_fx.is_none() {
         world.impact_fx = world
             .family_impact_fx
@@ -817,7 +911,17 @@ pub(super) async fn walk_prepared_match(
             row.husk.edge_kind()
         ));
     }
-    let prepared = PreparedMatch {
+    if profile == asset_core::RuntimeProfile::Campaign
+        && let Ok(path) = &zone_ff
+    {
+        match load_localize_catalog_in_lane(path) {
+            Ok(localize) => strings.absorb_in_namespace(asset_core::FamilyId::IW4, localize),
+            Err(error) => report.push(format!("campaign map localization: {error}")),
+        }
+    }
+    let mut prepared = PreparedMatch {
+        campaign_hud,
+        profile,
         ui_images: common.ui_images.clone(),
         scripts,
         fx,
@@ -829,6 +933,7 @@ pub(super) async fn walk_prepared_match(
             products_id: NEXT_PRODUCTS_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         },
         clip: clip.map(Arc::new),
+        atlas_worlds,
         weapons: Arc::new(weapons.publish()),
         fpv_meshes,
         bodies,
@@ -850,21 +955,22 @@ pub(super) async fn walk_prepared_match(
         sound_gaps: 0,
         script_sound_aliases: None,
     };
-    (MatchLoadOutcome::Ready(prepared), Some(common))
+    prepared.report.extend(progress.timing_report());
+    MatchLoadOutcome::Ready(Box::new(prepared))
 }
 
 fn resolve_world_lights(
     draw: &mut WorldDraw,
     global: &mut asset_material::MaterialDefinitions,
     common_light_defs: &[asset_world::CapturedLightDef],
-    map_namespace: Option<asset_core::AssetNamespace>,
+    map_namespace: Option<asset_core::FamilyId>,
     image_trees: &asset_transport::NamespaceTrees,
     progress: &LoadProgress,
     report: &mut Vec<String>,
 ) -> Option<asset_world::ResolvedLightDef> {
     asset_world::resolve_primary_light_attenuation(draw, global, common_light_defs);
     let dynamic_light_name =
-        (map_namespace == Some(asset_core::AssetNamespace::Iw4)).then_some("light_dynamic");
+        (map_namespace == Some(asset_core::FamilyId::IW4)).then_some("light_dynamic");
     let dynamic_light = dynamic_light_name.and_then(|name| {
         asset_world::resolve_named_light_def(name, &draw.light_defs, common_light_defs, global)
     });
@@ -985,35 +1091,46 @@ fn resolve_world_lights(
     dynamic_light
 }
 
-#[allow(clippy::too_many_arguments)]
-fn link_materials_after_absorb(
-    materials: &asset_material::MaterialDefinitions,
-    world: &mut PreparedWorld,
-    weapons: &mut WeaponBuild,
-    tracers: &mut asset_game::TracerCatalog,
-    bodies: &mut asset_model::BodyMeshBuild,
-    world_weapons: &mut WorldWeaponBuild,
-    fpv_meshes: &mut FpvMeshBuild,
-    projectile_meshes: &mut ProjectileMeshBuild,
-    report: &mut Vec<String>,
-) {
-    let fx_model_materials = world.fx_models.resolve_materials(materials);
-    report.push(format!(
-        "FX model materialHandles after absorb: bound={} unresolved={} absent={}",
-        fx_model_materials.bound, fx_model_materials.unresolved, fx_model_materials.absent,
-    ));
-    weapons.resolve_hud_material_edges(materials);
-    if let Some(glass) = world.fx_glass.as_mut() {
-        glass.resolve_material_edges(materials);
-        let census = glass.material_edge_census();
+struct MatchMaterialLinker<'a> {
+    materials: &'a asset_material::MaterialDefinitions,
+    world: &'a mut PreparedWorld,
+    weapons: &'a mut WeaponBuild,
+    tracers: &'a mut asset_game::TracerCatalog,
+}
+
+impl MatchMaterialLinker<'_> {
+    fn resolve(
+        self,
+        bodies: &mut asset_model::BodyMeshBuild,
+        world_weapons: &mut WorldWeaponBuild,
+        fpv_meshes: &mut FpvMeshBuild,
+        projectile_meshes: &mut ProjectileMeshBuild,
+        report: &mut Vec<String>,
+    ) {
+        let Self {
+            materials,
+            world,
+            weapons,
+            tracers,
+        } = self;
+
+        let fx_model_materials = world.fx_models.resolve_materials(materials);
         report.push(format!(
-            "glass Material* after absorb: bound={} unresolved={} absent={}",
-            census.bound, census.unresolved, census.absent
+            "FX model materialHandles after absorb: bound={} unresolved={} absent={}",
+            fx_model_materials.bound, fx_model_materials.unresolved, fx_model_materials.absent,
         ));
-    }
-    let hud_materials = weapons.hud_material_edge_census();
-    let technique_sets = materials.technique_set_edge_census();
-    report.push(format!(
+        weapons.resolve_hud_material_edges(materials);
+        if let Some(glass) = world.fx_glass.as_mut() {
+            glass.resolve_material_edges(materials);
+            let census = glass.material_edge_census();
+            report.push(format!(
+                "glass Material* after absorb: bound={} unresolved={} absent={}",
+                census.bound, census.unresolved, census.absent
+            ));
+        }
+        let hud_materials = weapons.hud_material_edge_census();
+        let technique_sets = materials.technique_set_edge_census();
+        report.push(format!(
         "material pointer graph after finalize: weapon_hud bound={} unresolved={} absent={}; technique_set bound={} unresolved={} absent={}",
         hud_materials.bound,
         hud_materials.unresolved,
@@ -1022,18 +1139,20 @@ fn link_materials_after_absorb(
         technique_sets.unresolved,
         technique_sets.absent,
     ));
-    let graph = crate::resolve_after_absorb(
-        materials,
-        tracers,
-        &mut world.fx,
-        None,
-        Some(bodies),
-        Some(world_weapons),
-        None,
-        Some(fpv_meshes),
-        Some(projectile_meshes),
-    );
-    report.push(format!(
+        let graph = crate::AssetGraphLinker {
+            materials,
+            tracers,
+            fx: &mut world.fx,
+        }
+        .resolve_after_absorb(
+            None,
+            Some(bodies),
+            Some(world_weapons),
+            None,
+            Some(fpv_meshes),
+            Some(projectile_meshes),
+        );
+        report.push(format!(
         "asset graph after absorb: tracer_mat bound={} unresolved={} absent={}; fx_elem bound={} unresolved={} absent={}; fx_child bound={} unresolved={} absent={}; fx_runner bound={} unresolved={} absent={}; body materialHandles bound={} unresolved={} absent={}; world-gun materialHandles bound={} unresolved={} absent={}; FPV materialHandles bound={} unresolved={} absent={} (WeaponDef.tracerType stamped at common_mp walk)",
         graph.tracer_materials.bound,
         graph.tracer_materials.unresolved,
@@ -1057,13 +1176,18 @@ fn link_materials_after_absorb(
         graph.xmodel_fpv_materials.unresolved,
         graph.xmodel_fpv_materials.absent,
     ));
-    report.push(format!(
-        "Material stamp: iw4={} t5={} iw5={} (name-link identity; colliding T5 names are the later-zone row)",
-        materials.namespace_count(asset_core::AssetNamespace::Iw4),
-        materials.namespace_count(asset_core::AssetNamespace::T5),
-        materials.namespace_count(asset_core::AssetNamespace::Iw5),
+        let material_counts = asset_core::families()
+            .iter()
+            .map(|family| {
+                let id = family.id();
+                format!("{}={}", id.as_str(), materials.namespace_count(id))
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        report.push(format!(
+        "Material stamp: {material_counts} (name-link identity; colliding names retain the later-zone row)",
     ));
-    report.push(format!(
+        report.push(format!(
         "fx elem material edges after absorb: {} bound ({} unique), {} unresolved (temp={}, catalog_miss={}), {} absent of {} material visuals; {} decal mark arms ({} Bound slots, {} unresolved, {} temp, {} array-unpatched)",
         world.fx.material_visual_bound_count(),
         world.fx.material_visual_unique_bound_count(),
@@ -1078,7 +1202,7 @@ fn link_materials_after_absorb(
         world.fx.decal_mark_temp_slot_count(),
         world.fx.material_visual_decal_unpatched_count()
     ));
-    report.push(format!(
+        report.push(format!(
         "fx elem decal unique Bound after absorb: {} (mc={}, wc={}); decoded color/2D in catalog {} of {} (not sprite Plan)",
         world.fx.unique_decal_mark_count(),
         world.fx.unique_decal_mark_mc_count(),
@@ -1086,28 +1210,29 @@ fn link_materials_after_absorb(
         world.fx.unique_decal_mark_decoded_color_count(materials),
         world.fx.unique_decal_mark_count()
     ));
-    let miss = world
-        .fx
-        .unique_decal_mark_decoded_miss_samples(materials, 8);
-    if !miss.is_empty() {
-        report.push(format!(
-            "fx elem decal catalog nocolor sample: {}",
-            miss.join("; ")
-        ));
-    }
-    let samples = world.fx.unresolved_material_samples(8);
-    if !samples.is_empty() {
-        report.push(format!(
-            "fx elem unresolved Material* sample: {}",
-            samples.join("; ")
-        ));
-    }
-    let mark_samples = world.fx.decal_mark_samples(8);
-    if !mark_samples.is_empty() {
-        report.push(format!(
-            "fx elem decal mark sample: {}",
-            mark_samples.join("; ")
-        ));
+        let miss = world
+            .fx
+            .unique_decal_mark_decoded_miss_samples(materials, 8);
+        if !miss.is_empty() {
+            report.push(format!(
+                "fx elem decal catalog nocolor sample: {}",
+                miss.join("; ")
+            ));
+        }
+        let samples = world.fx.unresolved_material_samples(8);
+        if !samples.is_empty() {
+            report.push(format!(
+                "fx elem unresolved Material* sample: {}",
+                samples.join("; ")
+            ));
+        }
+        let mark_samples = world.fx.decal_mark_samples(8);
+        if !mark_samples.is_empty() {
+            report.push(format!(
+                "fx elem decal mark sample: {}",
+                mark_samples.join("; ")
+            ));
+        }
     }
 }
 
@@ -1324,49 +1449,4 @@ fn faction_cells(
         cells.extend((14..).zip(rgb.map(|c| c.to_string())));
     }
     cells
-}
-
-fn treyarch_map_under_iw4_rules(
-    map_scripts: &crate::ScriptSources,
-    zone_name: &str,
-    facts: &crate::MapFacts,
-    family: asset_core::FamilyId,
-) -> crate::ScriptSources {
-    let module = format!("maps/mp/{zone_name}");
-    let main = map_scripts
-        .read(&module)
-        .ok()
-        .and_then(|bytes| String::from_utf8(bytes).ok())
-        .unwrap_or_default();
-    let mut declarations = asset_world::MapDeclarations::from_t5_map_main(&main);
-    declarations.set_teams(
-        facts.script_sound.attackers.as_deref().unwrap_or("allies"),
-        facts.script_sound.defenders.as_deref().unwrap_or("axis"),
-    );
-    let entities = map_scripts
-        .entities()
-        .map(|entities| match family {
-            asset_core::FamilyId::T6 => entities.to_owned(),
-            _ => asset_world::t5_entities_for_iw4_rules(entities),
-        })
-        .unwrap_or_default();
-    let mut scripts = crate::ScriptSources::default();
-    let mut map_main = declarations.map_script(&entities);
-    let end = map_main.rfind('}').expect("generated map main");
-    map_main.insert_str(end, "\tthread iw4l_maps\\destructibles::main();\n");
-    scripts.insert_source(
-        "iw4l_maps/destructibles",
-        crate::map_scripts::DESTRUCTIBLES.to_owned(),
-    );
-    if zone_name == "mp_radiation" {
-        let end = map_main.rfind('}').expect("generated map main");
-        map_main.insert_str(end, "\tthread iw4l_maps\\radiation::main();\n");
-        scripts.insert_source(
-            "iw4l_maps/radiation",
-            crate::map_scripts::RADIATION.to_owned(),
-        );
-    }
-    scripts.insert_source(&module, map_main);
-    scripts.set_entities(entities);
-    scripts
 }

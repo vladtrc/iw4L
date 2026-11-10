@@ -9,9 +9,7 @@ pub enum ModelLightingOwner {
     Corpse(Entity),
     ScriptModel(Entity),
 
-    Missile(u32),
-
-    PredictedMissile { owner: u32, weapon: u32 },
+    Missile(Entity),
 
     Item(u32),
 
@@ -27,6 +25,7 @@ pub struct ModelLightingRequest {
     pub owner: ModelLightingOwner,
     pub origin: [f32; 3],
     pub lookup_fallback: u8,
+    pub hero_lighting: bool,
 }
 
 #[derive(Resource, Debug, Default)]

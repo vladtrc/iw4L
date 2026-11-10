@@ -39,7 +39,7 @@ fn compile_one_job(catalog: &RuntimeMaterialCatalog, job: CompileJob) -> PassOut
     match RuntimeProgramPort::compile(catalog, pass, job.vertex_type) {
         Ok(port) => PassOutcome::Port {
             tech: job.tech,
-            port,
+            port: Arc::new(port),
         },
         Err(cause) => PassOutcome::Refused {
             tech: job.tech,
@@ -178,25 +178,17 @@ fn log_catalog_generation(catalog: &RuntimeMaterialCatalog) {
         .iter()
         .filter(|material| material.state_bits_entry.is_some())
         .count();
-    match catalog.parts().iw5_remap.as_deref() {
-        Some(leftover) => diag::info!(
+    for (family, diagnostics) in &catalog.parts().native_diagnostics {
+        let mut gaps: Vec<_> = diagnostics.argument_gaps.iter().collect();
+        gaps.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+        let top: Vec<_> = gaps.into_iter().take(5).collect();
+        diag::info!(
             World,
-            "iw5 stateBitsEntry remap: state_entry_n={state_entry_n} {leftover}"
-        ),
-        None => diag::info!(
-            World,
-            "iw5 stateBitsEntry remap: none (IW4/T5) state_entry_n={state_entry_n}"
-        ),
-    }
-    match catalog.parts().t5_remap.as_deref() {
-        Some(leftover) => diag::info!(
-            World,
-            "t5 stateBitsEntry remap: state_entry_n={state_entry_n} {leftover}"
-        ),
-        None => diag::info!(
-            World,
-            "t5 stateBitsEntry remap: none (IW4/IW5) state_entry_n={state_entry_n}"
-        ),
+            "material native {}: state_entry_n={state_entry_n} selector={:?} fallbacks={} argument_gaps={top:?}",
+            family.as_str(),
+            diagnostics.selector_census,
+            diagnostics.fallback_count
+        );
     }
     let coverage = catalog.opcode_surface_coverage();
     diag::info!(World, "drawsurf {}", coverage.summary_line());
@@ -244,7 +236,7 @@ enum PassOutcome {
     Missing,
     Port {
         tech: u8,
-        port: RuntimeProgramPort,
+        port: Arc<RuntimeProgramPort>,
     },
     Refused {
         tech: u8,
@@ -336,11 +328,11 @@ impl MaterialProgramCompile {
                 match self.port_by_id.get(&port.id()) {
                     Some(&idx) if self.ports[idx].same_admission_identity(&port) => {}
                     Some(_) => {
-                        self.ports.push(port);
+                        self.ports.push(Arc::unwrap_or_clone(port));
                     }
                     None => {
                         self.port_by_id.insert(port.id(), self.ports.len());
-                        self.ports.push(port);
+                        self.ports.push(Arc::unwrap_or_clone(port));
                     }
                 }
             }
@@ -618,7 +610,7 @@ impl MaterialProgramCompile {
         }
         for &name in super::postfx_plan::GLOW_MATERIALS
             .iter()
-            .chain([&super::postfx_plan::BLOOD_MATERIAL])
+            .chain(super::postfx_plan::BLOOD_MATERIALS)
         {
             match postfx_compile_location(catalog, name) {
                 Ok((set_i, pass_i)) => {

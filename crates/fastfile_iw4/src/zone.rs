@@ -479,6 +479,8 @@ pub struct GfxLightGridGeometry {
     pub entry_count: usize,
     pub colors: Option<Ptr>,
     pub color_count: usize,
+    pub hero_lights: Option<Ptr>,
+    pub hero_light_count: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -634,6 +636,12 @@ pub struct MapEntsGeometry {
     pub entity_chars: usize,
     pub stages: Option<Ptr>,
     pub stage_count: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PathDataGeometry {
+    pub nodes: Option<Ptr>,
+    pub node_count: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -817,6 +825,8 @@ pub struct XAnimPartsGeometry {
     pub indices_are_bytes: bool,
 
     pub delta_trans: XAnimDeltaTransGeometry,
+    pub delta_quat2: XAnimDeltaQuatGeometry,
+    pub delta_quat: XAnimDeltaQuatGeometry,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -827,6 +837,15 @@ pub struct XAnimDeltaTransGeometry {
     pub constant: Option<Ptr>,
 
     pub mins_step: Option<Ptr>,
+    pub frames: Option<Ptr>,
+    pub indices: Option<Ptr>,
+    pub indices_are_bytes: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct XAnimDeltaQuatGeometry {
+    pub size: u16,
+    pub constant: Option<Ptr>,
     pub frames: Option<Ptr>,
     pub indices: Option<Ptr>,
     pub indices_are_bytes: bool,
@@ -918,6 +937,7 @@ pub struct WeaponIdleCapture {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct WeaponGeometry {
+    pub item_ammo: Option<[i32; 5]>,
     pub name: Option<Ptr>,
     pub alternate_weapon_name: Option<Ptr>,
     pub alternate_raise_time_ms: i32,
@@ -933,6 +953,8 @@ pub struct WeaponGeometry {
     pub gun_xmodel_names: [Option<Ptr>; 16],
 
     pub hand_xmodel_name: Option<Ptr>,
+
+    pub clip_model_name: Option<Ptr>,
 
     pub world_model_name: Option<Ptr>,
 
@@ -1420,6 +1442,7 @@ pub struct ZoneStream<'a> {
     fx_world: Option<FxWorldGeometry>,
     glass_data: Option<GlassDataGeometry>,
     clip_map: Option<ClipMapGeometry>,
+    path_data: Option<PathDataGeometry>,
     map_ents: Option<MapEntsGeometry>,
     xmodel: Option<XModelGeometry>,
     phys_preset: Option<PhysPresetGeometry>,
@@ -1526,6 +1549,7 @@ impl<'a> ZoneStream<'a> {
             fx_world: None,
             glass_data: None,
             clip_map: None,
+            path_data: None,
             map_ents: None,
             xmodel: None,
             phys_preset: None,
@@ -2007,10 +2031,7 @@ impl<'a> ZoneStream<'a> {
     }
 
     pub fn watermark(&self, block: u8) -> usize {
-        self.offsets
-            .get(block as usize)
-            .copied()
-            .unwrap_or_default()
+        self.offsets.get(block as usize).copied().unwrap_or(0)
     }
 
     pub fn tag_alloc(&mut self, tag: u32, align: usize, bytes: usize) {
@@ -2078,6 +2099,14 @@ impl<'a> ZoneStream<'a> {
 
     pub fn glass_data(&self) -> Option<GlassDataGeometry> {
         self.glass_data
+    }
+
+    pub fn record_path_data(&mut self, geometry: PathDataGeometry) {
+        self.path_data = Some(geometry);
+    }
+
+    pub fn path_data(&self) -> Option<PathDataGeometry> {
+        self.path_data
     }
 
     pub fn record_clip_map(&mut self, geometry: ClipMapGeometry) {

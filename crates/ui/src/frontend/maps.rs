@@ -9,15 +9,17 @@ pub fn map_label(map: &str) -> String {
 }
 
 pub fn map_preview(map: &str) -> String {
-    match map.split_once(':').unwrap_or(("iw4", map)) {
-        (_, "") => String::new(),
-        ("t5", stem) => format!(
-            "t5:material/menu_mp_map_select_{}_big",
-            stem.trim_start_matches("mp_")
-        ),
-        ("t6", stem) => format!("t6:material/menu_{stem}_map_select_final"),
-        (namespace, stem) => format!("{namespace}:material/preview_{stem}"),
+    let (token, stem) = map.split_once(':').unwrap_or(("iw4", map));
+    let Some(family) = asset_core::FamilyId::parse(token) else {
+        return String::new();
+    };
+    let Some(policy) = asset_game::map_presentation_family(family) else {
+        return String::new();
+    };
+    if stem.is_empty() {
+        return String::new();
     }
+    format!("{}:material/{}", family.as_str(), (policy.preview)(stem))
 }
 
 pub fn pack_maps(maps: &MenuMapList, pack: usize) -> &[String] {
@@ -32,32 +34,35 @@ pub struct MapPresentation {
 
 impl MapPresentation {
     pub fn from_tables(
-        tables: &[(asset_core::AssetNamespace, asset_game::CapturedStringTable)],
+        tables: &[(asset_core::FamilyId, asset_game::CapturedStringTable)],
         ui_images: asset_material::UiImagePublication,
     ) -> Self {
         let mut entries = std::collections::BTreeMap::new();
         for (namespace, table) in tables {
-            if *namespace != asset_core::AssetNamespace::T6
-                || !table.name.eq_ignore_ascii_case("mp/mapstable.csv")
-            {
+            let Some(schema) =
+                asset_game::map_presentation_family(*namespace).and_then(|policy| policy.table)
+            else {
+                continue;
+            };
+            if !table.name.eq_ignore_ascii_case(schema.name) {
                 continue;
             }
             for row in 0..table.rows as i32 {
-                let map = table.cell(row, 0);
-                if !map.starts_with("mp_") {
+                let map = table.cell(row, schema.map_column);
+                if !map.starts_with(schema.map_prefix) {
                     continue;
                 }
                 let Ok(title) = asset_core::AssetKey::new(
                     *namespace,
                     asset_core::AssetKind::Localize,
-                    table.cell(row, 3),
+                    table.cell(row, schema.title_column),
                 ) else {
                     continue;
                 };
                 let Ok(image) = asset_core::AssetKey::new(
                     *namespace,
                     asset_core::AssetKind::Material,
-                    table.cell(row, 4),
+                    table.cell(row, schema.image_column),
                 ) else {
                     continue;
                 };

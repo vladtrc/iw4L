@@ -216,7 +216,7 @@ pub fn wavelet_decompress_level(
         }
         return Ok(());
     }
-    if width % 2 != 0 || height % 2 != 0 {
+    if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
         return Err(WaveletError::Dimensions);
     }
     let (blocks_x, blocks_y) = (width as usize / 2, height as usize / 2);

@@ -1,7 +1,12 @@
 use std::sync::Arc;
 
 use crate::AnimClip;
+
+mod motion;
+mod restarts;
+mod sync;
 use anim_iw4::{PartBits, advance_goal_weight, advance_leaf_time};
+pub use sync::XAnimSyncTree;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct XAnimNodeId(pub u16);
@@ -30,6 +35,12 @@ pub struct XAnimTreeDefinition {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum XAnimTreeError {
     Empty,
+    SyncFlagsLength,
+    ConflictingSyncMode { node: usize },
+    NestedSync { node: usize },
+    SyncLoopMismatch { node: usize },
+    SyncDefinitionMismatch,
+    ClockAdvanceOutOfRange { node: usize },
     TooManyNodes { count: usize },
     ParentOutOfRange { node: usize, parent: usize },
     ParentNotBeforeChild { node: usize, parent: usize },
@@ -312,14 +323,30 @@ impl XAnimTreeRuntime {
     }
 
     pub fn update(&mut self, dtime_seconds: f32) -> Result<(), XAnimTreeError> {
+        self.begin_update();
+        self.advance(dtime_seconds)
+    }
+
+    /// Retain the frame's starting clocks while notification handlers subdivide
+    /// its animation update. Explicit clock setters may reset these afterwards.
+    pub fn begin_update(&mut self) {
+        for state in &mut self.states {
+            state.old_time = state.time;
+            state.old_cycle_count = state.cycle_count;
+        }
+    }
+
+    /// Advance part of a frame without replacing its starting clocks.
+    pub fn advance(&mut self, dtime_seconds: f32) -> Result<(), XAnimTreeError> {
         if !dtime_seconds.is_finite() || dtime_seconds < 0.0 {
             return Err(XAnimTreeError::NonFiniteState { node: 0 });
         }
         let n = self.states.len();
+        let mut rates = vec![0.0; n];
         for node in 0..n {
-            let parent_has_weight = self.definition.nodes[node]
-                .parent
-                .is_none_or(|parent| self.states[parent.0 as usize].weight != 0.0);
+            let parent = self.definition.nodes[node].parent;
+            let parent_has_weight =
+                parent.is_none_or(|parent| self.states[parent.0 as usize].weight != 0.0);
             let state = &mut self.states[node];
             let (weight, goal_time) = advance_goal_weight(
                 state.weight,
@@ -330,25 +357,40 @@ impl XAnimTreeRuntime {
             );
             state.weight = weight;
             state.goal_time = goal_time;
-            state.old_time = state.time;
-            state.old_cycle_count = state.cycle_count;
-        }
-        for node in 0..n {
-            if self.states[node].weight == 0.0 {
-                continue;
+            rates[node] = if weight == 0.0 {
+                0.0
+            } else {
+                state.rate * parent.map_or(1.0, |parent| rates[parent.0 as usize])
+            };
+            if !rates[node].is_finite() {
+                return Err(XAnimTreeError::NonFiniteState { node });
             }
+        }
+        for (node, rate) in rates.into_iter().enumerate() {
             let XAnimNodeKind::Leaf { clip, .. } = &self.definition.nodes[node].kind else {
                 continue;
             };
+            let delta = rate * clip.frequency() * dtime_seconds;
+            if !delta.is_finite() {
+                return Err(XAnimTreeError::NonFiniteState { node });
+            }
+            if delta > 65535.0 {
+                return Err(XAnimTreeError::ClockAdvanceOutOfRange { node });
+            }
             let state = &mut self.states[node];
-            let (time, cycle) = advance_leaf_time(
-                state.old_time,
+            let (mut time, cycle) = advance_leaf_time(
+                state.time,
                 state.cycle_count,
-                state.rate,
+                rate,
                 clip.frequency(),
                 dtime_seconds,
                 clip.looping,
             );
+            // The nonloop end park depends on the frame's starting clock,
+            // including when notetrack dispatch subdivides that frame.
+            if !clip.looping && time == 1.0 && state.old_time < anim_iw4::XANIM_NONLOOP_END_PARK {
+                time = anim_iw4::XANIM_NONLOOP_END_PARK;
+            }
             state.time = time;
             state.cycle_count = cycle;
         }
@@ -367,6 +409,10 @@ impl XAnimTreeRuntime {
             };
             if found.is_some() {
                 return None;
+            }
+            if !clip.delta_enabled {
+                found = Some([0.0; 3]);
+                continue;
             }
             let now = clip.abs_delta_trans(state.time);
             let then = clip.abs_delta_trans(state.old_time);

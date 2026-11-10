@@ -8,6 +8,25 @@ use crate::file::{
     sanitize_demo_name,
 };
 
+pub(crate) fn recording_frame(
+    encoder: &mut SnapshotEncoder,
+    snapshot: &Snapshot,
+    received: Option<&Frame>,
+) -> Frame {
+    let packed = frame_from_tick(encoder, snapshot);
+    match received {
+        Some(received) => Frame {
+            tick: packed.tick,
+            state_hash: packed.state_hash,
+            snapshot_delta: packed.snapshot_delta,
+            snapshot_meta: packed.snapshot_meta,
+            world_objects_wire: packed.world_objects_wire,
+            ..received.clone()
+        },
+        None => packed,
+    }
+}
+
 pub fn auto_demo_name(index: u32) -> String {
     format!("demo{index:04}")
 }
@@ -25,7 +44,7 @@ pub fn next_free_demo_name(artifacts_root: &Path) -> String {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
-            .unwrap_or_default()
+            .unwrap_or(0)
     )
 }
 
@@ -82,7 +101,19 @@ impl Recording {
     }
 
     pub fn record(&mut self, snapshot: &Snapshot) -> Result<(), ReplayError> {
-        let frame = frame_from_tick(&mut self.encoder, snapshot);
+        self.record_received(snapshot, None)
+    }
+
+    pub fn record_frame(&mut self, snapshot: &Snapshot, frame: &Frame) -> Result<(), ReplayError> {
+        self.record_received(snapshot, Some(frame))
+    }
+
+    fn record_received(
+        &mut self,
+        snapshot: &Snapshot,
+        received: Option<&Frame>,
+    ) -> Result<(), ReplayError> {
+        let frame = recording_frame(&mut self.encoder, snapshot, received);
         self.transport
             .send(&frame)
             .map_err(|e| ReplayError::Io(std::io::Error::other(e.to_string())))?;
@@ -91,8 +122,11 @@ impl Recording {
     }
 
     pub fn record_clip_ring(&mut self, ring: &crate::clip::ClipRing) -> Result<u64, ReplayError> {
-        for snapshot in ring.iter() {
-            self.record(snapshot)?;
+        for frame in ring.frames() {
+            let frame = frame?;
+            let mut snapshot = SnapshotDecoder::new().decode(&frame.snapshot_delta)?;
+            snapshot.meta = frame.snapshot_meta.clone();
+            self.record_frame(&snapshot, &frame)?;
         }
         Ok(ring.len() as u64)
     }

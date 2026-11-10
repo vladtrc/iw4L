@@ -6,6 +6,7 @@ license.workspace = true
 description = "Our console: input, parsing, execution, cvar storage, coverage report."
 
 [dependencies]
+serde_json.workspace = true
 getrandom = "0.3"
 master_protocol.workspace = true
 diag.workspace = true
@@ -16,19 +17,20 @@ asset_core.workspace = true
 asset_game.workspace = true
 asset_transport.workspace = true
 asset_world.workspace = true
-assets = { path = "../assets" }
-audio = { path = "../audio" }
+assets = { workspace = true }
+audio = { workspace = true }
 input_iw4.workspace = true
-net = { path = "../net" }
-render = { path = "../render" }
+net = { workspace = true }
+render = { workspace = true }
 render_frontend.workspace = true
+render_frame.workspace = true
 render_anim.workspace = true
-session = { path = "../session" }
+session = { workspace = true }
 render_fx.workspace = true
-replay = { path = "../replay" }
-sim = { path = "../sim" }
-bots = { path = "../bots" }
-hud = { path = "../hud" }
+replay = { workspace = true }
+sim = { workspace = true }
+bots = { workspace = true }
+hud = { workspace = true }
 entity_iw4.workspace = true
 perf.workspace = true
 rfd = "0.17"

@@ -101,7 +101,7 @@ pub(super) fn load_gfxworld(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSin
     }
 
     let geometry = load_gfxworld_draw(s, links, p.at(s.layout(80, 120)))?;
-    let light_grid = load_gfx_light_grid(s, p.at(s.layout(152, 264)))?;
+    let mut light_grid = load_gfx_light_grid(s, p.at(s.layout(152, 264)))?;
 
     let brush_model_count = s.i32_at(p, s.layout(208, 352))?.max(0) as usize;
     let brush_models = s.plain_array(
@@ -255,7 +255,8 @@ pub(super) fn load_gfxworld(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSin
     load_gfx_dpvs_dynamic(s, dyn_dpvs, cell_count)?;
 
     let hero_count = s.u32_at(p, s.layout(616, 924))? as usize;
-    s.plain_array(
+    light_grid.hero_light_count = hero_count;
+    light_grid.hero_lights = s.plain_array(
         p,
         s.layout(620, 928),
         4,
@@ -344,7 +345,7 @@ fn load_gfxworld_draw(
         lightmap_count,
     )? {
         let retain = lightmap_count.min(MAX_LIGHTMAP_PAGES);
-        for i in 0..lightmap_count {
+        for (i, lightmaps_entry) in lightmaps[..lightmap_count].iter_mut().enumerate() {
             let lightmap = a.at(i * s.layout(sz::GFX_LIGHTMAP_ARRAY, 16));
             let serial = s.image_serial();
             asset_ptr_at(s, links, AssetType::Image, lightmap.at(0))?;
@@ -361,7 +362,7 @@ fn load_gfxworld_draw(
                 None
             };
             if i < retain {
-                lightmaps[i] = GfxLightmapPair { primary, secondary };
+                (*lightmaps_entry) = GfxLightmapPair { primary, secondary };
             }
         }
     }
@@ -439,6 +440,8 @@ fn load_gfx_light_grid(s: &mut ZoneStream<'_>, p: Ptr) -> Result<GfxLightGridGeo
         entry_count,
         colors,
         color_count,
+        hero_lights: None,
+        hero_light_count: 0,
     })
 }
 
@@ -567,17 +570,17 @@ fn load_gfx_dpvs_static(
 
 fn load_gfx_dpvs_dynamic(s: &mut ZoneStream<'_>, p: Ptr, cell_count: usize) -> Result<()> {
     let word_count = [s.u32_at(p, 0)? as usize, s.u32_at(p, 4)? as usize];
-    for ty in 0..2 {
+    for (ty, word_count_entry) in word_count[..2].iter().enumerate() {
         runtime_array(
             s,
             p,
             16 + ty * s.pointer_bytes(),
             4,
             4,
-            word_count[ty] * cell_count,
+            (*word_count_entry) * cell_count,
         )?;
     }
-    for ty in 0..2 {
+    for (ty, word_count_entry) in word_count[..2].iter().enumerate() {
         for vis in 0..3 {
             runtime_array(
                 s,
@@ -585,7 +588,7 @@ fn load_gfx_dpvs_dynamic(s: &mut ZoneStream<'_>, p: Ptr, cell_count: usize) -> R
                 s.layout(24, 32) + (ty * 3 + vis) * s.pointer_bytes(),
                 16,
                 1,
-                32 * word_count[ty],
+                32 * (*word_count_entry),
             )?;
         }
     }

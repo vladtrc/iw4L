@@ -1,3 +1,5 @@
+type ConstantPackCache = HashMap<(usize, usize), (u32, Arc<PassConstantBuffers>, Arc<[u32]>, u32)>;
+
 const PLACED_ARENA_MARK: u32 = 1 << 31;
 
 use super::as_u32;
@@ -122,7 +124,7 @@ fn aligned_backing_span(start: usize, end: usize, backing_len: usize) -> Option<
     let end = end.min(backing_len);
     let start = start / 4 * 4;
     let end = end.next_multiple_of(4).min(backing_len);
-    if start >= end || (end - start) % 4 != 0 {
+    if start >= end || !(end - start).is_multiple_of(4) {
         return None;
     }
     Some((start, end))
@@ -130,6 +132,7 @@ fn aligned_backing_span(start: usize, end: usize, backing_len: usize) -> Option<
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct PlacedPackKey {
+    placement_domain: u32,
     port: PortId,
     local: usize,
     slots: usize,
@@ -167,67 +170,6 @@ impl SpanLane {
     }
 }
 
-fn patch_span_lanes<'a>(
-    span: &mut [u8],
-    span_start: usize,
-    recorded: &[SpanLane],
-    lanes: impl Iterator<Item = SpanLaneWrite<'a>> + Clone,
-    vertex_len: usize,
-    pixel_len: usize,
-    slots: &[u32],
-    dirty: &mut Vec<(usize, usize)>,
-) -> Option<()> {
-    if recorded.len() != lanes.clone().count() {
-        return None;
-    }
-    let mut touched: Option<(usize, usize)> = None;
-    let mark = |at: usize, end: usize, touched: &mut Option<(usize, usize)>| match touched {
-        Some((lo, hi)) => {
-            *lo = (*lo).min(at);
-            *hi = (*hi).max(end);
-        }
-        None => *touched = Some((at, end)),
-    };
-    for (site, write) in recorded.iter().zip(lanes) {
-        if *site != write.site {
-            return None;
-        }
-        let (bank_off, bank_len) = if site.pixel_stage {
-            (vertex_len, pixel_len)
-        } else {
-            (0, vertex_len)
-        };
-        let first = usize::from(site.destination);
-        let count = usize::from(site.row_count);
-        if first.saturating_add(count) > bank_len || write.rows.len() != count {
-            return None;
-        }
-        let at = (bank_off + first) * 16;
-        let end = at + count * 16;
-        if end > span.len() {
-            return None;
-        }
-        let bytes: &[u8] = bytemuck::cast_slice(write.rows);
-        if span[at..end] != *bytes {
-            span[at..end].copy_from_slice(bytes);
-            mark(at, end, &mut touched);
-        }
-    }
-    let tail = (vertex_len + pixel_len) * 16;
-    let bytes: &[u8] = bytemuck::cast_slice(slots);
-    if tail + bytes.len() > span.len() {
-        return None;
-    }
-    if span[tail..tail + bytes.len()] != *bytes {
-        span[tail..tail + bytes.len()].copy_from_slice(bytes);
-        mark(tail, tail + bytes.len(), &mut touched);
-    }
-    if let Some((lo, hi)) = touched {
-        dirty.push((span_start + lo, span_start + hi));
-    }
-    Some(())
-}
-
 #[derive(Clone, Copy)]
 struct SpanLaneWrite<'a> {
     site: SpanLane,
@@ -247,24 +189,31 @@ fn span_lane_writes<'a>(
     })
 }
 
-fn placed_pack_key(
-    port: PortId,
-    local: Option<&Arc<render_material::PackedLocalBanks>>,
-    slots: &Arc<[u32]>,
-    drawsurf_key: u64,
-    pass_index: u32,
-) -> PlacedPackKey {
-    PlacedPackKey {
-        port,
-        local: local.map(|banks| Arc::as_ptr(banks) as usize).unwrap_or(0),
-        slots: Arc::as_ptr(slots).cast::<u32>() as usize,
-        drawsurf_key,
-        pass_index,
-    }
+pub(super) struct PlacedConstants<'a> {
+    pub(super) overlay: &'a [PackedCodeConstantLane],
+    pub(super) drawsurf_key: u64,
+    pub(super) execution_pass_index: u32,
+    pub(super) placement_domain: u32,
 }
 
-fn placed_span_version(code: u64, overlay: &[PackedCodeConstantLane]) -> u64 {
-    code ^ PackedCodeConstants::hash_lanes(overlay)
+impl PlacedConstants<'_> {
+    fn key(&self, executable: ExecutablePassView<'_>, slots: &Arc<[u32]>) -> PlacedPackKey {
+        PlacedPackKey {
+            placement_domain: self.placement_domain,
+            port: executable.port,
+            local: executable
+                .local_banks
+                .map(|banks| Arc::as_ptr(banks) as usize)
+                .unwrap_or(0),
+            slots: Arc::as_ptr(slots).cast::<u32>() as usize,
+            drawsurf_key: self.drawsurf_key,
+            pass_index: self.execution_pass_index,
+        }
+    }
+
+    fn version(&self, code: u64) -> u64 {
+        code ^ PackedCodeConstants::hash_lanes(self.overlay)
+    }
 }
 
 fn take_exact_free(free: &mut Vec<(u32, usize)>, need: usize) -> Option<u32> {
@@ -289,91 +238,68 @@ impl<F> SpanSource<'_, F> {
     fn sites(&self) -> Vec<SpanLane> {
         self.writes().map(|write| write.site).collect()
     }
-}
 
-fn intern_placed_span<E, F>(
-    intern: &mut HashMap<PlacedPackKey, PlacedSpan>,
-    placed: &mut Vec<u8>,
-    stamp: u32,
-    key: PlacedPackKey,
-    version: u64,
-    dirty: &mut Vec<(usize, usize)>,
-    free: &mut Vec<(u32, usize)>,
-    scratch: &mut Vec<u8>,
-    source: SpanSource<'_, F>,
-) -> Result<(u32, bool), E>
-where
-    F: FnOnce(&mut Vec<u8>) -> Result<(), E>,
-{
-    if let Some(entry) = intern.get_mut(&key) {
-        entry.stamp = stamp;
-        if entry.version == version {
-            return Ok((mark_placed_base(entry.base), true));
+    fn patch_span(
+        &self,
+        span: &mut [u8],
+        span_start: usize,
+        recorded: &[SpanLane],
+        dirty: &mut Vec<(usize, usize)>,
+    ) -> Option<()> {
+        let lanes = self.writes();
+        let vertex_len = self.vertex_len;
+        let pixel_len = self.pixel_len;
+        let slots = self.slots;
+        if recorded.len() != lanes.clone().count() {
+            return None;
         }
-        let start = entry.base as usize * 16;
-        if start.saturating_add(entry.len) <= placed.len()
-            && entry.vertex_len as usize == source.vertex_len
-            && entry.pixel_len as usize == source.pixel_len
-            && patch_span_lanes(
-                &mut placed[start..start + entry.len],
-                start,
-                &entry.lanes,
-                source.writes(),
-                source.vertex_len,
-                source.pixel_len,
-                source.slots,
-                dirty,
-            )
-            .is_some()
-        {
-            entry.version = version;
-            return Ok((mark_placed_base(entry.base), true));
+        let mut touched: Option<(usize, usize)> = None;
+        let mark = |at: usize, end: usize, touched: &mut Option<(usize, usize)>| match touched {
+            Some((lo, hi)) => {
+                *lo = (*lo).min(at);
+                *hi = (*hi).max(end);
+            }
+            None => *touched = Some((at, end)),
+        };
+        for (site, write) in recorded.iter().zip(lanes) {
+            if *site != write.site {
+                return None;
+            }
+            let (bank_off, bank_len) = if site.pixel_stage {
+                (vertex_len, pixel_len)
+            } else {
+                (0, vertex_len)
+            };
+            let first = usize::from(site.destination);
+            let count = usize::from(site.row_count);
+            if first.saturating_add(count) > bank_len || write.rows.len() != count {
+                return None;
+            }
+            let at = (bank_off + first) * 16;
+            let end = at + count * 16;
+            if end > span.len() {
+                return None;
+            }
+            let bytes: &[u8] = bytemuck::cast_slice(write.rows);
+            if span[at..end] != *bytes {
+                span[at..end].copy_from_slice(bytes);
+                mark(at, end, &mut touched);
+            }
         }
-        scratch.clear();
-        let sites = source.sites();
-        let packed = scratch;
-        (source.pack)(packed)?;
-        if packed.len() == entry.len && start.saturating_add(entry.len) <= placed.len() {
-            placed[start..start + entry.len].copy_from_slice(packed);
-            entry.version = version;
-            entry.lanes = sites;
-            entry.vertex_len = as_u32(source.vertex_len);
-            entry.pixel_len = as_u32(source.pixel_len);
-            dirty.push((start, start + entry.len));
-            return Ok((mark_placed_base(entry.base), true));
+        let tail = (vertex_len + pixel_len) * 16;
+        let bytes: &[u8] = bytemuck::cast_slice(slots);
+        if tail + bytes.len() > span.len() {
+            return None;
         }
-        free.push((entry.base, entry.len));
-        let (base, start) = place_span(placed, free, packed);
-        entry.base = base;
-        entry.len = packed.len();
-        entry.version = version;
-        entry.lanes = sites;
-        entry.vertex_len = as_u32(source.vertex_len);
-        entry.pixel_len = as_u32(source.pixel_len);
-        dirty.push((start, start + packed.len()));
-        return Ok((mark_placed_base(base), false));
+        if span[tail..tail + bytes.len()] != *bytes {
+            span[tail..tail + bytes.len()].copy_from_slice(bytes);
+            mark(tail, tail + bytes.len(), &mut touched);
+        }
+        if let Some((lo, hi)) = touched {
+            dirty.push((span_start + lo, span_start + hi));
+        }
+        Some(())
     }
-    scratch.clear();
-    let sites = source.sites();
-    let vertex_len = source.vertex_len;
-    let pixel_len = source.pixel_len;
-    let packed = scratch;
-    (source.pack)(packed)?;
-    let (base, start) = place_span(placed, free, packed);
-    intern.insert(
-        key,
-        PlacedSpan {
-            base,
-            len: packed.len(),
-            stamp,
-            version,
-            vertex_len: as_u32(vertex_len),
-            pixel_len: as_u32(pixel_len),
-            lanes: sites,
-        },
-    );
-    dirty.push((start, start + packed.len()));
-    Ok((mark_placed_base(base), false))
 }
 
 fn place_span(placed: &mut Vec<u8>, free: &mut Vec<(u32, usize)>, packed: &[u8]) -> (u32, usize) {
@@ -397,7 +323,7 @@ pub(super) struct ArenaPack {
 
     identity_reserved: usize,
 
-    seen: HashMap<(usize, usize), (u32, Arc<PassConstantBuffers>, Arc<[u32]>, u32)>,
+    seen: ConstantPackCache,
     placed: Vec<u8>,
 
     placed_seen: HashMap<PlacedPackKey, PlacedSpan>,
@@ -413,6 +339,93 @@ pub(super) struct ArenaPack {
 }
 
 impl ArenaPack {
+    fn intern_placed_span<E, F>(
+        &mut self,
+        key: PlacedPackKey,
+        version: u64,
+        source: SpanSource<'_, F>,
+    ) -> Result<(u32, bool), E>
+    where
+        F: FnOnce(&mut Vec<u8>) -> Result<(), E>,
+    {
+        let Self {
+            placed_seen: intern,
+            placed,
+            stamp,
+            placed_dirty_scratch: dirty,
+            placed_free: free,
+            pack_scratch: scratch,
+            ..
+        } = self;
+        let stamp = *stamp;
+        if let Some(entry) = intern.get_mut(&key) {
+            entry.stamp = stamp;
+            if entry.version == version {
+                return Ok((mark_placed_base(entry.base), true));
+            }
+            let start = entry.base as usize * 16;
+            if start.saturating_add(entry.len) <= placed.len()
+                && entry.vertex_len as usize == source.vertex_len
+                && entry.pixel_len as usize == source.pixel_len
+                && source
+                    .patch_span(
+                        &mut placed[start..start + entry.len],
+                        start,
+                        &entry.lanes,
+                        dirty,
+                    )
+                    .is_some()
+            {
+                entry.version = version;
+                return Ok((mark_placed_base(entry.base), true));
+            }
+            scratch.clear();
+            let sites = source.sites();
+            let packed = scratch;
+            (source.pack)(packed)?;
+            if packed.len() == entry.len && start.saturating_add(entry.len) <= placed.len() {
+                placed[start..start + entry.len].copy_from_slice(packed);
+                entry.version = version;
+                entry.lanes = sites;
+                entry.vertex_len = as_u32(source.vertex_len);
+                entry.pixel_len = as_u32(source.pixel_len);
+                dirty.push((start, start + entry.len));
+                return Ok((mark_placed_base(entry.base), true));
+            }
+            free.push((entry.base, entry.len));
+            let (base, start) = place_span(placed, free, packed);
+            entry.base = base;
+            entry.len = packed.len();
+            entry.version = version;
+            entry.lanes = sites;
+            entry.vertex_len = as_u32(source.vertex_len);
+            entry.pixel_len = as_u32(source.pixel_len);
+            dirty.push((start, start + packed.len()));
+            return Ok((mark_placed_base(base), false));
+        }
+        scratch.clear();
+        let sites = source.sites();
+        let vertex_len = source.vertex_len;
+        let pixel_len = source.pixel_len;
+        let packed = scratch;
+        (source.pack)(packed)?;
+        let (base, start) = place_span(placed, free, packed);
+        intern.insert(
+            key,
+            PlacedSpan {
+                base,
+                len: packed.len(),
+                stamp,
+                version,
+                vertex_len: as_u32(vertex_len),
+                pixel_len: as_u32(pixel_len),
+                lanes: sites,
+            },
+        );
+        dirty.push((start, start + packed.len()));
+        Ok((mark_placed_base(base), false))
+    }
+
     pub(super) fn reserve_identity(&mut self) -> u32 {
         let reserved = grow_identity_reserved(self.identity_reserved, self.identity.len());
         if reserved != self.identity_reserved {
@@ -434,14 +447,15 @@ impl ArenaPack {
         let full_upload = self.full_upload;
         self.full_upload = false;
         let mut dirty = std::mem::take(&mut self.dirty);
-        let result = upload_packed_arena(
-            &self.identity,
-            &self.placed,
-            self.identity_reserved,
-            self.share_n,
-            &dirty,
-            full_upload,
-            arena,
+        let share_n = self.share_n;
+        let total_len = arena.upload(
+            PackedArenaUpdate {
+                identity: &self.identity,
+                placed: &self.placed,
+                identity_reserved: self.identity_reserved,
+                dirty: &dirty,
+                full_upload,
+            },
             layout,
             registry,
             device,
@@ -450,7 +464,7 @@ impl ArenaPack {
         );
         dirty.clear();
         self.dirty = dirty;
-        result
+        (share_n, total_len, 0)
     }
 
     pub(super) fn begin_list(&mut self) {
@@ -539,32 +553,19 @@ impl ArenaPack {
         &mut self,
         port: &crate::drawsurf::AdmittedExactPort,
         executable: ExecutablePassView<'_>,
-        overlay: &[PackedCodeConstantLane],
         slots: &Arc<[u32]>,
-        drawsurf_key: u64,
-        pass_index: u32,
+        placed: PlacedConstants<'_>,
     ) -> Result<(u32, bool), ConstantPackRefusal> {
-        let key = placed_pack_key(
-            executable.port,
-            executable.local_banks,
-            slots,
-            drawsurf_key,
-            pass_index,
-        );
-        let version = placed_span_version(executable.code_constant_id, overlay);
+        let overlay = placed.overlay;
+        let key = placed.key(executable, slots);
+        let version = placed.version(executable.code_constant_id);
         let Some(banks) = executable.local_banks else {
             return Err(ConstantPackRefusal::MissingLocalBanks);
         };
         self.placed_dirty_scratch.clear();
-        let (base, hit) = intern_placed_span(
-            &mut self.placed_seen,
-            &mut self.placed,
-            self.stamp,
+        let (base, hit) = self.intern_placed_span(
             key,
             version,
-            &mut self.placed_dirty_scratch,
-            &mut self.placed_free,
-            &mut self.pack_scratch,
             SpanSource {
                 lanes: executable.code_constants,
                 overlay,
@@ -633,131 +634,148 @@ fn plan_arena_upload(
     ArenaUploadPlan::Ranges
 }
 
-pub(super) fn upload_packed_arena(
-    identity: &[u8],
-    placed: &[u8],
-    identity_reserved: usize,
-    share_n: u32,
-    dirty: &[ArenaDirty],
-    full_upload: bool,
-    arena: &mut GpuConstantArena,
-    layout: Option<&BindGroupLayoutDescriptor>,
-    registry: &ExactPipelineRegistry,
-    device: &RenderDevice,
-    queue: &RenderQueue,
-    label: &'static str,
-) -> (u32, usize, usize) {
-    let reserved = identity_reserved.max(identity.len());
-    let total_len = reserved.saturating_add(placed.len());
-    let required = padded_upload_len(total_len);
-    let resize = arena.buffer.is_none()
-        || u64::try_from(required).expect("constant arena size fits u64") > arena.capacity;
-    if resize {
-        arena.capacity = arena_capacity(required);
-        arena.buffer = Some(device.create_buffer(&BufferDescriptor {
-            label: Some(label),
-            size: arena.capacity,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        }));
-        arena.bind_group = None;
-        arena.uploaded_len = 0;
-        perf::Counter::CounterArenaReallocN.emit(1.0);
-    }
+pub(super) struct PackedArenaUpdate<'a> {
+    pub(super) identity: &'a [u8],
+    pub(super) placed: &'a [u8],
+    pub(super) identity_reserved: usize,
+    pub(super) dirty: &'a [ArenaDirty],
+    pub(super) full_upload: bool,
+}
 
-    let old_len = arena.uploaded_len;
-    let plan = plan_arena_upload(old_len, total_len, resize, full_upload, dirty.is_empty());
-    perf::Counter::CounterArenaUsedBytes.emit(total_len as f64);
-    perf::Counter::CounterArenaCapacityBytes.emit(arena.capacity as f64);
-    let logical_dirty_bytes: usize = dirty
-        .iter()
-        .copied()
-        .map(|range| {
-            let (start, end) = gpu_dirty_range(range, reserved);
-            end.saturating_sub(start)
-        })
-        .sum();
-    perf::Counter::CounterArenaDirtyBytes.emit(logical_dirty_bytes as f64);
-    let mut uploaded_bytes: usize = 0;
-    let mut upload_calls: u32 = 0;
+impl GpuConstantArena {
+    pub(super) fn upload(
+        &mut self,
+        update: PackedArenaUpdate<'_>,
+        layout: Option<&BindGroupLayoutDescriptor>,
+        registry: &ExactPipelineRegistry,
+        device: &RenderDevice,
+        queue: &RenderQueue,
+        label: &'static str,
+    ) -> usize {
+        let PackedArenaUpdate {
+            identity,
+            placed,
+            identity_reserved,
+            dirty,
+            full_upload,
+        } = update;
+        let arena = self;
+        let reserved = identity_reserved.max(identity.len());
+        let total_len = reserved.saturating_add(placed.len());
+        let required = padded_upload_len(total_len);
+        let resize = arena.buffer.is_none()
+            || u64::try_from(required).expect("constant arena size fits u64") > arena.capacity;
+        if resize {
+            arena.capacity = arena_capacity(required);
+            arena.buffer = Some(device.create_buffer(&BufferDescriptor {
+                label: Some(label),
+                size: arena.capacity,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+            arena.bind_group = None;
+            arena.uploaded_len = 0;
+            perf::counter!("arena_realloc", "iw4l.render", 1.0);
+        }
 
-    match plan {
-        ArenaUploadPlan::Idle => {}
-        ArenaUploadPlan::Full => {
-            if total_len > 0 {
-                write_arena_span(
-                    queue,
-                    arena.buffer.as_ref().expect("constant arena exists"),
-                    identity,
-                    placed,
-                    reserved,
-                    0,
-                    padded_upload_len(total_len),
-                );
-                arena.uploaded_len = total_len;
-                uploaded_bytes = total_len;
-                upload_calls = 1;
-                if resize {
-                    perf::Counter::CounterArenaFullResize.emit(1.0);
-                } else {
-                    perf::Counter::CounterArenaFullFlag.emit(1.0);
+        let old_len = arena.uploaded_len;
+        let plan = plan_arena_upload(old_len, total_len, resize, full_upload, dirty.is_empty());
+        perf::counter!("arena_used_bytes", "iw4l.render", total_len as f64);
+        perf::counter!("arena_capacity_bytes", "iw4l.render", arena.capacity as f64);
+        let logical_dirty_bytes: usize = dirty
+            .iter()
+            .copied()
+            .map(|range| {
+                let (start, end) = gpu_dirty_range(range, reserved);
+                end.saturating_sub(start)
+            })
+            .sum();
+        perf::counter!(
+            "arena_dirty_bytes",
+            "iw4l.render",
+            logical_dirty_bytes as f64
+        );
+        let mut uploaded_bytes: usize = 0;
+        let mut upload_calls: u32 = 0;
+
+        match plan {
+            ArenaUploadPlan::Idle => {}
+            ArenaUploadPlan::Full => {
+                if total_len > 0 {
+                    write_arena_span(
+                        queue,
+                        arena.buffer.as_ref().expect("constant arena exists"),
+                        identity,
+                        placed,
+                        reserved,
+                        0,
+                        padded_upload_len(total_len),
+                    );
+                    arena.uploaded_len = total_len;
+                    uploaded_bytes = total_len;
+                    upload_calls = 1;
+                    if resize {
+                        perf::counter!("arena_full_resize", "iw4l.render", 1.0);
+                    } else {
+                        perf::counter!("arena_full_flag", "iw4l.render", 1.0);
+                    }
                 }
             }
-        }
-        ArenaUploadPlan::Ranges => {
-            let grew = total_len > old_len;
-            arena.uploaded_len = total_len;
-            let mut gpu_ranges = std::mem::take(&mut arena.dirty_scratch);
-            gpu_ranges.clear();
-            gpu_ranges.extend(
-                dirty
-                    .iter()
-                    .copied()
-                    .map(|range| gpu_dirty_range(range, reserved)),
-            );
-            if grew {
-                gpu_ranges.push((old_len, total_len));
-            }
-            coalesce_gpu_dirty(&mut gpu_ranges);
-            for &(start, end) in gpu_ranges.iter() {
-                let Some((start, end)) = aligned_backing_span(start, end, total_len) else {
-                    continue;
-                };
-                upload_calls = upload_calls.saturating_add(1);
-                uploaded_bytes = uploaded_bytes.saturating_add(end.saturating_sub(start));
-                write_arena_span(
-                    queue,
-                    arena.buffer.as_ref().expect("constant arena exists"),
-                    identity,
-                    placed,
-                    reserved,
-                    start,
-                    end,
+            ArenaUploadPlan::Ranges => {
+                let grew = total_len > old_len;
+                arena.uploaded_len = total_len;
+                let mut gpu_ranges = std::mem::take(&mut arena.dirty_scratch);
+                gpu_ranges.clear();
+                gpu_ranges.extend(
+                    dirty
+                        .iter()
+                        .copied()
+                        .map(|range| gpu_dirty_range(range, reserved)),
                 );
+                if grew {
+                    gpu_ranges.push((old_len, total_len));
+                }
+                coalesce_gpu_dirty(&mut gpu_ranges);
+                for &(start, end) in gpu_ranges.iter() {
+                    let Some((start, end)) = aligned_backing_span(start, end, total_len) else {
+                        continue;
+                    };
+                    upload_calls = upload_calls.saturating_add(1);
+                    uploaded_bytes = uploaded_bytes.saturating_add(end.saturating_sub(start));
+                    write_arena_span(
+                        queue,
+                        arena.buffer.as_ref().expect("constant arena exists"),
+                        identity,
+                        placed,
+                        reserved,
+                        start,
+                        end,
+                    );
+                }
+                gpu_ranges.clear();
+                arena.dirty_scratch = gpu_ranges;
             }
-            gpu_ranges.clear();
-            arena.dirty_scratch = gpu_ranges;
         }
+        perf::counter!("arena_uploaded_bytes", "iw4l.render", uploaded_bytes as f64);
+        perf::counter!("arena_upload_calls", "iw4l.render", f64::from(upload_calls));
+        if arena.bind_group.is_none()
+            && let Some(layout_source) = layout
+        {
+            let bgl = registry.bind_group_layout(device, layout_source);
+            let bind_group = device.create_bind_group(
+                "iw4_exact_constant_arena",
+                &bgl,
+                &[BindGroupEntry {
+                    binding: 0,
+                    resource: BindingResource::Buffer(BufferBinding {
+                        buffer: arena.buffer.as_ref().expect("constant arena exists"),
+                        offset: 0,
+                        size: None,
+                    }),
+                }],
+            );
+            arena.bind_group = Some(bind_group);
+        }
+        total_len
     }
-    perf::Counter::CounterArenaUploadedBytes.emit(uploaded_bytes as f64);
-    perf::Counter::CounterArenaUploadCalls.emit(f64::from(upload_calls));
-    if arena.bind_group.is_none()
-        && let Some(layout_source) = layout
-    {
-        let bgl = registry.bind_group_layout(device, layout_source);
-        let bind_group = device.create_bind_group(
-            "iw4_exact_constant_arena",
-            &bgl,
-            &[BindGroupEntry {
-                binding: 0,
-                resource: BindingResource::Buffer(BufferBinding {
-                    buffer: arena.buffer.as_ref().expect("constant arena exists"),
-                    offset: 0,
-                    size: None,
-                }),
-            }],
-        );
-        arena.bind_group = Some(bind_group);
-    }
-    (share_n, total_len, 0)
 }

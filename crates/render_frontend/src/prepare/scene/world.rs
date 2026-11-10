@@ -34,6 +34,7 @@ pub struct WorldPortal {
 
 #[derive(Clone, Debug)]
 pub struct WorldDpvs {
+    pub generated_surfaces: Vec<asset_world::GeneratedSurfaceCells>,
     pub planes: Vec<CPlane>,
     pub nodes: Vec<u16>,
     pub cell_count: usize,
@@ -67,6 +68,28 @@ pub struct WorldDpvs {
     pub emissive_surfs_end: u32,
 }
 
+impl dpvs_iw4::PortalGraph for WorldDpvs {
+    fn cell_count(&self) -> usize {
+        self.cell_count
+    }
+
+    fn cell_portals(&self, cell: usize) -> impl Iterator<Item = dpvs_iw4::PortalView<'_>> {
+        self.portals_per_cell
+            .get(cell)
+            .into_iter()
+            .flatten()
+            .map(|p| dpvs_iw4::PortalView {
+                plane: p.plane,
+                neighbor: p.neighbor,
+                vertices: self
+                    .portal_verts
+                    .get(p.vert_start..p.vert_start + p.vert_count)
+                    .unwrap_or(&[]),
+                hull_axis: p.hull_axis,
+            })
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WorldDrawItem {
     pub key: u64,
@@ -81,6 +104,14 @@ pub struct WorldDrawItem {
 pub enum WorldDrawItemKind {
     Bsp(asset_world::CameraRangeKind),
     BModel,
+}
+
+#[derive(Debug, Default)]
+pub struct WorldDrawItems {
+    pub items: Vec<WorldDrawItem>,
+    pub(crate) bsp_run_scratch: Vec<dpvs_iw4::BspDrawSurfRun<asset_world::CameraRangeKind>>,
+    pub(crate) content_id: u64,
+    pub(crate) g0_surfs: Vec<u16>,
 }
 
 #[derive(Debug)]
@@ -118,13 +149,7 @@ pub struct WorldCull {
 
     pub surface_vis: Vec<u8>,
 
-    pub draw_items: Vec<WorldDrawItem>,
-
-    pub bsp_run_scratch: Vec<dpvs_iw4::BspDrawSurfRun<asset_world::CameraRangeKind>>,
-
-    pub draw_items_id: u64,
-
-    pub g0_surfs: Vec<u16>,
+    pub draws: WorldDrawItems,
 
     pub static_model_entities: Vec<Option<Entity>>,
     pub static_model_cull_dists: Vec<u16>,
@@ -134,6 +159,41 @@ pub struct WorldCull {
     pub cell_vis: Vec<u32>,
 
     pub cell_vis_all: bool,
+    pub cell_vis_world: usize,
+
+    /// The other maps of a projectile_flight atlas, appended after this world's own
+    /// surfaces and static models (`asset_world::AtlasLayer`).
+    pub atlas_layers: Vec<WorldAtlasLayer>,
+}
+
+/// The actual visibility work for an unfolded portal view, also retained for
+/// clip/dump diagnostics so missing geometry can be explained from evidence.
+#[derive(Clone, Debug)]
+pub struct PortalVisibility {
+    pub view: usize,
+    pub depth: u8,
+    pub max_range: Option<f32>,
+    pub world: usize,
+    pub eye: [f32; 3],
+    pub seed: [f32; 3],
+    pub cell: Option<usize>,
+    pub planes: Vec<[f32; 4]>,
+    pub visible_cells: Vec<usize>,
+    pub visible_surfaces: usize,
+    pub visible_smodels: usize,
+}
+
+/// One appended atlas world: its DPVS, numbered from its own bases.
+#[derive(Debug)]
+pub struct WorldAtlasLayer {
+    pub world: usize,
+    pub bmodel_bounds: Vec<(u16, Bounds)>,
+    pub frame: asset_core::world_frame::WorldFrame,
+    pub surface_base: usize,
+    pub surface_count: usize,
+    pub smodel_base: usize,
+    pub dpvs: WorldDpvs,
+    pub light_grid: Option<asset_model::OwnedLightGrid>,
 }
 
 #[derive(Clone, Debug)]
@@ -151,8 +211,12 @@ pub const SMODEL_LIGHTING_MAX_CLIENT_VIEWS: u32 = 1;
 
 #[derive(Resource, Default)]
 pub struct WorldScene {
+    pub space: asset_core::world_frame::SceneSpace,
     pub readiness: frame::WorldReadiness,
-    pub sky_model: Option<WorldStaticModelMesh>,
+    /// The sky models to draw around the eye, the match's first; the world
+    /// of each is in `sky_worlds`.
+    pub sky_models: Vec<WorldStaticModelMesh>,
+    pub sky_worlds: Vec<usize>,
     pub batches: Vec<WorldBatchGeometry>,
 
     pub runtime_material_catalog: std::sync::Arc<crate::assemble::drawsurf::RuntimeMaterialCatalog>,
@@ -204,6 +268,17 @@ pub struct WorldScene {
 
     pub light_grid: Option<asset_model::OwnedLightGrid>,
     pub(crate) material_world: asset_material::MaterialWorldBindingInputs,
+    /// The atlas layers' own world inputs, by layer.
+    pub(crate) material_layers: Vec<asset_material::MaterialLayerBindingInputs>,
+    pub world_fogs: Vec<Option<asset_world::ExpFog>>,
+    pub world_bounds_by_world: Vec<Option<[f32; 6]>>,
+    /// The doors between the atlas worlds and how many worlds there are,
+    /// counting this map; no doors without an atlas.
+    pub(crate) portal_pairs: Vec<render_frame::PortalPair>,
+    pub(crate) portal_worlds: usize,
+    pub portal_visibility: Vec<PortalVisibility>,
+    pub(crate) portal_view: Option<render_frame::PortalView>,
+    pub(crate) portal_surfaces: std::sync::Arc<[render_frame::PortalSurfaces]>,
 
     pub model_lighting_image: Option<Handle<Image>>,
     pub model_lighting_dims: Option<lighting_iw4::ModelLightingAtlasDims>,
@@ -313,7 +388,11 @@ pub struct WorldScene {
     pub asset_ref: asset_material::AssetRefDumpCensus,
 }
 
-impl WorldScene {}
+impl WorldScene {
+    pub fn material_environments(&self) -> &[asset_material::MaterialLayerBindingInputs] {
+        &self.material_layers
+    }
+}
 
 #[derive(Debug)]
 pub struct WorldLightmap {
@@ -473,30 +552,6 @@ pub(crate) fn transform_from_gfx_placement(origin: [f32; 3], quat: [f32; 4]) -> 
     }
 }
 
-fn bmodel_axis_from_angles(angles: [f32; 3]) -> [[f32; 3]; 3] {
-    const DEG2RAD: f32 = 0.01745329238474369;
-    let yaw = angles[1] * DEG2RAD;
-    let pitch = angles[0] * DEG2RAD;
-    let roll = angles[2] * DEG2RAD;
-    let (sy, cy) = yaw.sin_cos();
-    let (sp, cp) = pitch.sin_cos();
-    let (sr, cr) = roll.sin_cos();
-    [
-        [cp * cy, cp * sy, -sp],
-        [sr * sp * cy + -sy * cr, sr * sp * sy + cr * cy, sr * cp],
-        [cr * sp * cy + sr * sy, cr * sp * sy + -sr * cy, cr * cp],
-    ]
-}
-
-fn mat4_from_origin_axis(origin: [f32; 3], axis: [[f32; 3]; 3]) -> Mat4 {
-    Mat4::from_cols(
-        Vec4::new(axis[0][0], axis[0][1], axis[0][2], 0.0),
-        Vec4::new(axis[1][0], axis[1][1], axis[1][2], 0.0),
-        Vec4::new(axis[2][0], axis[2][1], axis[2][2], 0.0),
-        Vec4::new(origin[0], origin[1], origin[2], 1.0),
-    )
-}
-
 pub(crate) fn authored_bmodel_world_from_local(
     model_n: usize,
     script_brushes: &[asset_world::ScriptBrushModelPlacement],
@@ -508,10 +563,7 @@ pub(crate) fn authored_bmodel_world_from_local(
         if index == 0 || index >= model_n || slots[index].is_some() {
             continue;
         }
-        slots[index] = Some(mat4_from_origin_axis(
-            brush.origin,
-            bmodel_axis_from_angles(brush.angles),
-        ));
+        slots[index] = Some(asset_world::brush_model_pose(brush.origin, brush.angles));
     }
     for def in dynent_brushes {
         let index = usize::from(def.brush_model);
@@ -681,7 +733,8 @@ impl WorldScene {
         let min = Vec3::from_array(min);
         let max = Vec3::from_array(max);
         WorldScene {
-            sky_model: None,
+            sky_models: Vec::new(),
+            sky_worlds: Vec::new(),
             batches: vec![WorldBatchGeometry {
                 mesh,
                 packed_indices: Vec::new(),
@@ -721,10 +774,19 @@ impl WorldScene {
             light_grid: None,
             material_world: super::world_bindings::prepare(
                 None,
-                asset_model::LightGridColorEncoding::Rgb8,
+                &asset_model::RGB8_LIGHT_GRID_CODEC,
                 None,
                 None,
             ),
+            material_layers: Vec::new(),
+            world_fogs: Vec::new(),
+            world_bounds_by_world: Vec::new(),
+            space: Default::default(),
+            portal_pairs: Vec::new(),
+            portal_worlds: 1,
+            portal_visibility: Vec::new(),
+            portal_view: None,
+            portal_surfaces: Default::default(),
             model_lighting_image: None,
             model_lighting_dims: None,
             center: (min + max) * 0.5,
@@ -799,7 +861,8 @@ impl WorldScene {
         let min = Vec3::from_array(min);
         let max = Vec3::from_array(max);
         let mut scene = WorldScene {
-            sky_model: None,
+            sky_models: Vec::new(),
+            sky_worlds: Vec::new(),
             batches: draw.batches,
             runtime_material_catalog: std::sync::Arc::new(
                 crate::assemble::drawsurf::RuntimeMaterialCatalog::default(),
@@ -830,10 +893,19 @@ impl WorldScene {
             light_grid: None,
             material_world: super::world_bindings::prepare(
                 None,
-                asset_model::LightGridColorEncoding::Rgb8,
+                &asset_model::RGB8_LIGHT_GRID_CODEC,
                 None,
                 None,
             ),
+            material_layers: Vec::new(),
+            world_fogs: Vec::new(),
+            world_bounds_by_world: Vec::new(),
+            space: Default::default(),
+            portal_pairs: Vec::new(),
+            portal_worlds: 1,
+            portal_visibility: Vec::new(),
+            portal_view: None,
+            portal_surfaces: Default::default(),
             model_lighting_image: None,
             model_lighting_dims: None,
             center: (min + max) * 0.5,
@@ -926,15 +998,14 @@ impl WorldScene {
             batch_count,
             batch_lightmapped,
             surface_vis: Vec::new(),
-            draw_items: Vec::new(),
-            bsp_run_scratch: Vec::new(),
-            draw_items_id: 0,
-            g0_surfs: Vec::new(),
+            draws: WorldDrawItems::default(),
             static_model_entities: Vec::new(),
             static_model_cull_dists: Vec::new(),
             smodel_vis: Vec::new(),
             cell_vis: Vec::new(),
             cell_vis_all: false,
+            cell_vis_world: 0,
+            atlas_layers: Vec::new(),
         });
 
         scene.retained_positions = draw.positions;
@@ -996,6 +1067,21 @@ impl WorldScene {
                 cells.planes.clone_from(&cull.dpvs.planes);
                 cells.nodes.clone_from(&cull.dpvs.nodes);
                 cells.cell_count = cull.dpvs.cell_count;
+                cells.atlas = cull
+                    .atlas_layers
+                    .iter()
+                    .map(|l| {
+                        (
+                            l.world,
+                            render_scene::WorldDpvsCells {
+                                planes: l.dpvs.planes.clone(),
+                                nodes: l.dpvs.nodes.clone(),
+                                cell_count: l.dpvs.cell_count,
+                                atlas: Vec::new(),
+                            },
+                        )
+                    })
+                    .collect();
             }
             None => *cells = render_scene::WorldDpvsCells::default(),
         }
@@ -1080,11 +1166,78 @@ impl WorldScene {
     }
 }
 
+#[derive(Debug)]
+pub enum WorldSceneBuildError {
+    SurfaceMaterial(asset_world::SurfaceMaterialStampError),
+    MaterialCompiler(asset_material::material_compile::compiler::MaterialCompileError),
+}
+impl std::fmt::Display for WorldSceneBuildError {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SurfaceMaterial(error) => std::fmt::Display::fmt(error, output),
+            Self::MaterialCompiler(error) => std::fmt::Display::fmt(error, output),
+        }
+    }
+}
+impl From<asset_world::SurfaceMaterialStampError> for WorldSceneBuildError {
+    fn from(error: asset_world::SurfaceMaterialStampError) -> Self {
+        Self::SurfaceMaterial(error)
+    }
+}
+impl From<asset_material::material_compile::compiler::MaterialCompileError>
+    for WorldSceneBuildError
+{
+    fn from(error: asset_material::material_compile::compiler::MaterialCompileError) -> Self {
+        Self::MaterialCompiler(error)
+    }
+}
+
+fn world_dpvs(dpvs: asset_world::DpvsWorldData) -> WorldDpvs {
+    WorldDpvs {
+        generated_surfaces: dpvs.generated_surfaces,
+        planes: dpvs.planes,
+        nodes: dpvs.nodes,
+        cell_count: dpvs.cell_count,
+        cell_roots: dpvs.cell_roots,
+        aabb_trees: dpvs.aabb_trees,
+        aabb_smodel_indices: dpvs.aabb_smodel_indices,
+        sorted_surf_index: dpvs.sorted_surf_index,
+        static_surface_count: dpvs.static_surface_count,
+        static_surface_count_no_decal: dpvs.static_surface_count_no_decal,
+        surface_bounds: dpvs.surface_bounds,
+        smodel_bounds: dpvs.smodel_bounds,
+        portal_verts: dpvs.portal_verts,
+        cell_reflection_probes: dpvs.cell_reflection_probes,
+        sky_start_surfs: dpvs.sky_start_surfs,
+        lit_opaque_begin: dpvs.lit_opaque_begin,
+        lit_opaque_end: dpvs.lit_opaque_end,
+        camera_ranges: dpvs.camera_ranges,
+        emissive_surfs_begin: dpvs.emissive_surfs_begin,
+        emissive_surfs_end: dpvs.emissive_surfs_end,
+        portals_per_cell: dpvs
+            .portals_per_cell
+            .into_iter()
+            .map(|cell| {
+                cell.into_iter()
+                    .map(|p| WorldPortal {
+                        plane: p.plane,
+                        neighbor: p.neighbor,
+                        vert_start: p.vert_start,
+                        vert_count: p.vert_count,
+                        hull_axis: p.hull_axis,
+                    })
+                    .collect()
+            })
+            .collect(),
+        cell_caster_bits: Vec::new(),
+    }
+}
+
 pub fn world_scene_from_draw(
     world: assets::PreparedWorld,
     materials: assets::MatchMaterials,
     installed_owners: &[(asset_world::ScriptModelId, sim::AuthorityModelOwner)],
-) -> Result<WorldScene, asset_world::SurfaceMaterialStampError> {
+) -> Result<WorldScene, WorldSceneBuildError> {
     let dynamic_light = world.dynamic_light;
     let fx_glass = world.fx_glass;
     let world_bounds = world.world_bounds;
@@ -1115,18 +1268,20 @@ pub fn world_scene_from_draw(
         products_id,
     } = materials;
     let Some(mut draw) = world.draw else {
-        let mut empty = WorldScene::default();
-        empty.sun_sample_size_near = world.policy.sun_sample_size_near;
-        empty.common_profile_id = common_profile_id;
-        empty.products_id = products_id;
-        empty.fx_glass = fx_glass;
-        empty.script_brush_gameobjects = script_brush_gameobjects;
-        empty.script_brush_exploders = script_brush_exploders;
-        empty.script_brush_targetnames = script_brush_targetnames;
-        empty.script_brush_models = script_brush_models;
-        empty.dyn_ent_instances = dyn_ent_instances;
-        empty.dyn_ent_brush_n = dyn_ent_brush_n;
-        empty.dyn_ent_brushes = world_dyn_ent_brushes(&world.dyn_ents.brushes, &[], &[]);
+        let empty = WorldScene {
+            sun_sample_size_near: world.policy.sun_sample_size_near,
+            common_profile_id,
+            products_id,
+            fx_glass,
+            script_brush_gameobjects,
+            script_brush_exploders,
+            script_brush_targetnames,
+            script_brush_models,
+            dyn_ent_instances,
+            dyn_ent_brush_n,
+            dyn_ent_brushes: world_dyn_ent_brushes(&world.dyn_ents.brushes, &[], &[]),
+            ..WorldScene::default()
+        };
         return Ok(empty);
     };
     let dyn_ent_brushes = world_dyn_ent_brushes(
@@ -1140,7 +1295,7 @@ pub fn world_scene_from_draw(
         .iter()
         .map(|probe| probe.origin)
         .collect();
-    let runtime_material_catalog = asset_material::compile_material_catalog(&global_materials);
+    let runtime_material_catalog = asset_material::compile_material_catalog(&global_materials)?;
     let asset_ref = asset_material::AssetRefDumpCensus::from_catalog(&global_materials);
 
     let exact_material_images = global_materials
@@ -1323,44 +1478,79 @@ pub fn world_scene_from_draw(
         Err(_) => Vec::new(),
     };
 
-    let mut dpvs = WorldDpvs {
-        planes: draw.dpvs.planes,
-        nodes: draw.dpvs.nodes,
-        cell_count: draw.dpvs.cell_count,
-        cell_roots: draw.dpvs.cell_roots,
-        aabb_trees: draw.dpvs.aabb_trees,
-        aabb_smodel_indices: draw.dpvs.aabb_smodel_indices,
-        sorted_surf_index: draw.dpvs.sorted_surf_index,
-        static_surface_count: draw.dpvs.static_surface_count,
-        static_surface_count_no_decal: draw.dpvs.static_surface_count_no_decal,
-        surface_bounds: draw.dpvs.surface_bounds,
-        smodel_bounds: draw.dpvs.smodel_bounds,
-        portal_verts: draw.dpvs.portal_verts,
-        cell_reflection_probes: draw.dpvs.cell_reflection_probes,
-        sky_start_surfs: draw.dpvs.sky_start_surfs,
-        lit_opaque_begin: draw.dpvs.lit_opaque_begin,
-        lit_opaque_end: draw.dpvs.lit_opaque_end,
-        camera_ranges: draw.dpvs.camera_ranges,
-        emissive_surfs_begin: draw.dpvs.emissive_surfs_begin,
-        emissive_surfs_end: draw.dpvs.emissive_surfs_end,
-        portals_per_cell: draw
-            .dpvs
-            .portals_per_cell
-            .into_iter()
-            .map(|cell| {
-                cell.into_iter()
-                    .map(|p| WorldPortal {
-                        plane: p.plane,
-                        neighbor: p.neighbor,
-                        vert_start: p.vert_start,
-                        vert_count: p.vert_count,
-                        hull_axis: p.hull_axis,
-                    })
-                    .collect()
-            })
-            .collect(),
-        cell_caster_bits: Vec::new(),
+    let scene_space = draw.space.clone();
+    let mut dpvs = world_dpvs(draw.dpvs);
+    let material_layers: Vec<_> = draw
+        .atlas_layers
+        .iter()
+        .map(|layer| {
+            super::world_bindings::layer(asset_core::atlas::WorldId(layer.world), &layer.lighting)
+        })
+        .collect();
+    let portal_worlds = 1 + draw
+        .atlas_layers
+        .iter()
+        .map(|layer| layer.world)
+        .max()
+        .unwrap_or(0);
+    let mut world_fogs = vec![None; portal_worlds];
+    world_fogs[0] = world.exp_fog;
+    let mut world_bounds_by_world = vec![None; portal_worlds];
+    world_bounds_by_world[0] = world.world_bounds;
+    for layer in &draw.atlas_layers {
+        world_fogs[layer.world] = layer.lighting.exp_fog;
+        world_bounds_by_world[layer.world] = layer.lighting.world_bounds;
+    }
+    let door = |door: asset_world::AtlasDoorway, two_sided| render_frame::PortalDoor {
+        two_sided,
+        world: asset_core::atlas::WorldId(door.world),
+        base: door.base,
+        normal: door.normal,
+        width: door.width,
+        height: door.height,
     };
+    let portal_pairs: Vec<render_frame::PortalPair> = draw
+        .atlas_doors
+        .iter()
+        .map(|pair| render_frame::PortalPair {
+            a: door(pair.a, pair.two_sided[0]),
+            b: door(pair.b, pair.two_sided[1]),
+            flip: pair.flip,
+        })
+        .collect();
+    let portal_surfaces: std::sync::Arc<[render_frame::PortalSurfaces]> = draw
+        .atlas_layers
+        .iter()
+        .map(|layer| render_frame::PortalSurfaces {
+            world: layer.world,
+            first: layer.surface_base,
+            end: (layer.surface_base + layer.surface_count),
+        })
+        .collect();
+    let atlas_skies: Vec<(usize, asset_world::ModelMesh)> = draw
+        .atlas_layers
+        .iter_mut()
+        .filter_map(|layer| layer.sky_model.take().map(|sky| (layer.world, sky)))
+        .collect();
+    let atlas_bmodel_poses: Vec<_> = draw
+        .atlas_layers
+        .iter()
+        .flat_map(|l| l.bmodel_poses.iter().copied())
+        .collect();
+    let atlas_layers: Vec<WorldAtlasLayer> = draw
+        .atlas_layers
+        .into_iter()
+        .map(|layer| WorldAtlasLayer {
+            world: layer.world,
+            bmodel_bounds: layer.bmodel_bounds,
+            frame: layer.frame,
+            surface_base: layer.surface_base as usize,
+            surface_count: layer.surface_count as usize,
+            smodel_base: layer.smodel_base as usize,
+            dpvs: world_dpvs(layer.dpvs),
+            light_grid: layer.light_grid,
+        })
+        .collect();
     if let Some(light) = draw
         .primary_lights
         .iter()
@@ -1430,7 +1620,16 @@ pub fn world_scene_from_draw(
                 .collect()
         }),
     };
-    let sky_model = draw.sky_model.take().map(&convert_model);
+    let (mut sky_worlds, mut sky_models): (Vec<usize>, Vec<_>) = draw
+        .sky_model
+        .take()
+        .map(|sky| (0, convert_model(sky)))
+        .into_iter()
+        .unzip();
+    for (world, sky) in atlas_skies {
+        sky_worlds.push(world);
+        sky_models.push(convert_model(sky));
+    }
     let static_model_meshes = world
         .static_model_meshes
         .into_iter()
@@ -1518,11 +1717,16 @@ pub fn world_scene_from_draw(
         map_xmodel_materials.absent,
     );
 
-    let bmodel_world_from_local = authored_bmodel_world_from_local(
+    let mut bmodel_world_from_local = authored_bmodel_world_from_local(
         draw.brush_models.len(),
         &world.script_brush_models,
         &world.dyn_ents.brushes,
     );
+    for (model, pose) in atlas_bmodel_poses {
+        if let Some(slot) = bmodel_world_from_local.get_mut(model) {
+            *slot = pose;
+        }
+    }
     let mut scene = WorldScene::from_draw(
         WorldDrawGeometry {
             batches,
@@ -1578,6 +1782,9 @@ pub fn world_scene_from_draw(
         }),
         policy,
     );
+    if let Some(cull) = scene.cull.as_mut() {
+        cull.atlas_layers = atlas_layers;
+    }
     scene.fx_glass = fx_glass;
     scene.world_bounds = world_bounds;
     scene.sun_sample_size_near = policy.sun_sample_size_near;
@@ -1613,14 +1820,20 @@ pub fn world_scene_from_draw(
         world
             .light_grid
             .as_ref()
-            .map_or(asset_model::LightGridColorEncoding::Rgb8, |grid| {
-                grid.color_encoding
-            }),
+            .map_or(&asset_model::RGB8_LIGHT_GRID_CODEC, |grid| grid.codec),
         draw.t6_exposure,
         draw.sky_dynamic_intensity,
     );
+    scene.material_layers = material_layers;
+    scene.world_fogs = world_fogs;
+    scene.world_bounds_by_world = world_bounds_by_world;
+    scene.space = scene_space;
+    scene.portal_pairs = portal_pairs;
+    scene.portal_worlds = portal_worlds;
+    scene.portal_surfaces = portal_surfaces;
     scene.light_grid = world.light_grid;
-    scene.sky_model = sky_model;
+    scene.sky_models = sky_models;
+    scene.sky_worlds = sky_worlds;
     scene.exp_fog = world.exp_fog;
     scene.t6_vision = world.t6_vision;
     scene.t6_visions = world.t6_visions;
@@ -1719,7 +1932,7 @@ pub fn world_scene_from_draw(
     Ok(scene)
 }
 
-fn map_dir_primary_light(light: &asset_world::WorldPrimaryLight) -> MapDirPrimaryLight {
+pub(super) fn map_dir_primary_light(light: &asset_world::WorldPrimaryLight) -> MapDirPrimaryLight {
     MapDirPrimaryLight {
         light_type: light.light_type,
         direction: light.direction,

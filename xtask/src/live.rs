@@ -201,8 +201,7 @@ fn rust_after_torn_claim(rows: &[Row]) -> Claim {
     );
     let rust = rows
         .iter()
-        .filter(|r| r.name == "match_installed" && r.zone.as_deref() == Some("mp_rust"))
-        .last();
+        .rfind(|r| r.name == "match_installed" && r.zone.as_deref() == Some("mp_rust"));
     let Some(rust) = rust else {
         claim.check(false, "no match_installed zone=mp_rust");
         return claim;
@@ -225,8 +224,7 @@ fn world_ready_after_rust_claim(rows: &[Row]) -> Claim {
     let mut claim = Claim::new("L6", "wait world: WorldScene.spawned after rust install");
     let Some(rust) = rows
         .iter()
-        .filter(|r| r.name == "match_installed" && r.zone.as_deref() == Some("mp_rust"))
-        .last()
+        .rfind(|r| r.name == "match_installed" && r.zone.as_deref() == Some("mp_rust"))
     else {
         claim.check(false, "no rust install to order world_ready against");
         return claim;
@@ -249,8 +247,7 @@ fn rust_ambient_not_desert_claim(rows: &[Row]) -> Claim {
     let mut claim = Claim::new("L7", "ambient boot is not leftover boneyard desert");
     let Some(rust) = rows
         .iter()
-        .filter(|r| r.name == "match_installed" && r.zone.as_deref() == Some("mp_rust"))
-        .last()
+        .rfind(|r| r.name == "match_installed" && r.zone.as_deref() == Some("mp_rust"))
     else {
         claim.check(false, "no rust install");
         return claim;

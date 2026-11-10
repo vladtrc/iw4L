@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fmt::Write;
 
-use frame::{AdmissionKey, LocalLoadKey, MatchKey};
+use frame::{AdmissionKey, MatchKey};
 use master_protocol::{AdmissionFailure, MemberId};
 
 use crate::transport::bootstrap::epoch_applies;
@@ -27,25 +27,45 @@ fn dash_u32(value: Option<u32>) -> String {
         .unwrap_or_else(|| "-".into())
 }
 
-pub(crate) fn format_session_transition(
+#[derive(Clone, Copy)]
+struct SessionTraceIdentity {
     session_id: [u8; 16],
     incarnation: Option<u64>,
     epoch: u32,
-    local_load_id: Option<u64>,
     member_id: Option<[u8; 16]>,
     connection_id: Option<u64>,
     bootstrap_id: Option<u32>,
-    stage_before: &str,
-    event: &str,
-    stage_after: &str,
+}
+
+struct StageTransition<'a> {
+    before: &'a str,
+    event: &'a str,
+    after: &'a str,
+}
+
+fn format_session_transition(
+    identity: SessionTraceIdentity,
+    stages: StageTransition<'_>,
     elapsed_ms: Option<u64>,
     failure_source: &str,
 ) -> String {
+    let SessionTraceIdentity {
+        session_id,
+        incarnation,
+        epoch,
+        member_id,
+        connection_id,
+        bootstrap_id,
+    } = identity;
+    let StageTransition {
+        before: stage_before,
+        event,
+        after: stage_after,
+    } = stages;
     format!(
-        "session_id={} incarnation={} epoch={epoch} local_load_id={} member_id={} connection_id={} bootstrap_id={} stage_before={stage_before} event={event} stage_after={stage_after} elapsed_ms={} failure_source={failure_source}",
+        "session_id={} incarnation={} epoch={epoch} member_id={} connection_id={} bootstrap_id={} stage_before={stage_before} event={event} stage_after={stage_after} elapsed_ms={} failure_source={failure_source}",
         hex16(&session_id),
         dash_u64(incarnation),
-        dash_u64(local_load_id),
         member_id.map(|id| hex16(&id)).unwrap_or_else(|| "-".into()),
         dash_u64(connection_id),
         dash_u32(bootstrap_id),
@@ -338,8 +358,6 @@ pub struct HostMatchCore {
     authority_ready: bool,
     peers: HashMap<MemberId, PeerAdmission>,
     progress: ProgressWatch,
-    incarnation: u64,
-    local_load_id: Option<u64>,
 }
 
 impl Default for HostMatchCore {
@@ -352,8 +370,6 @@ impl Default for HostMatchCore {
             authority_ready: false,
             peers: HashMap::new(),
             progress: ProgressWatch::default(),
-            incarnation: 0,
-            local_load_id: None,
         }
     }
 }
@@ -495,18 +511,6 @@ impl HostMatchCore {
 
     pub fn peer(&self, member: MemberId) -> Option<&PeerAdmission> {
         self.peers.get(&member)
-    }
-
-    pub fn set_incarnation(&mut self, incarnation: u64) {
-        self.incarnation = incarnation;
-    }
-
-    pub fn set_local_load_id(&mut self, local_load_id: Option<u64>) {
-        self.local_load_id = local_load_id;
-    }
-
-    pub fn local_load_id(&self) -> Option<u64> {
-        self.local_load_id
     }
 
     pub fn apply(&mut self, event: HostMatchEvent) -> HostMatchApply {
@@ -827,16 +831,19 @@ impl HostMatchCore {
             accepted: true,
             effects,
             transition: format_session_transition(
-                self.match_key.session_id,
-                (self.incarnation != 0).then_some(self.incarnation),
-                self.match_key.match_epoch,
-                self.local_load_id,
-                member.map(|id| id.0),
-                connection_id,
-                bootstrap_id,
-                &before,
-                reason,
-                &self.snapshot_label(),
+                SessionTraceIdentity {
+                    session_id: self.match_key.session_id,
+                    incarnation: None,
+                    epoch: self.match_key.match_epoch,
+                    member_id: member.map(|id| id.0),
+                    connection_id,
+                    bootstrap_id,
+                },
+                StageTransition {
+                    before: &before,
+                    event: reason,
+                    after: &self.snapshot_label(),
+                },
                 elapsed_ms,
                 &failure_source,
             ),
@@ -849,7 +856,7 @@ pub struct ClientMatchCore {
     session_open: bool,
     match_key: MatchKey,
     retired_match: Option<MatchKey>,
-    installed: Option<LocalLoadKey>,
+    installed: Option<MatchKey>,
     presentation_ready: bool,
     local_authority_ready: bool,
     adopted: Option<AdmissionKey>,
@@ -884,26 +891,26 @@ impl ClientMatchCore {
         };
     }
 
-    pub fn apply_install(&mut self, load_key: LocalLoadKey) {
-        if !self.session_open || self.retired_match == Some(load_key.match_key) {
+    pub fn apply_install(&mut self, match_key: MatchKey) {
+        if !self.session_open || self.retired_match == Some(match_key) {
             return;
         }
-        let mut load_key = load_key;
-        if load_key.match_key.is_none() && !self.match_key.is_none() {
-            load_key.match_key = self.match_key;
+        let mut match_key = match_key;
+        if match_key.is_none() && !self.match_key.is_none() {
+            match_key = self.match_key;
         }
-        if load_key.match_key != self.match_key && !self.match_key.is_none() {
+        if match_key != self.match_key && !self.match_key.is_none() {
             return;
         }
-        if self.installed != Some(load_key) {
+        if self.installed != Some(match_key) {
             self.presentation_ready = false;
             self.local_authority_ready = false;
         }
-        self.installed = Some(load_key);
+        self.installed = Some(match_key);
     }
 
-    pub fn apply_presentation(&mut self, load_key: LocalLoadKey, ready: bool) {
-        if self.installed == Some(load_key) {
+    pub fn apply_presentation(&mut self, match_key: MatchKey, ready: bool) {
+        if self.installed == Some(match_key) {
             self.presentation_ready = ready;
         }
     }
@@ -919,9 +926,9 @@ impl ClientMatchCore {
         if self.match_key.is_none() {
             self.match_key = match_key;
             if let Some(installed) = &mut self.installed
-                && installed.match_key.is_none()
+                && installed.is_none()
             {
-                installed.match_key = match_key;
+                *installed = match_key;
             }
             return;
         }
@@ -934,13 +941,13 @@ impl ClientMatchCore {
         self.match_key = match_key;
     }
 
-    pub fn apply_local_authority_ready(&mut self, load_key: LocalLoadKey, ready: bool) {
-        if self.installed == Some(load_key) {
+    pub fn apply_local_authority_ready(&mut self, match_key: MatchKey, ready: bool) {
+        if self.installed == Some(match_key) {
             self.local_authority_ready = ready;
         }
     }
 
-    pub fn installed(&self) -> Option<LocalLoadKey> {
+    pub fn installed(&self) -> Option<MatchKey> {
         self.installed
     }
 
@@ -986,7 +993,7 @@ impl ClientMatchCore {
         class_select_allowed(
             self.session_open,
             self.installed
-                .is_some_and(|key| key.belongs_to(self.match_key)),
+                .is_some_and(|key| !self.match_key.is_none() && key == self.match_key),
             self.presentation_ready,
             self.enter.is_some(),
             self.failed.is_some(),
@@ -1027,16 +1034,19 @@ impl ClientMatchCore {
     ) -> String {
         let key = key.or(self.adopted).or(self.enter);
         format_session_transition(
-            self.match_key.session_id,
-            self.installed.map(|load| load.incarnation),
-            self.match_key.match_epoch,
-            self.installed.map(|load| load.local_load_request_id),
-            key.map(|key| key.member_id),
-            key.map(|key| key.connection_id),
-            key.map(|key| key.bootstrap_id),
-            before,
-            event,
-            &self.snapshot_label(),
+            SessionTraceIdentity {
+                session_id: self.match_key.session_id,
+                incarnation: None,
+                epoch: self.match_key.match_epoch,
+                member_id: key.map(|key| key.member_id),
+                connection_id: key.map(|key| key.connection_id),
+                bootstrap_id: key.map(|key| key.bootstrap_id),
+            },
+            StageTransition {
+                before,
+                event,
+                after: &self.snapshot_label(),
+            },
             None,
             self.failed
                 .as_ref()
@@ -1248,16 +1258,19 @@ impl SessionCore {
             enter_bootstrap,
             closed: !self.session_open,
             transition: format_session_transition(
-                self.session_id,
-                (self.incarnation != 0).then_some(self.incarnation),
-                self.view.start_nonce,
-                None,
-                self.local_member.map(|id| id.0),
-                None,
-                enter_bootstrap,
-                &before,
-                event,
-                &after,
+                SessionTraceIdentity {
+                    session_id: self.session_id,
+                    incarnation: (self.incarnation != 0).then_some(self.incarnation),
+                    epoch: self.view.start_nonce,
+                    member_id: self.local_member.map(|id| id.0),
+                    connection_id: None,
+                    bootstrap_id: enter_bootstrap,
+                },
+                StageTransition {
+                    before: &before,
+                    event,
+                    after: &after,
+                },
                 None,
                 failure_source,
             ),

@@ -5,13 +5,11 @@ use assets::PreparedLocalizedStrings;
 use bevy::prelude::*;
 use bevy::ui::{Display, FocusPolicy};
 use hud_iw4::{ExprHost, Operand, ScorebarStatus, scorebar_gametype_loc_key};
-use net::{LocalPresentClient, PresentedSnapshot};
 
 use crate::chrome::{ChromeAssets, ChromeFrame, execute_chrome_menu};
 use crate::draw2d::{Draw2dOp, tessellate_fonts};
-use crate::gaps::{GapCause, HudGap, HudPresentationGaps};
 use crate::gpu_list::{GpuListLatch, HudTessPass, TessJob};
-use crate::images::HudImages;
+use crate::images::HudImageLoader;
 use crate::playercard::UiLocalVars;
 
 #[derive(Component)]
@@ -275,167 +273,180 @@ fn eval_scorebar_status(
     Ok(found)
 }
 
-fn hide(pass: &mut HudTessPass) {
-    pass.scorebar = TessJob::Hide;
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct ScorebarRenderer<'w> {
+    catalog: Option<Res<'w, MenuCatalog>>,
+    strings: Option<Res<'w, PreparedLocalizedStrings>>,
+    session_icons: Option<Res<'w, SessionTeamSettings>>,
+    hud_images: HudImageLoader<'w>,
+    exprs: ResMut<'w, crate::expr_cache::MenuExprCache>,
+    pass: ResMut<'w, HudTessPass>,
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn update_scorebar(
-    surface: Res<crate::surface::Hud2dSurface>,
-    presented: Res<PresentedSnapshot>,
-    local: Res<LocalPresentClient>,
-    catalog: Option<Res<MenuCatalog>>,
-    strings: Option<Res<PreparedLocalizedStrings>>,
-    session_icons: Option<Res<SessionTeamSettings>>,
-    local_vars: Res<UiLocalVars>,
-    mut hud_images: ResMut<HudImages>,
-    mut images: ResMut<Assets<Image>>,
-    mut gaps: ResMut<HudPresentationGaps>,
-    mut pass: ResMut<HudTessPass>,
-    mut exprs: ResMut<crate::expr_cache::MenuExprCache>,
-    view: Option<Res<frame::ViewSubject>>,
-    vis_input: crate::weaponbar::HudPlayerVisInput,
-) {
-    if !surface.is_ready() {
-        return;
-    }
-    if view.is_some_and(|v| v.in_killcam()) {
-        hide(&mut pass);
-        return;
-    }
-    let Some(snap) = presented.snapshot() else {
-        hide(&mut pass);
-        return;
-    };
-    let Some(local_meta) = snap.meta.for_client(local.0) else {
-        hide(&mut pass);
-        return;
-    };
-
-    let mut others = [0i32; 18];
-    let mut n_others = 0usize;
-    for (id, meta) in &snap.meta.clients {
-        if *id == local.0 {
-            continue;
-        }
-        if n_others < others.len() {
-            others[n_others] = meta.score;
-            n_others += 1;
-        }
-    }
-    let now_ms = snap.tick.0.saturating_mul(sim::MATCH_TICK_MS) as i32;
-    let remaining_s = snap.meta.objectives.time_left_ms(now_ms).div_euclid(1000);
-    let sys_ms = milliseconds();
-
-    let mut rank_scores = [0i32; 18];
-    rank_scores[0] = local_meta.score;
-    let mut n_ranks = 1usize;
-    for s in others[..n_others].iter() {
-        if n_ranks < rank_scores.len() {
-            rank_scores[n_ranks] = *s;
-            n_ranks += 1;
-        }
-    }
-    rank_scores[..n_ranks].sort_unstable_by(|a, b| b.cmp(a));
-    let rank1 = rank_scores[0];
-    let rank2 = if n_ranks > 1 { rank_scores[1] } else { 0 };
-
-    let Some(menu) = catalog.as_ref().and_then(|c| c.get("scorebar_hd")) else {
-        gaps.raise(GapCause::ScorebarNoCatalog);
-        hide(&mut pass);
-        return;
-    };
-    let Some(teams) = session_icons.as_deref() else {
-        hide(&mut pass);
-        return;
-    };
-    let host = ScorebarExprHost {
-        ms: sys_ms as i32,
-        player_score: local_meta.score,
-        rank1,
-        rank2,
-        time_left: remaining_s,
-        dvars: snap.meta.script_dvars(local.0),
-        time_limit_minutes: (snap.meta.time_limit_ms / 60_000) as i32,
-        localize: strings.as_ref().map(|s| &s.0),
-        score_limit: snap.meta.score_limit,
-        kind: snap.meta.kind,
-        client_state_team: local_meta.client_state_team,
-        team_scores: snap.meta.objectives.scores,
-        ffa_team: local_meta.ffa_team,
-        menu,
-        icons: &teams.0,
-        local_vars: &local_vars,
-        vis: vis_input.read(&presented, local.0),
-    };
-
-    match eval_scorebar_status(menu, &host, &mut exprs) {
-        Ok(_) => {
-            gaps.clear(HudGap::MenuVisExp);
-        }
-        Err((item, err)) => {
-            gaps.raise(GapCause::VisExpUneval {
-                menu: "scorebar_hd".to_owned(),
-                item,
-                err: err.clone(),
-            });
-        }
+impl ScorebarRenderer<'_> {
+    fn hide(&mut self) {
+        self.pass.scorebar = TessJob::Hide;
     }
 
-    let ChromeFrame {
-        mut list,
-        coverage: _,
-        vis_errors,
-    } = execute_chrome_menu(
-        menu,
-        &host,
-        &surface,
-        ChromeAssets {
-            catalog: catalog.as_deref(),
-            localize: strings.as_ref().map(|s| &s.0),
-        },
-        &mut exprs,
-    );
-    for (item, err) in vis_errors {
-        gaps.raise(GapCause::MenuExpression {
-            menu: menu.name.clone(),
-            item,
-            err,
-        });
-    }
-    let mut fonts: HashMap<String, &asset_game::FontDef> = HashMap::new();
-    for cmd in &mut list.cmds {
-        if matches!(
-            cmd.material_namespace,
-            asset_core::AssetNamespace::T5 | asset_core::AssetNamespace::T6
-        ) && let Some(icon) = [teams.0.allies.as_ref(), teams.0.axis.as_ref()]
-            .into_iter()
-            .flatten()
-            .find(|icon| {
-                icon.namespace == cmd.material_namespace
-                    && cmd.material.strip_suffix("_fade") == Some(icon.name.as_str())
-            })
-        {
-            cmd.material.clone_from(&icon.name);
+    fn update(
+        &mut self,
+        surface: Res<crate::surface::Hud2dSurface>,
+        presentation: net::LocalPresentation,
+        local_vars: Res<UiLocalVars>,
+        view: Option<Res<frame::ViewSubject>>,
+        vis_input: crate::weaponbar::HudPlayerVisInput,
+    ) {
+        if !surface.is_ready() {
+            return;
         }
-        let _ = hud_images.get(cmd.material_namespace, &cmd.material, &mut images);
-    }
-    if let Some(cat) = catalog.as_deref() {
-        for cmd in &list.cmds {
-            if let Draw2dOp::TextRun { font, .. } = &cmd.op {
-                if fonts.contains_key(font) {
-                    continue;
-                }
-                if let Some(def) = cat.font(font) {
-                    fonts.insert(font.clone(), def);
+        if view.is_some_and(|v| v.in_killcam()) {
+            self.hide();
+            return;
+        }
+        let Some(snap) = presentation.snapshot() else {
+            self.hide();
+            return;
+        };
+        if snap.meta.objectives.campaign_mode {
+            self.hide();
+            return;
+        }
+        let Some(local_meta) = snap.meta.for_client(presentation.client_id()) else {
+            self.hide();
+            return;
+        };
+
+        let mut others = [0i32; 18];
+        let mut n_others = 0usize;
+        for (id, meta) in &snap.meta.clients {
+            if *id == presentation.client_id() {
+                continue;
+            }
+            if n_others < others.len() {
+                others[n_others] = meta.score;
+                n_others += 1;
+            }
+        }
+        let now_ms = snap.tick.0.saturating_mul(sim::MATCH_TICK_MS) as i32;
+        let remaining_s = snap.meta.objectives.time_left_ms(now_ms).div_euclid(1000);
+        let sys_ms = milliseconds();
+
+        let mut rank_scores = [0i32; 18];
+        rank_scores[0] = local_meta.score;
+        let mut n_ranks = 1usize;
+        for s in others[..n_others].iter() {
+            if n_ranks < rank_scores.len() {
+                rank_scores[n_ranks] = *s;
+                n_ranks += 1;
+            }
+        }
+        rank_scores[..n_ranks].sort_unstable_by(|a, b| b.cmp(a));
+        let rank1 = rank_scores[0];
+        let rank2 = if n_ranks > 1 { rank_scores[1] } else { 0 };
+
+        let Some(menu) = self.catalog.as_ref().and_then(|c| c.get("scorebar_hd")) else {
+            diag::warn_once!(Ui, "MenuCatalog is not loaded; scorebar visExp cannot run");
+            self.hide();
+            return;
+        };
+        let Some(teams) = self.session_icons.as_deref() else {
+            self.hide();
+            return;
+        };
+        let host = ScorebarExprHost {
+            ms: sys_ms as i32,
+            player_score: local_meta.score,
+            rank1,
+            rank2,
+            time_left: remaining_s,
+            dvars: snap.meta.script_dvars(presentation.client_id()),
+            time_limit_minutes: (snap.meta.time_limit_ms / 60_000) as i32,
+            localize: self.strings.as_ref().map(|s| &s.0),
+            score_limit: snap.meta.score_limit,
+            kind: snap.meta.kind,
+            client_state_team: local_meta.client_state_team,
+            team_scores: snap.meta.objectives.scores,
+            ffa_team: local_meta.ffa_team,
+            menu,
+            icons: &teams.0,
+            local_vars: &local_vars,
+            vis: vis_input.read(&presentation.presented, presentation.client_id()),
+        };
+
+        match eval_scorebar_status(menu, &host, &mut self.exprs) {
+            Ok(_) => {}
+            Err((item, err)) => {
+                diag::warn_once!(
+                    Ui,
+                    "{menu}[{item}] visExp: {err}",
+                    menu = "scorebar_hd".to_owned(),
+                    err = err.clone()
+                );
+            }
+        }
+
+        let ChromeFrame {
+            mut list,
+            coverage: _,
+            vis_errors,
+        } = execute_chrome_menu(
+            menu,
+            &host,
+            &surface,
+            ChromeAssets {
+                catalog: self.catalog.as_deref(),
+                localize: self.strings.as_ref().map(|s| &s.0),
+            },
+            &mut self.exprs,
+        );
+        for (item, err) in vis_errors {
+            diag::warn_once!(
+                Ui,
+                "{menu}[{item}] expression: {err}",
+                menu = menu.name.clone()
+            );
+        }
+        let mut fonts: HashMap<String, &asset_game::FontDef> = HashMap::new();
+        for cmd in &mut list.cmds {
+            if let Some(icon) = [teams.0.allies.as_ref(), teams.0.axis.as_ref()]
+                .into_iter()
+                .flatten()
+                .find(|icon| {
+                    asset_game::team_icon_alias(cmd.material_namespace, &cmd.material, icon)
+                })
+            {
+                cmd.material.clone_from(&icon.name);
+            }
+            let _ = self.hud_images.load(cmd.material_namespace, &cmd.material);
+        }
+        if let Some(cat) = self.catalog.as_deref() {
+            for cmd in &list.cmds {
+                if let Draw2dOp::TextRun { font, .. } = &cmd.op {
+                    if fonts.contains_key(font) {
+                        continue;
+                    }
+                    if let Some(def) = cat.font(font) {
+                        fonts.insert(font.clone(), def);
+                    }
                 }
             }
         }
+        let (quads, _) = tessellate_fonts(&list, &fonts);
+        if quads.is_empty() {
+            self.hide();
+            return;
+        }
+        self.pass.scorebar = TessJob::Quads(quads);
     }
-    let (quads, _) = tessellate_fonts(&list, &fonts);
-    if quads.is_empty() {
-        hide(&mut pass);
-        return;
-    }
-    pass.scorebar = TessJob::Quads(quads);
+}
+
+pub(crate) fn update_scorebar(
+    surface: Res<crate::surface::Hud2dSurface>,
+    presentation: net::LocalPresentation,
+    local_vars: Res<UiLocalVars>,
+    view: Option<Res<frame::ViewSubject>>,
+    vis_input: crate::weaponbar::HudPlayerVisInput,
+    mut renderer: ScorebarRenderer,
+) {
+    renderer.update(surface, presentation, local_vars, view, vis_input);
 }

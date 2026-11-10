@@ -11,7 +11,18 @@ use super::events::{EntityEventRecord, EventRecord, PelletFxRecord, SimEvent};
 use super::loadout::LoadoutSpec;
 
 #[derive(Clone, Debug, Default, PartialEq)]
+pub struct ActorOverlay {
+    pub entity: u16,
+    pub name: String,
+    pub description: String,
+    pub hostile: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ClientSnapshotMeta {
+    pub viewmodel: Option<String>,
+    pub actor_overlay: Option<ActorOverlay>,
+    pub weapon_carry: crate::WeaponCarry,
     pub shield: Option<crate::ShieldAttachment>,
     pub shield_collision: Option<crate::ShieldCarrierCollision>,
     pub controls: super::ScriptControls,
@@ -20,15 +31,14 @@ pub struct ClientSnapshotMeta {
     pub lifecycle: ClientLifecycle,
     pub god_mode: bool,
     pub loadout: Option<LoadoutSpec>,
+    pub equipped_class: Option<crate::ClassId>,
+    pub class_refusal: Option<(crate::ClassId, crate::ClassRejectReason)>,
+
     pub life_sequence: LifeSequence,
 
     pub item_use_spawn_ms: i32,
     pub item_use_entity: Option<crate::EntityRef>,
     pub item_use_press_ms: i32,
-
-    pub ammo_clip: i32,
-
-    pub ammo_stock: i32,
 
     pub score: i32,
     pub kills: i32,
@@ -38,17 +48,6 @@ pub struct ClientSnapshotMeta {
     pub radar_blocked: bool,
     pub remote_missile: Option<RemoteMissile>,
     pub linked_weapon_view: Option<LinkedWeaponView>,
-
-    pub ammo_by_weapon: Vec<(u32, i32, i32)>,
-
-    pub taped_mag_spent: Vec<u32>,
-
-    pub weapon_shot_count: u8,
-    pub burst_latch: bool,
-    pub burst_latch_secondary: bool,
-    pub rechamber_pending: bool,
-    pub rechamber_pending_secondary: bool,
-    pub pending_brass: [Option<crate::PendingBrass>; 2],
 
     pub dead_since_tick: Option<u32>,
 
@@ -87,6 +86,7 @@ pub struct ClientSnapshotMeta {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SnapshotMeta {
+    pub campaign_dvars: Vec<(String, String)>,
     pub objectives: crate::ObjectiveMatch,
     pub phase: MatchPhase,
     pub round_serial: u32,
@@ -115,8 +115,6 @@ pub struct SnapshotMeta {
 
     pub hud_strings: crate::HudStringCsOccupied,
 
-    pub rng: RngDebugMeta,
-
     pub world_objects: WorldObjectSnapshot,
 
     pub area_entities: Option<crate::AreaEntityWorldSnapshot>,
@@ -130,7 +128,9 @@ pub struct SnapshotMeta {
 
     pub script_movers: Vec<crate::ScriptMoverGentity>,
 
-    pub entity_kernel: crate::EntityKernelSnapshot,
+    pub eq_disabled_entities: Vec<u16>,
+
+    pub generations: Vec<u32>,
 
     pub corpses: crate::PlayerCorpsePool,
 
@@ -146,10 +146,15 @@ pub struct DroppedItemAmmo {
     pub clip_l: i32,
     pub stock: i32,
     pub scavenger: i32,
+    pub parented: bool,
+    pub authored: bool,
+    pub dual_wield: bool,
+    pub alternate: Option<crate::ItemWeaponAmmo>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ItemPickupRecord {
+    pub seq: u32,
     pub picker: i32,
     pub weapon: u32,
     pub from_entnum: i32,
@@ -158,15 +163,6 @@ pub struct ItemPickupRecord {
     pub stock: i32,
     pub swapped_entnum: i32,
     pub picker_pm_type: i32,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct RngDebugMeta {
-    pub root_seed: u64,
-    pub scheme: u32,
-    pub spawn_draws: u64,
-    pub combat_draws: u64,
-    pub bot_draws: u64,
 }
 
 impl SnapshotMeta {
@@ -186,6 +182,7 @@ impl SnapshotMeta {
             client: self
                 .for_client(id)
                 .map_or(&[], |m| m.client_dvars.as_slice()),
+            shared: &self.campaign_dvars,
             server: &self.objectives.server_info,
         }
     }
@@ -250,6 +247,7 @@ fn parse_float_dvar(value: &str) -> f32 {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ScriptDvars<'a> {
     client: &'a [(String, String)],
+    shared: &'a [(String, String)],
     server: &'a [(String, String)],
 }
 
@@ -257,6 +255,7 @@ impl<'a> ScriptDvars<'a> {
     pub fn string(&self, name: &str) -> Option<&'a str> {
         self.client
             .iter()
+            .chain(self.shared)
             .chain(self.server)
             .find(|(key, _)| key.eq_ignore_ascii_case(name))
             .map(|(_, value)| value.as_str())
@@ -276,7 +275,7 @@ impl<'a> ScriptDvars<'a> {
 
     pub fn text(&self, name: &str, localize: impl Fn(&str) -> Option<String>) -> Option<String> {
         let mut parts = self.string(name)?.split(crate::HUD_PRINT_ARG_SEPARATOR);
-        let head = parts.next().unwrap_or_default();
+        let head = parts.next().unwrap_or("");
         let Some(key) = head.strip_prefix('@') else {
             return Some(head.to_owned());
         };

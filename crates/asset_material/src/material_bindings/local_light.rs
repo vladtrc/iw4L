@@ -1,4 +1,4 @@
-use super::{PreparedMaterialBindings, StaleMaterialBindings};
+use super::{LocalLightProducer, PreparedMaterialBindings, StaleMaterialBindings};
 use bevy::math::Vec3;
 use render_material::{CompiledConstantOverlay, RuntimeMaterialCatalog, compile_constant_overlay};
 
@@ -45,36 +45,29 @@ impl PreparedMaterialBindings {
             rows: Vec::new(),
         };
         if let Some(light) = light {
-            for &operation in &self.local_light_ops {
-                super::t5_light::produce(&mut writer, light, eye, time, operation);
+            for operation in &self.local_light_ops {
+                operation.produce(&mut writer, light, eye, time);
             }
         }
         Ok(compile_constant_overlay(catalog, writer.rows))
     }
 }
 
-pub(super) struct LocalLightWriter<'a> {
+pub struct LocalLightWriter<'a> {
     requested: &'a [u16],
     rows: Vec<(u16, [u32; 4])>,
 }
 impl LocalLightWriter<'_> {
-    pub(super) fn set_constant_rows(&mut self, index: u16, rows: &[[u32; 4]]) {
+    pub fn set_constant_rows(&mut self, index: u16, rows: &[[u32; 4]]) {
         if self.requested.binary_search(&index).is_ok() {
             self.rows.push((index, rows[0]));
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum LightOperation {
-    Colors,
-    Attenuation,
-    Falloff,
-    SpotBounds,
-    ConeControl,
-    Cookie,
-    Matrix,
-}
-pub(super) fn prepare(requested: &[u16]) -> Vec<LightOperation> {
-    super::t5_light::prepare(requested)
+pub(super) fn prepare(requested: &[u16]) -> Vec<std::sync::Arc<dyn LocalLightProducer>> {
+    super::material_binding_families()
+        .iter()
+        .flat_map(|(_, family)| (family.prepare_local_light)(requested))
+        .collect()
 }

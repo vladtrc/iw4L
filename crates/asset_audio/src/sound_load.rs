@@ -6,11 +6,11 @@ use fastfile_iw4::{
     load_zone,
 };
 
+use crate::FamilyId;
 use crate::discover::{GamesRoot, find_runtime_zone, find_zone_file, find_zone_file_version};
 use crate::sound_catalog::SoundCatalog;
 use crate::zone::{ZoneMemory, open_zone_shared};
 use crate::zone_sound::{ZoneSoundOrigin, ensure_zone_sound};
-use crate::{AssetNamespace, ZoneGame};
 
 struct SoundSink {
     catalog: SoundCatalog,
@@ -111,7 +111,7 @@ pub fn load_sound_catalog(path: &Path) -> Result<SoundCatalog, String> {
     };
     sink.catalog
         .set_capture_zone(crate::ZoneOwner::from_zone_path(path));
-    sink.catalog.set_capture_game(crate::ZoneGame::Iw4);
+    sink.catalog.set_capture_game(crate::FamilyId::IW4);
     load_zone(&mut stream, &mut sink).map_err(|e| {
         format!(
             "sound catalog failed after {} assets at {:?}: {e}",
@@ -126,7 +126,7 @@ pub fn load_sound_catalog(path: &Path) -> Result<SoundCatalog, String> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SoundZoneGap {
-    pub namespace: AssetNamespace,
+    pub namespace: FamilyId,
 
     pub zone: String,
     pub reason: String,
@@ -138,19 +138,16 @@ pub struct LoadedSoundBank {
     pub gaps: Vec<SoundZoneGap>,
 }
 
-fn namespace_of_game(game: ZoneGame) -> AssetNamespace {
-    AssetNamespace::from_zone_game(game)
+fn namespace_of_game(game: FamilyId) -> FamilyId {
+    game
 }
 
 pub(crate) fn walk_zone_sound(path: &Path) -> Result<SoundCatalog, String> {
     let game = crate::zone_game_for_path(path)
         .ok_or_else(|| format!("{} is not a readable IWff envelope", path.display()))?;
-    match game {
-        ZoneGame::Iw4 => load_sound_catalog(path),
-        ZoneGame::Iw5 => crate::sound_load_iw5::load_sound_catalog_iw5(path),
-        ZoneGame::T5 => crate::sound_load_t5::load_sound_catalog_t5(path),
-        ZoneGame::T6 => Err(format!("{}: T6 sound banks are not read", path.display())),
-    }
+    let family =
+        crate::audio_family(game).ok_or_else(|| format!("unregistered audio family {game:?}"))?;
+    (family.walk)(path)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -166,16 +163,20 @@ enum Absent {
 }
 
 struct SoundSource {
-    namespace: AssetNamespace,
+    namespace: FamilyId,
     name: &'static str,
     found: Result<std::path::PathBuf, String>,
     merge: Merge,
     absent: Absent,
 }
 
-fn sound_sources(games: &GamesRoot, map: &Path) -> (Vec<SoundSource>, Vec<SoundSource>) {
+fn sound_sources(
+    games: &GamesRoot,
+    map: &Path,
+    profile: asset_core::RuntimeProfile,
+) -> (Vec<SoundSource>, Vec<SoundSource>) {
     let runtime = |name: &'static str, merge, absent| SoundSource {
-        namespace: AssetNamespace::Iw4,
+        namespace: FamilyId::IW4,
         name,
         found: find_runtime_zone(games, map, name).map(|zone| zone.path),
         merge,
@@ -188,50 +189,39 @@ fn sound_sources(games: &GamesRoot, map: &Path) -> (Vec<SoundSource>, Vec<SoundS
         merge: Merge::Missing,
         absent: Absent::Skip,
     };
-    let before_map = vec![
-        runtime("code_post_gfx_mp", Merge::Override, Absent::Skip),
-        runtime("localized_code_post_gfx_mp", Merge::Override, Absent::Skip),
-        runtime("patch_mp", Merge::Override, Absent::Skip),
-        runtime("common_mp", Merge::Override, Absent::Gap),
-        runtime("localized_common_mp", Merge::Override, Absent::Gap),
-    ];
-    let after_map = vec![
-        donor(
-            AssetNamespace::Iw5,
-            "code_post_gfx_mp",
-            fastfile_iw5::ZONE_VERSION_PC,
-        ),
-        donor(
-            AssetNamespace::Iw5,
-            "common_mp",
-            fastfile_iw5::ZONE_VERSION_PC,
-        ),
-        donor(
-            AssetNamespace::Iw5,
-            "localized_common_mp",
-            fastfile_iw5::ZONE_VERSION_PC,
-        ),
-        donor(
-            AssetNamespace::T5,
-            "code_post_gfx_mp",
-            fastfile_t5::ZONE_VERSION_PC,
-        ),
-        donor(
-            AssetNamespace::T5,
-            "common_mp",
-            fastfile_t5::ZONE_VERSION_PC,
-        ),
-        donor(
-            AssetNamespace::T5,
-            "localized_common_mp",
-            fastfile_t5::ZONE_VERSION_PC,
-        ),
-        donor(
-            AssetNamespace::T6,
-            "common_mp",
-            fastfile_t6::ZONE_VERSION_PC,
-        ),
-    ];
+    let before_map = if profile == asset_core::RuntimeProfile::Campaign {
+        vec![
+            runtime("code_post_gfx", Merge::Override, Absent::Gap),
+            runtime("localized_code_post_gfx", Merge::Override, Absent::Skip),
+            runtime("common", Merge::Override, Absent::Gap),
+            runtime("localized_common", Merge::Override, Absent::Skip),
+            runtime("patch", Merge::Override, Absent::Skip),
+        ]
+    } else {
+        vec![
+            runtime("code_post_gfx_mp", Merge::Override, Absent::Skip),
+            runtime("localized_code_post_gfx_mp", Merge::Override, Absent::Skip),
+            runtime("patch_mp", Merge::Override, Absent::Skip),
+            runtime("common_mp", Merge::Override, Absent::Gap),
+            runtime("localized_common_mp", Merge::Override, Absent::Gap),
+        ]
+    };
+    let after_map = crate::audio_families()
+        .iter()
+        .filter(|(id, _)| {
+            profile == asset_core::RuntimeProfile::Multiplayer && *id != FamilyId::IW4
+        })
+        .flat_map(|(id, policy)| {
+            let version = asset_core::families()
+                .get(id)
+                .expect("registered audio family metadata")
+                .zone_version();
+            policy
+                .common_zones
+                .iter()
+                .map(move |&name| donor(id, name, version))
+        })
+        .collect();
     (before_map, after_map)
 }
 
@@ -255,9 +245,18 @@ pub fn gather_sound_sources(games: &GamesRoot, map: &Path) -> SoundSources {
 pub fn gather_sound_sources_filtered(
     games: &GamesRoot,
     map: &Path,
-    mut enabled: impl FnMut(AssetNamespace) -> bool,
+    enabled: impl FnMut(FamilyId) -> bool,
 ) -> SoundSources {
-    let (before, after) = sound_sources(games, map);
+    gather_sound_sources_for_profile(games, map, asset_core::RuntimeProfile::Multiplayer, enabled)
+}
+
+pub fn gather_sound_sources_for_profile(
+    games: &GamesRoot,
+    map: &Path,
+    profile: asset_core::RuntimeProfile,
+    mut enabled: impl FnMut(FamilyId) -> bool,
+) -> SoundSources {
+    let (before, after) = sound_sources(games, map, profile);
     let mut sources = SoundSources {
         before_map: SoundCatalog::default(),
         after_map: Vec::new(),
@@ -317,7 +316,7 @@ impl SoundSources {
         }
     }
 
-    fn gap(&mut self, namespace: AssetNamespace, zone: &str, reason: String) {
+    fn gap(&mut self, namespace: FamilyId, zone: &str, reason: String) {
         self.gaps.push(SoundZoneGap {
             namespace,
             zone: zone.to_owned(),
@@ -329,7 +328,7 @@ impl SoundSources {
 pub fn compose_sound_bank(
     sources: SoundSources,
     zone: &str,
-    namespace: AssetNamespace,
+    namespace: FamilyId,
     map: Result<SoundCatalog, String>,
 ) -> LoadedSoundBank {
     let SoundSources {
@@ -351,7 +350,7 @@ pub fn compose_sound_bank(
                 map.sounds.len()
             );
             match namespace {
-                AssetNamespace::Iw4 => bank.catalog.absorb_unresolved(map),
+                FamilyId::IW4 => bank.catalog.absorb_unresolved(map),
                 _ => bank.catalog.absorb_missing_aliases_unresolved(map),
             }
         }
@@ -381,14 +380,14 @@ pub fn load_mp_sound_bank(games: &GamesRoot, zone: &str) -> Result<LoadedSoundBa
     let zone_ff = find_zone_file(games, zone)?;
     let sources = gather_sound_sources(games, &zone_ff.path);
     let namespace =
-        crate::zone_game_for_path(&zone_ff.path).map_or(AssetNamespace::Iw4, namespace_of_game);
+        crate::zone_game_for_path(&zone_ff.path).map_or(FamilyId::IW4, namespace_of_game);
     let (map, _) = ensure_zone_sound(&zone_ff.path);
     let map = map.map(|catalog| (*catalog).clone());
     Ok(compose_sound_bank(sources, zone, namespace, map))
 }
 
 impl LoadedSoundBank {
-    fn gap(&mut self, namespace: AssetNamespace, zone: &str, reason: String) {
+    fn gap(&mut self, namespace: FamilyId, zone: &str, reason: String) {
         self.gaps.push(SoundZoneGap {
             namespace,
             zone: zone.to_owned(),

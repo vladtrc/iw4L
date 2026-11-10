@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use bevy::prelude::Resource;
+use bevy_ecs::prelude::Resource;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CreateFxLoopSound {

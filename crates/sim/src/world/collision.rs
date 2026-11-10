@@ -9,7 +9,7 @@ pub(super) enum LagcompPlan {
     },
     Refused {
         requested: Tick,
-        reason: crate::bullet_collision::HistoryRefusalReason,
+        reason: &'static str,
     },
     Rewind {
         requested: Tick,
@@ -74,9 +74,7 @@ impl CollisionRuntime {
         self.samples.get(&client).copied()
     }
     pub(super) fn plan(&self, attacker: ClientId, current: Tick) -> LagcompPlan {
-        use crate::bullet_collision::{
-            CurrentAuthorityReason, HistoryRefusalReason, LAGCOMP_MAX_REWIND_TICKS,
-        };
+        use crate::bullet_collision::{CurrentAuthorityReason, LAGCOMP_MAX_REWIND_TICKS};
 
         let Some(sample) = self.sample(attacker) else {
             return LagcompPlan::CurrentAuthority {
@@ -91,13 +89,13 @@ impl CollisionRuntime {
         if sample.right.0 > current.0 {
             return LagcompPlan::Refused {
                 requested: sample.right,
-                reason: HistoryRefusalReason::SampleAfterShot,
+                reason: "history sample after shot",
             };
         }
         if !sample.is_valid_for(current) {
             return LagcompPlan::Refused {
                 requested: sample.requested_tick(),
-                reason: HistoryRefusalReason::SampleMalformed,
+                reason: "malformed history sample",
             };
         }
         let requested = sample.requested_tick();

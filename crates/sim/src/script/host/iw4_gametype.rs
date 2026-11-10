@@ -33,3 +33,20 @@ pub(crate) fn force_match_start(world: &mut World, tick: crate::Tick) -> bool {
     raise(world, Value::level(), START_TIMER_BEGINNING, Vec::new());
     true
 }
+
+/// Cuts the stock `gracePeriod()` count to its last second, so the script
+/// ends the grace period itself: `grace_period_ending`, `graceperiod_done`,
+/// and from then on a dead team ends the round.
+pub(crate) fn end_grace_period(world: &mut World) -> bool {
+    let mut runtime = world.resource_mut::<RoundScript>();
+    if runtime.fault.is_some() || runtime.program.is_none() {
+        return false;
+    }
+    match runtime.object_field(0, "ingraceperiod") {
+        Value::Int(left) if left > 1 => {
+            runtime.set_object_field(0, "ingraceperiod", Value::Int(1));
+            true
+        }
+        _ => false,
+    }
+}

@@ -2,15 +2,17 @@ use bevy::platform::collections::HashSet;
 
 use bevy::prelude::*;
 use dpvs_iw4::{
-    AabbCullStats, AabbTreeCull, BspDrawSurfCensus, BspDrawSurfRun, CellClipPlanes,
-    CellPortalGraph, DpvsPlanes, DpvsVisData, GfxDrawSurf, PortalView, VisBits, WalkScratch,
-    add_aabb_tree_surfaces_in_frustum, add_bsp_draw_surfs_camera, add_sky_surfaces_dpvs,
-    admit_cell_root_span, cell_caster_row_words, msb_get, or_caster_rows_for_visible,
-    smodel_cull_dist_hides, visit_cells, words_for_bits,
+    AabbCullStats, AabbTreeCull, BspDrawSurfCensus, BspDrawSurfRun, CellClipPlanes, DpvsPlanes,
+    DpvsVisData, GfxDrawSurf, VisBits, WalkScratch, add_aabb_tree_surfaces_in_frustum,
+    add_bsp_draw_surfs_camera, add_sky_surfaces_dpvs, admit_cell_root_span, cell_caster_row_words,
+    msb_get, or_caster_rows_for_visible, smodel_cull_dist_hides, words_for_bits,
 };
 
 use crate::prepare::scene::view_parms::PreparedSceneView;
-use crate::prepare::scene::world::{WorldDrawItem, WorldDrawItemKind, WorldScene};
+use crate::prepare::scene::world::{
+    PortalVisibility, WorldAtlasLayer, WorldDpvs, WorldDrawItem, WorldDrawItemKind, WorldDrawItems,
+    WorldScene,
+};
 
 #[derive(Resource, Clone, Debug, Default)]
 pub struct DpvsFrameStats {
@@ -119,6 +121,94 @@ pub use render_scene::DynEntModelEntity;
 #[derive(Component)]
 pub struct ScriptModelGameObject(pub String);
 
+/// The eye as each world of a projectile_flight atlas sees it: carried through the
+/// doors into the world whose slab holds the model. Outside an atlas every
+/// model sees the eye itself.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct WorldEyes {
+    eye: Option<Vec3>,
+    by_world: Vec<Vec<Vec3>>,
+}
+
+impl WorldEyes {
+    pub(crate) fn new(scene: Option<&WorldScene>, eye: Option<Vec3>) -> Self {
+        let by_world = match (scene, eye) {
+            (Some(scene), Some(eye)) if !scene.portal_pairs.is_empty() => {
+                let Some(view) = scene.portal_view.as_ref() else {
+                    return Self {
+                        eye: Some(eye),
+                        by_world: Vec::new(),
+                    };
+                };
+                (0..scene.portal_worlds)
+                    .map(|world| {
+                        view.draw_views(world)
+                            .into_iter()
+                            .filter_map(|tag| {
+                                view.eye_in(usize::from(tag - 1), eye.to_array())
+                                    .map(Vec3::from_array)
+                            })
+                            .collect()
+                    })
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
+        Self { eye, by_world }
+    }
+
+    /// The eye a model at `origin` is measured from; `None` when no door
+    /// leads to its world.
+    pub(crate) fn at(&self, origin: [f32; 3]) -> Option<Vec3> {
+        if self.by_world.is_empty() {
+            return self.eye;
+        }
+        let world = asset_core::atlas::WorldLayout.world_at(origin).0;
+        self.by_world.get(world)?.iter().copied().min_by(|a, b| {
+            a.distance_squared(Vec3::from_array(origin))
+                .total_cmp(&b.distance_squared(Vec3::from_array(origin)))
+        })
+    }
+}
+
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct StaticModelCullView<'w> {
+    prepared: Res<'w, PreparedSceneView>,
+    lock_pvs: Res<'w, crate::prepare::scene::view_parms::RLockPvs>,
+    lod_ramp: Res<'w, crate::prepare::scene::smodel_geom_cache::LodRampDvar>,
+}
+
+impl StaticModelCullView<'_> {
+    pub(crate) fn eyes(&self, scene: &WorldScene) -> WorldEyes {
+        WorldEyes::new(
+            Some(scene),
+            self.prepared
+                .ready
+                .then_some(self.lock_pvs.dpvs_eye(&self.prepared)),
+        )
+    }
+
+    pub(crate) fn distance_skips(
+        &self,
+        distances: &[u16],
+        slot: usize,
+        origin: [f32; 3],
+        eyes: &WorldEyes,
+    ) -> bool {
+        smodel_cull_dist_skips_slot(
+            distances,
+            slot,
+            origin,
+            eyes.at(origin),
+            self.lod_ramp.scale_last,
+        )
+    }
+
+    pub(crate) fn lod_args(&self) -> crate::assemble::drawsurf::tess::smodel::LodRampArgs {
+        self.lod_ramp.args()
+    }
+}
+
 pub(crate) fn smodel_cull_dist_skips_slot(
     cull_dists: &[u16],
     slot: usize,
@@ -136,14 +226,219 @@ pub(crate) fn smodel_cull_dist_skips_slot(
     smodel_cull_dist_hides(cull_dist, dx * dx + dy * dy + dz * dz, scale_last)
 }
 
+#[derive(Default)]
+pub struct PortalCullScratch {
+    walk: Box<WalkScratch>,
+    words: Vec<u32>,
+}
+
+struct PortalCellVisibility {
+    depth: u8,
+    max_range: Option<f32>,
+    planes: Vec<[f32; 4]>,
+    eye: [f32; 3],
+    seed: [f32; 3],
+    cell: Option<usize>,
+    visible_cells: Vec<usize>,
+    clips: Vec<Vec<CellClipPlanes>>,
+}
+
+struct PortalCullFrame<'a> {
+    scratch: &'a mut PortalCullScratch,
+    cells: Vec<Option<PortalCellVisibility>>,
+}
+
+fn limit_portal_range(depth: u8, eye: Vec3, forward: Vec3, planes: &mut [[f32; 4]]) -> Option<f32> {
+    if depth < 2 || planes.len() < 2 {
+        return None;
+    }
+    let forward = forward.try_normalize()?;
+    let range = 1500.0 / f32::from(depth);
+    let far = Vec4::from_array(planes[1]);
+    let denominator = -far.truncate().dot(forward);
+    let distance = far.dot(eye.extend(1.0));
+    if denominator > 0.0 && distance / denominator <= range {
+        return Some(distance / denominator);
+    }
+    planes[1] = (-forward).extend(forward.dot(eye) + range).to_array();
+    Some(range)
+}
+
+fn walk_portal_cells(
+    dpvs: &WorldDpvs,
+    view: &render_frame::PortalView,
+    index: usize,
+    pvs: &render_scene::LockPvsView,
+    scratch: &mut PortalCullScratch,
+) -> Option<PortalCellVisibility> {
+    let eye = pvs.eye.to_array();
+    let forward = pvs.forward;
+    let frustum = pvs.frustum_planes.as_slice();
+    let matrix = view.moves.get(index).copied().flatten()?;
+    let mut planes = view.clip_planes_in(index, eye, frustum)?;
+    let virtual_eye = view.eye_in(index, eye)?;
+    let depth = view.view_depth(index)?;
+    let direction = matrix
+        .inverse()
+        .transform_vector3(forward.as_dvec3())
+        .as_vec3();
+    let max_range =
+        limit_portal_range(depth, Vec3::from_array(virtual_eye), direction, &mut planes);
+    let seed = if view
+        .plan
+        .as_ref()
+        .is_some_and(|p| p.settings.only.is_some())
+    {
+        virtual_eye
+    } else {
+        view.seed_in(index, eye)?
+    };
+    let native = DpvsPlanes {
+        planes: &dpvs.planes,
+        nodes: &dpvs.nodes,
+        cell_count: dpvs.cell_count as u32,
+    };
+    let cell = native
+        .cell_for_point(seed)
+        .or_else(|| native.cell_for_point(virtual_eye));
+    scratch
+        .words
+        .resize(words_for_bits(dpvs.cell_count.max(1)), 0);
+    scratch.words.fill(0);
+    let mut bits = VisBits::new(&mut scratch.words);
+    let mut clips = vec![Vec::new(); dpvs.cell_count];
+    if let Some(cell) = cell {
+        scratch.walk.visit_cells(
+            dpvs,
+            dpvs_iw4::PortalWalkView {
+                camera_cell: cell,
+                eye: virtual_eye,
+                view_plane: dpvs_iw4::dpvs_view_plane(direction.to_array(), virtual_eye),
+                clip_planes: &planes,
+                bevels: None,
+            },
+            0,
+            &mut bits,
+            None,
+            Some(&mut |cell: usize, planes: &CellClipPlanes| clips[cell].push(*planes)),
+        );
+    } else {
+        for cell in 0..dpvs.cell_count {
+            bits.set(cell);
+        }
+    }
+    Some(PortalCellVisibility {
+        depth,
+        max_range,
+        planes,
+        eye: virtual_eye,
+        seed,
+        cell,
+        visible_cells: (0..dpvs.cell_count)
+            .filter(|&cell| bits.get(cell))
+            .collect(),
+        clips,
+    })
+}
+
+impl PortalCullFrame<'_> {
+    fn admit_aperture(
+        &mut self,
+        host: &WorldDpvs,
+        layers: &[WorldAtlasLayer],
+        view: &render_frame::PortalView,
+        opening: usize,
+        pvs: &render_scene::LockPvsView,
+    ) -> bool {
+        if view.shared {
+            // Native room connectivity cannot occlude an overlapping map.
+            return true;
+        }
+        let cache = &mut self.cells;
+        let scratch = &mut *self.scratch;
+        let aperture = view.openings[opening];
+        let parent = aperture.worlds[0];
+        let world = view.worlds[parent];
+        let dpvs = if world == 0 {
+            host
+        } else if let Some(layer) = layers.iter().find(|layer| layer.world == world) {
+            &layer.dpvs
+        } else {
+            return true;
+        };
+        if cache.len() < view.worlds.len() {
+            cache.resize_with(view.worlds.len(), || None);
+        }
+        if cache[parent].is_none() {
+            cache[parent] = walk_portal_cells(dpvs, view, parent, pvs, scratch);
+        }
+        let Some(cells) = cache[parent].as_ref() else {
+            return true;
+        };
+        let inverse = view.moves[parent].unwrap().inverse();
+        let base = Vec3::from_array(aperture.base).as_dvec3();
+        let across = Vec3::from_array(aperture.across).as_dvec3() * f64::from(aperture.width) * 0.5;
+        let up = Vec3::from_array(aperture.up).as_dvec3() * f64::from(aperture.height);
+        let winding = [
+            base - across,
+            base + across,
+            base + across + up,
+            base - across + up,
+        ]
+        .map(|p| inverse.transform_point3(p).as_vec3().to_array());
+        // The aperture volume crosses the camera near plane during traversal.
+        // Test its physical winding without that plane; retain ancestor exit planes.
+        let aperture_planes = cells.planes.get(1..).unwrap_or(&[]);
+        if !dpvs_iw4::winding_survives_planes(&winding, aperture_planes) {
+            return false;
+        }
+        if cells.cell.is_none() {
+            return true;
+        }
+        DpvsPlanes {
+            planes: &dpvs.planes,
+            nodes: &dpvs.nodes,
+            cell_count: dpvs.cell_count as u32,
+        }
+        .winding_reaches_visible_cell(&winding, &mut |cell, fragment| {
+            cells.clips.get(cell).is_some_and(|clips| {
+                clips.iter().any(|clip| {
+                    let planes = clip.as_slice();
+                    let planes = if clip.frustum_plane_count > 0 {
+                        planes.get(1..).unwrap_or(&[])
+                    } else {
+                        planes
+                    };
+                    dpvs_iw4::winding_survives_planes(fragment, planes)
+                })
+            })
+        })
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 pub fn apply_dpvs_cull(
     mut scene: ResMut<WorldScene>,
+    portal_controls: Res<render_scene::PortalRenderControls>,
+    time: Res<Time<Real>>,
+    active: Option<Res<net::GameActive>>,
+    time_strategy: Res<bevy::time::TimeUpdateStrategy>,
+    mut budget: Local<render_frame::portal_budget::PortalBudget>,
+    presented: Option<Res<net::PresentedSnapshot>>,
+    mut scratch: Local<PortalCullScratch>,
+    occlusion: Local<render_frame::portal_occlusion::PortalOcclusionHistory>,
     mut stats: ResMut<DpvsFrameStats>,
     mut published_vis: ResMut<render_scene::PublishedCellVis>,
     prepared: Res<PreparedSceneView>,
     lock_pvs: Res<crate::prepare::scene::view_parms::RLockPvs>,
 ) {
-    let _cull = perf::Span::RenderCullCpuMs.enter();
+    let _cull = perf::span!("cull", "iw4l.render");
+    // Emit zeroes too: a frame without portals must not retain the previous
+    // frame's plan counts in a trace viewer.
+    let mut portal_counts = [0u32; 5];
     stats.frustum_planes.clear();
     stats.smodel_vis.clear();
     stats.smodel_vis_id = 0;
@@ -155,6 +450,20 @@ pub fn apply_dpvs_cull(
     stats.view_prepared = 0;
     stats.lock_pvs = 0;
     *published_vis = render_scene::PublishedCellVis::default();
+    scene.portal_visibility.clear();
+    scene.portal_view = None;
+    let shared = matches!(scene.space, asset_core::world_frame::SceneSpace::Shared(_));
+    let portal_space = scene.space.clone();
+    let portaled = !scene.portal_pairs.is_empty();
+    let generation = scene.products_id;
+    let portal_description = portaled.then(|| {
+        (
+            scene.portal_pairs.clone(),
+            scene.portal_worlds,
+            scene.portal_surfaces.clone(),
+        )
+    });
+    let mut portal_visibility = Vec::new();
     let Some(cull) = scene.cull.as_mut() else {
         return;
     };
@@ -170,73 +479,211 @@ pub fn apply_dpvs_cull(
 
     let eye_pos = lock_pvs.dpvs_eye(&prepared);
     let eye = [eye_pos.x, eye_pos.y, eye_pos.z];
+    let frustum = lock_pvs.dpvs_frustum(&prepared).to_vec();
+    let forward = lock_pvs.dpvs_forward(&prepared);
     let (fov, aspect) = lock_pvs.dpvs_fov_aspect(&prepared);
+    let pvs = render_scene::LockPvsView {
+        eye: eye_pos,
+        forward,
+        frustum_planes: frustum,
+        portal_bevels: lock_pvs.dpvs_portal_bevels(&prepared),
+        fov,
+        aspect,
+    };
+    let effective_settings = budget.update(
+        generation,
+        time.delta_secs_f64(),
+        matches!(*time_strategy, bevy::time::TimeUpdateStrategy::Automatic)
+            && active.as_ref().is_some_and(|active| active.get()),
+        portal_controls.0,
+    );
+    perf::counter!(
+        "portal_budget_views",
+        "iw4l.render",
+        effective_settings.max_views as f64
+    );
+    perf::counter!(
+        "portal_budget_depth",
+        "iw4l.render",
+        f64::from(effective_settings.depth)
+    );
+    perf::counter!("portal_laggy", "iw4l.render", f64::from(budget.level()));
+    let mut portal_cull = PortalCullFrame {
+        scratch: &mut scratch,
+        cells: Vec::new(),
+    };
+    let mut portal_view = portal_description.map(|(pairs, count, surfaces)| {
+        render_frame::PortalView::new_render_with_blocked(
+            render_frame::PortalAtlas {
+                pairs: &pairs,
+                world_count: count,
+                surfaces,
+                space: Some(&portal_space),
+                camera_world: shared.then_some(prepared.physical_world),
+            },
+            render_frame::PortalCamera {
+                eye,
+                clip_from_world: prepared.clip_from_world,
+                viewport: [
+                    prepared.scene_viewport.x as f32,
+                    prepared.scene_viewport.y as f32,
+                    prepared.scene_viewport.width as f32,
+                    prepared.scene_viewport.height as f32,
+                ],
+            },
+            effective_settings,
+            presented
+                .as_ref()
+                .and_then(|p| p.snapshot())
+                .map_or(&[], |s| {
+                    s.meta.world_objects.portal_blocked_exits.as_slice()
+                }),
+            Some(occlusion.begin(
+                generation,
+                eye,
+                forward.to_array(),
+                [fov, aspect],
+                [
+                    prepared.scene_viewport.x as f32,
+                    prepared.scene_viewport.y as f32,
+                    prepared.scene_viewport.width as f32,
+                    prepared.scene_viewport.height as f32,
+                ],
+            )),
+            &mut |view, opening| {
+                portal_cull.admit_aperture(&cull.dpvs, &cull.atlas_layers, view, opening, &pvs)
+            },
+        )
+    });
+    perf::counter!(
+        "portal_culled_query",
+        "iw4l.render",
+        portal_view
+            .as_ref()
+            .and_then(|v| v.plan.as_ref())
+            .map_or(0.0, |p| f64::from(p.culled_query))
+    );
+    budget.previous_views = portal_view
+        .as_ref()
+        .and_then(|v| v.plan.as_ref())
+        .map_or(1, |p| p.selected.iter().filter(|&&v| v).count());
+    let mut portal_max_depth = 0u8;
+    if let Some(plan) = portal_view.as_ref().and_then(|view| view.plan.as_ref()) {
+        portal_counts[4] = plan.culled_dpvs;
+        portal_counts[0] = plan.selected.iter().filter(|&&selected| selected).count() as u32;
+        for aperture in &plan.apertures {
+            match aperture.fallback {
+                Some(render_frame::portal_plan::PortalFallback::Budget) => portal_counts[1] += 1,
+                Some(render_frame::portal_plan::PortalFallback::Depth) => portal_counts[2] += 1,
+                Some(render_frame::portal_plan::PortalFallback::Blocked) => portal_counts[3] += 1,
+                Some(render_frame::portal_plan::PortalFallback::Occluded) => {}
+                None => portal_max_depth = portal_max_depth.max(aperture.depth),
+            }
+        }
+    }
+    perf::counter!(
+        "portal_max_depth",
+        "iw4l.render",
+        f64::from(portal_max_depth)
+    );
+    perf::counter!("portal_views", "iw4l.render", f64::from(portal_counts[0]));
+    perf::counter!(
+        "portal_fallback_budget",
+        "iw4l.render",
+        f64::from(portal_counts[1])
+    );
+    perf::counter!(
+        "portal_fallback_depth",
+        "iw4l.render",
+        f64::from(portal_counts[2])
+    );
+    perf::counter!(
+        "portal_fallback_blocked",
+        "iw4l.render",
+        f64::from(portal_counts[3])
+    );
+    perf::counter!(
+        "portal_culled_dpvs",
+        "iw4l.render",
+        f64::from(portal_counts[4])
+    );
     let dpvs = &cull.dpvs;
-    if dpvs.cell_count == 0 {
+    if dpvs.cell_count == 0 && !shared {
         return;
     }
 
-    let frustum = lock_pvs.dpvs_frustum(&prepared).to_vec();
-    stats.frustum_planes.clone_from(&frustum);
+    stats.frustum_planes.clone_from(&pvs.frustum_planes);
 
-    let planes = DpvsPlanes {
-        planes: &dpvs.planes,
-        nodes: &dpvs.nodes,
-        cell_count: dpvs.cell_count as u32,
+    let camera_world = portal_view
+        .as_ref()
+        .map_or(if shared { prepared.physical_world } else { 0 }, |view| {
+            view.camera_world
+        });
+    let camera_dpvs = if camera_world == 0 {
+        dpvs
+    } else {
+        cull.atlas_layers
+            .iter()
+            .find(|layer| layer.world == camera_world)
+            .map_or(dpvs, |layer| &layer.dpvs)
     };
-
-    let eye_cell = planes.cell_for_point(eye);
-    let single_cell = single_cell_from_env();
-
-    let mut per_cell: Vec<Vec<PortalView<'_>>> = Vec::with_capacity(dpvs.cell_count);
-    for cell_portals in &dpvs.portals_per_cell {
-        let mut views = Vec::with_capacity(cell_portals.len());
-        for p in cell_portals {
-            let end = p.vert_start + p.vert_count;
-            let verts = dpvs.portal_verts.get(p.vert_start..end).unwrap_or(&[]);
-            views.push(PortalView {
-                plane: p.plane,
-                neighbor: p.neighbor,
-                vertices: verts,
-                hull_axis: p.hull_axis,
-            });
-        }
-        per_cell.push(views);
+    let cell_count = camera_dpvs.cell_count;
+    let eye_cell = DpvsPlanes {
+        planes: &camera_dpvs.planes,
+        nodes: &camera_dpvs.nodes,
+        cell_count: cell_count as u32,
     }
-    let slices: Vec<&[PortalView<'_>]> = per_cell.iter().map(|v| v.as_slice()).collect();
-    let graph = CellPortalGraph { portals: &slices };
-
-    let mut words = vec![0u32; words_for_bits(dpvs.cell_count.max(1))];
+    .cell_for_point(eye);
+    let single_cell = single_cell_from_env();
+    let mut words = vec![
+        0u32;
+        words_for_bits(if shared {
+            dpvs.cell_count.max(1)
+        } else {
+            cell_count.max(1)
+        })
+    ];
     let mut vis = VisBits::new(&mut words);
-    let mut scratch = WalkScratch::new();
+
     let mut walk_stats = dpvs_iw4::WalkStats::default();
-    match eye_cell {
-        Some(cell) if single_cell => vis.set(cell),
+    if !portaled {
+        match eye_cell {
+            _ if shared => {
+                for cell in 0..dpvs.cell_count {
+                    vis.set(cell);
+                }
+            }
+            Some(cell) if single_cell => vis.set(cell),
 
-        Some(cell) => {
-            let mut cell_clips = vec![CellClipPlanes::EMPTY; dpvs.cell_count];
-            let bevels = lock_pvs.dpvs_portal_bevels(&prepared);
-            walk_stats = visit_cells(
-                &graph,
-                cell,
-                eye,
-                dpvs_iw4::dpvs_view_plane(lock_pvs.dpvs_forward(&prepared).to_array(), eye),
-                &frustum,
-                0,
-                &mut vis,
-                &mut scratch,
-                Some(&mut cell_clips),
-                bevels.as_ref(),
-                Some(&mut |visited: usize, planes: &CellClipPlanes| {
-                    stats.cell_clip_visits.push((visited as u32, *planes));
-                }),
-            );
-            stats.cell_clips = cell_clips;
-        }
+            Some(cell) => {
+                let mut cell_clips = vec![CellClipPlanes::EMPTY; dpvs.cell_count];
+                let bevels = pvs.portal_bevels;
+                walk_stats = portal_cull.scratch.walk.visit_cells(
+                    dpvs,
+                    dpvs_iw4::PortalWalkView {
+                        camera_cell: cell,
+                        eye,
+                        view_plane: dpvs_iw4::dpvs_view_plane(
+                            lock_pvs.dpvs_forward(&prepared).to_array(),
+                            eye,
+                        ),
+                        clip_planes: &pvs.frustum_planes,
+                        bevels: bevels.as_ref(),
+                    },
+                    0,
+                    &mut vis,
+                    Some(&mut cell_clips),
+                    Some(&mut |visited: usize, planes: &CellClipPlanes| {
+                        stats.cell_clip_visits.push((visited as u32, *planes));
+                    }),
+                );
+                stats.cell_clips = cell_clips;
+            }
 
-        None => {
-            for cell in 0..dpvs.cell_count {
-                vis.set(cell);
+            None => {
+                for cell in 0..dpvs.cell_count {
+                    vis.set(cell);
+                }
             }
         }
     }
@@ -246,67 +693,80 @@ pub fn apply_dpvs_cull(
     cull.surface_vis.resize(surf_count, 0);
     cull.smodel_vis.clear();
     cull.smodel_vis.resize(cull.static_model_entities.len(), 0);
-    cull.draw_items.clear();
-    cull.g0_surfs.clear();
+    cull.draws.items.clear();
+    cull.draws.g0_surfs.clear();
     stats.g0_world_surfs.clear();
 
     let mut aabb_stats = AabbCullStats::default();
-    {
-        let mut vis_data = DpvsVisData {
-            surface_vis: &mut cull.surface_vis,
-            smodel_vis: &mut cull.smodel_vis,
-        };
-        for cell in 0..dpvs.cell_count {
-            if !vis.get(cell) {
-                continue;
+    if !portaled {
+        admit_visible_cells(
+            dpvs,
+            |cell| vis.get(cell),
+            &pvs.frustum_planes,
+            &mut DpvsVisData {
+                surface_vis: &mut cull.surface_vis,
+                smodel_vis: &mut cull.smodel_vis,
+            },
+            &mut aabb_stats,
+        );
+    }
+
+    if shared {
+        // Native BSP portal walks describe each map's enclosed rooms, not
+        // visibility between overlapping maps. Cull all cells in one frustum.
+        for layer in &cull.atlas_layers {
+            let start = layer.surface_base;
+            let end = start + layer.surface_count;
+            if let (Some(surfaces), Some(smodels)) = (
+                cull.surface_vis.get_mut(start..end),
+                cull.smodel_vis.get_mut(layer.smodel_base..),
+            ) {
+                admit_visible_cells(
+                    &layer.dpvs,
+                    |_| true,
+                    &pvs.frustum_planes,
+                    &mut DpvsVisData {
+                        surface_vis: surfaces,
+                        smodel_vis: smodels,
+                    },
+                    &mut aabb_stats,
+                );
             }
-            let Some(tree) = dpvs.aabb_trees.get(cell) else {
-                continue;
-            };
-            if tree.is_empty() {
-                if let Some(root) = dpvs.cell_roots.get(cell)
-                    && root.count > 0
-                {
-                    admit_cell_root_span(
-                        &dpvs.sorted_surf_index,
-                        root.start,
-                        root.count,
-                        &mut vis_data,
-                        &mut aabb_stats,
-                    );
-                }
-                continue;
-            }
-            let cull_input = AabbTreeCull {
-                nodes: tree,
-                smodel_indexes: dpvs
-                    .aabb_smodel_indices
-                    .get(cell)
-                    .map_or(&[][..], Vec::as_slice),
-                sorted_surf_index: &dpvs.sorted_surf_index,
-                surfaces_bounds: &dpvs.surface_bounds,
-                smodel_bounds: &dpvs.smodel_bounds,
-                draw_decals: DRAW_DECALS,
-            };
-            add_aabb_tree_surfaces_in_frustum(
-                &cull_input,
-                &frustum,
-                &mut vis_data,
-                &mut aabb_stats,
-            );
         }
     }
 
-    let mut planes_without_far = frustum.clone();
+    let mut planes_without_far = pvs.frustum_planes.clone();
     if planes_without_far.len() >= 2 {
         planes_without_far.remove(1);
     }
-    let sky_admit = add_sky_surfaces_dpvs(
-        &dpvs.sky_start_surfs,
-        &dpvs.surface_bounds,
-        &planes_without_far,
-        &mut cull.surface_vis,
-    );
+    let mut sky_admit = dpvs_iw4::SkyCullStats::default();
+    if !portaled {
+        sky_admit = add_sky_surfaces_dpvs(
+            &dpvs.sky_start_surfs,
+            &dpvs.surface_bounds,
+            &planes_without_far,
+            &mut cull.surface_vis,
+        );
+    }
+    if let Some(view) = portal_view.as_mut() {
+        let (reports, root_cells) = portal_cull.admit_views(
+            dpvs,
+            &cull.atlas_layers,
+            view,
+            &pvs,
+            &mut DpvsVisData {
+                surface_vis: &mut cull.surface_vis,
+                smodel_vis: &mut cull.smodel_vis,
+            },
+            &mut aabb_stats,
+        );
+        portal_visibility = reports;
+        vis.clear();
+        for cell in root_cells {
+            vis.set(cell);
+        }
+    }
+
     stats.sky_surf_n = dpvs.sky_start_surfs.len() as u32;
     stats.sky_mesh_n = dpvs
         .sky_start_surfs
@@ -327,17 +787,12 @@ pub fn apply_dpvs_cull(
 
     let mut bsp_census = BspDrawSurfCensus::default();
     for range in dpvs.camera_ranges.iter() {
-        let range = append_camera_bsp_range(
-            range.kind,
-            range.begin,
-            range.end,
+        let range = cull.draws.append_camera_bsp_range(
+            range,
             &mut cull.surface_vis,
             &cull.surface_draw_fields,
             &cull.capture.packed_draw_surfs,
             &cull.surface_materials,
-            &mut cull.bsp_run_scratch,
-            &mut cull.draw_items,
-            &mut cull.g0_surfs,
         );
         bsp_census.range_n = bsp_census.range_n.saturating_add(range.range_n);
         bsp_census.visible_n = bsp_census.visible_n.saturating_add(range.visible_n);
@@ -347,6 +802,26 @@ pub fn apply_dpvs_cull(
         bsp_census.output_overflow_n = bsp_census
             .output_overflow_n
             .saturating_add(range.output_overflow_n);
+    }
+    for layer in &cull.atlas_layers {
+        let base = layer.surface_base as u32;
+        for range in layer.dpvs.camera_ranges.iter() {
+            let range = cull.draws.append_camera_bsp_range(
+                asset_world::CameraSurfRange {
+                    kind: range.kind,
+                    begin: base + range.begin,
+                    end: base + range.end,
+                },
+                &mut cull.surface_vis,
+                &cull.surface_draw_fields,
+                &cull.capture.packed_draw_surfs,
+                &cull.surface_materials,
+            );
+            bsp_census.visible_n = bsp_census.visible_n.saturating_add(range.visible_n);
+            bsp_census.admitted_n = bsp_census.admitted_n.saturating_add(range.admitted_n);
+            bsp_census.run_n = bsp_census.run_n.saturating_add(range.run_n);
+            bsp_census.input_gap_n = bsp_census.input_gap_n.saturating_add(range.input_gap_n);
+        }
     }
     stats.bsp_visible_surfaces = bsp_census.visible_n;
     stats.bsp_admitted_surfaces = bsp_census.admitted_n;
@@ -361,10 +836,11 @@ pub fn apply_dpvs_cull(
     let mut draw_items_id = crate::assemble::drawsurf::list::CONTENT_ID_SEED;
     crate::assemble::drawsurf::list::mix_content_id(
         &mut draw_items_id,
-        cull.draw_items.len() as u64,
+        cull.draws.items.len() as u64,
     );
     stats.sky_drawn_n = cull
-        .draw_items
+        .draws
+        .items
         .iter()
         .map(|item| {
             (0..item.run)
@@ -383,7 +859,7 @@ pub fn apply_dpvs_cull(
     let mut rebinds = 0u32;
     let mut lightmapped_tris = 0u32;
     let mut fallback_tris = 0u32;
-    for item in &cull.draw_items {
+    for item in &cull.draws.items {
         crate::assemble::drawsurf::list::mix_content_id(&mut draw_items_id, item.key);
         crate::assemble::drawsurf::list::mix_content_id(&mut draw_items_id, u64::from(item.surf));
         crate::assemble::drawsurf::list::mix_content_id(&mut draw_items_id, u64::from(item.run));
@@ -432,16 +908,62 @@ pub fn apply_dpvs_cull(
         stats.eye_cell_unresolved = stats.eye_cell_unresolved.saturating_add(1);
     }
     stats.visible_cells = vis.count_ones();
-    drop(vis);
+
+    // Root-sized bitsets cannot index the cells of another world.
+    let vis_all = !portaled && (shared || eye_cell.is_none());
     stats.cell_vis.clone_from(&words);
-    stats.cell_vis_count = dpvs.cell_count;
-    stats.cell_vis_all = eye_cell.is_none();
+    stats.cell_vis_count = cell_count;
+    stats.cell_vis_all = vis_all;
+    cull.cell_vis_world = camera_world;
     cull.cell_vis.clone_from(&words);
-    cull.cell_vis_all = eye_cell.is_none();
+    cull.cell_vis_all = vis_all;
+    let mut views: Vec<_> = portal_visibility
+        .iter()
+        .map(|report| {
+            let dpvs = if report.world == 0 {
+                dpvs
+            } else {
+                cull.atlas_layers
+                    .iter()
+                    .find(|layer| layer.world == report.world)
+                    .map_or(dpvs, |layer| &layer.dpvs)
+            };
+            let mut words = vec![0u32; words_for_bits(dpvs.cell_count.max(1))];
+            for &cell in &report.visible_cells {
+                if let Some(word) = words.get_mut(cell / 32) {
+                    *word |= 1 << (cell % 32);
+                }
+            }
+            render_scene::PublishedCellView {
+                view: report.view,
+                world: report.world,
+                shared,
+                eye: report.eye,
+                words,
+                cell_count: dpvs.cell_count,
+                planes: report.planes.clone(),
+                vis_all: report.cell.is_none(),
+            }
+        })
+        .collect();
+    if !portaled {
+        views.push(render_scene::PublishedCellView {
+            view: 0,
+            world: camera_world,
+            shared,
+            eye,
+            words: words.clone(),
+            cell_count,
+            planes: pvs.frustum_planes.clone(),
+            vis_all,
+        });
+    }
     *published_vis = render_scene::PublishedCellVis {
+        world: camera_world,
+        views,
         words: words.clone(),
-        cell_count: dpvs.cell_count,
-        vis_all: eye_cell.is_none(),
+        cell_count,
+        vis_all,
     };
     stats.portals_frustum_skipped = walk_stats.skip_clip;
     stats.child_planes_unported = walk_stats.child_planes_unported;
@@ -451,9 +973,9 @@ pub fn apply_dpvs_cull(
     stats.surfaces_admitted_unbounded = aabb_stats.surfaces_admitted_unbounded;
     stats.smodels_rejected_by_bounds = aabb_stats.smodels_rejected_by_bounds;
     stats.smodels_admitted_unbounded = aabb_stats.smodels_admitted_unbounded;
-    stats.keys = cull.draw_items.len() as u32;
-    cull.draw_items_id = draw_items_id;
-    stats.g0_world_surfs.clone_from(&cull.g0_surfs);
+    stats.keys = cull.draws.items.len() as u32;
+    cull.draws.content_id = draw_items_id;
+    stats.g0_world_surfs.clone_from(&cull.draws.g0_surfs);
     stats.rebinds = rebinds;
     stats.surfaces = surfaces;
     stats.triangles = tris;
@@ -465,7 +987,7 @@ pub fn apply_dpvs_cull(
     stats.fov_deg = fov.to_degrees();
 
     let submitted_batches = batch_visible.iter().filter(|&&v| v).count() as u32;
-    perf::Counter::CounterSubmittedBatches.emit(f64::from(submitted_batches));
+    perf::counter!("batches", "iw4l.render", f64::from(submitted_batches));
 
     stats.submitted_batches = submitted_batches;
     stats.rewritten_index_bytes = 0;
@@ -475,6 +997,268 @@ pub fn apply_dpvs_cull(
     let mut smodel_vis_id = crate::assemble::drawsurf::list::CONTENT_ID_SEED;
     crate::assemble::drawsurf::list::mix_content_bytes(&mut smodel_vis_id, &cull.smodel_vis);
     stats.smodel_vis_id = smodel_vis_id;
+    scene.portal_visibility = portal_visibility;
+    scene.portal_view = portal_view;
+}
+
+/// Admits the surfaces and static models of `dpvs`'s visible cells that the
+/// frustum keeps, through each cell's AABB tree.
+fn admit_visible_cells(
+    dpvs: &WorldDpvs,
+    visible: impl Fn(usize) -> bool,
+    frustum: &[[f32; 4]],
+    vis_data: &mut DpvsVisData<'_>,
+    aabb_stats: &mut AabbCullStats,
+) {
+    for cell in 0..dpvs.cell_count {
+        if !visible(cell) {
+            continue;
+        }
+        let Some(tree) = dpvs.aabb_trees.get(cell) else {
+            continue;
+        };
+        if tree.is_empty() {
+            if let Some(root) = dpvs.cell_roots.get(cell)
+                && root.count > 0
+            {
+                admit_cell_root_span(
+                    &dpvs.sorted_surf_index,
+                    root.start,
+                    root.count,
+                    vis_data,
+                    aabb_stats,
+                );
+            }
+            continue;
+        }
+        let cull_input = AabbTreeCull {
+            nodes: tree,
+            smodel_indexes: dpvs
+                .aabb_smodel_indices
+                .get(cell)
+                .map_or(&[][..], Vec::as_slice),
+            sorted_surf_index: &dpvs.sorted_surf_index,
+            surfaces_bounds: &dpvs.surface_bounds,
+            smodel_bounds: &dpvs.smodel_bounds,
+            draw_decals: DRAW_DECALS,
+        };
+        add_aabb_tree_surfaces_in_frustum(&cull_input, frustum, vis_data, aabb_stats);
+    }
+    admit_generated_surfaces(dpvs, visible, frustum, vis_data.surface_vis);
+}
+
+fn admit_generated_surfaces(
+    dpvs: &WorldDpvs,
+    visible: impl Fn(usize) -> bool,
+    planes: &[[f32; 4]],
+    out: &mut [u8],
+) {
+    for generated in &dpvs.generated_surfaces {
+        if (dpvs.cell_count == 0 || generated.cells.iter().any(|&cell| visible(cell)))
+            && dpvs
+                .surface_bounds
+                .get(generated.surface)
+                .is_some_and(|&bounds| !dpvs_iw4::bounds_culled(bounds, planes))
+            && let Some(slot) = out.get_mut(generated.surface)
+        {
+            *slot = 1;
+        }
+    }
+}
+
+/// Traverse each destination's native cell graph from its exit cell, using
+/// the camera frustum transformed and narrowed by the ancestor door windings.
+/// The output is a union of physical visibility; exact draws retain view tags.
+impl PortalCullFrame<'_> {
+    fn admit_views(
+        &mut self,
+        host: &WorldDpvs,
+        layers: &[WorldAtlasLayer],
+        view: &mut render_frame::PortalView,
+        pvs: &render_scene::LockPvsView,
+        vis_data: &mut DpvsVisData<'_>,
+        aabb_stats: &mut AabbCullStats,
+    ) -> (Vec<PortalVisibility>, Vec<usize>) {
+        if view.shared {
+            // Native room walks cannot establish visibility between overlapping maps.
+            let mut reports = Vec::new();
+            for index in 0..view.worlds.len() {
+                if !view.is_selected(index) || view.moves[index].is_none() {
+                    continue;
+                }
+                let Some(planes) =
+                    view.clip_planes_in(index, pvs.eye.to_array(), &pvs.frustum_planes)
+                else {
+                    continue;
+                };
+                let mut surfaces = vec![0; vis_data.surface_vis.len()];
+                let mut smodels = vec![0; vis_data.smodel_vis.len()];
+                let mut admit = |dpvs: &WorldDpvs,
+                                 surface_base: usize,
+                                 surface_end: usize,
+                                 smodel_base: usize| {
+                    let mut local = DpvsVisData {
+                        surface_vis: &mut surfaces[surface_base..surface_end],
+                        smodel_vis: &mut smodels[smodel_base..],
+                    };
+                    admit_visible_cells(dpvs, |_| true, &planes, &mut local, aabb_stats);
+                    let mut sky_planes = planes.clone();
+                    if sky_planes.len() > 1 {
+                        sky_planes.remove(1);
+                    }
+                    add_sky_surfaces_dpvs(
+                        &dpvs.sky_start_surfs,
+                        &dpvs.surface_bounds,
+                        &sky_planes,
+                        local.surface_vis,
+                    );
+                };
+                admit(host, 0, vis_data.surface_vis.len(), 0);
+                for layer in layers {
+                    admit(
+                        &layer.dpvs,
+                        layer.surface_base,
+                        layer.surface_base + layer.surface_count,
+                        layer.smodel_base,
+                    );
+                }
+                for (out, &value) in vis_data.surface_vis.iter_mut().zip(&surfaces) {
+                    *out |= value;
+                }
+                for (out, &value) in vis_data.smodel_vis.iter_mut().zip(&smodels) {
+                    *out |= value;
+                }
+                let eye = view
+                    .eye_in(index, pvs.eye.to_array())
+                    .unwrap_or(pvs.eye.to_array());
+                reports.push(PortalVisibility {
+                    view: index,
+                    depth: view.view_depth(index).unwrap_or(0),
+                    max_range: None,
+                    world: view.worlds[index],
+                    eye,
+                    seed: eye,
+                    cell: None,
+                    planes,
+                    visible_cells: (0..host.cell_count).collect(),
+                    visible_surfaces: surfaces.iter().filter(|&&v| v != 0).count(),
+                    visible_smodels: smodels.iter().filter(|&&v| v != 0).count(),
+                });
+                view.visibility[index] = Some(render_frame::portal::PortalDrawVisibility {
+                    surface_base: 0,
+                    surfaces: surfaces.into(),
+                    smodel_base: 0,
+                    smodels: smodels.into(),
+                    bmodels: Default::default(),
+                });
+            }
+            return (reports, (0..host.cell_count).collect());
+        }
+        let surface_vis = &mut *vis_data.surface_vis;
+        let smodel_vis = &mut *vis_data.smodel_vis;
+        let scratch = &mut *self.scratch;
+        let cell_cache = self.cells.as_mut_slice();
+        let mut reports = Vec::new();
+        let mut root_cells = Vec::new();
+        for index in 0..view.worlds.len() {
+            if !view.is_selected(index) {
+                continue;
+            }
+            let world = view.worlds[index];
+            let (dpvs, surface_base, surface_end, smodel_base) = if world == 0 {
+                (host, 0, surface_vis.len(), 0)
+            } else {
+                let Some(layer) = layers.iter().find(|layer| layer.world == world) else {
+                    continue;
+                };
+                (
+                    &layer.dpvs,
+                    layer.surface_base,
+                    layer.surface_base + layer.surface_count,
+                    layer.smodel_base,
+                )
+            };
+            let cells = cell_cache
+                .get_mut(index)
+                .and_then(Option::take)
+                .or_else(|| walk_portal_cells(dpvs, view, index, pvs, scratch));
+            let Some(PortalCellVisibility {
+                depth,
+                max_range,
+                planes,
+                eye: virtual_eye,
+                seed,
+                cell,
+                visible_cells,
+                ..
+            }) = cells
+            else {
+                continue;
+            };
+            if index == view.camera_world {
+                root_cells.extend_from_slice(&visible_cells);
+            }
+            let (Some(surfaces), Some(smodels)) = (
+                surface_vis.get_mut(surface_base..surface_end),
+                smodel_vis.get_mut(smodel_base..),
+            ) else {
+                continue;
+            };
+            let mut local_surface = vec![0; surfaces.len()];
+            let mut local_smodel = vec![0; smodels.len()];
+            admit_visible_cells(
+                dpvs,
+                |cell| visible_cells.binary_search(&cell).is_ok(),
+                &planes,
+                &mut DpvsVisData {
+                    surface_vis: &mut local_surface,
+                    smodel_vis: &mut local_smodel,
+                },
+                aabb_stats,
+            );
+            let mut sky_planes = planes.clone();
+            if sky_planes.len() > 1 {
+                sky_planes.remove(1);
+            }
+            add_sky_surfaces_dpvs(
+                &dpvs.sky_start_surfs,
+                &dpvs.surface_bounds,
+                &sky_planes,
+                &mut local_surface,
+            );
+            let visible_surfaces = local_surface.iter().filter(|&&v| v != 0).count();
+            let visible_smodels = local_smodel.iter().filter(|&&v| v != 0).count();
+            for (out, &visible) in surfaces.iter_mut().zip(&local_surface) {
+                *out |= visible;
+            }
+            for (out, &visible) in smodels.iter_mut().zip(&local_smodel) {
+                *out |= visible;
+            }
+            // The union above only enumerates retained candidates. Submission uses
+            // this view's own native membership, never another view's union.
+            view.visibility[index] = Some(render_frame::portal::PortalDrawVisibility {
+                surface_base,
+                surfaces: local_surface.into(),
+                smodel_base,
+                smodels: local_smodel.into(),
+                bmodels: Default::default(),
+            });
+            reports.push(PortalVisibility {
+                view: index,
+                depth,
+                max_range,
+                world,
+                eye: virtual_eye,
+                seed,
+                cell,
+                planes,
+                visible_cells,
+                visible_surfaces,
+                visible_smodels,
+            });
+        }
+        (reports, root_cells)
+    }
 }
 
 pub(crate) fn log_script_model_gaps_once(
@@ -586,136 +1370,144 @@ pub(crate) fn add_world_surfaces_frustum_only(
             &mut draw_msb[..],
         );
         for cell in 0..dpvs.cell_count {
-            if !msb_get(&draw_msb, cell) {
+            if !msb_get(draw_msb, cell) {
                 continue;
             }
             add_one_cell_frustum_only(dpvs, cell, frustum, &mut vis_data, &mut stats);
         }
         n
     };
+    admit_generated_surfaces(
+        dpvs,
+        |cell| dpvs.cell_caster_bits.is_empty() || msb_get(draw_msb, cell),
+        frustum,
+        vis_data.surface_vis,
+    );
     (stats, draw_n)
 }
 
-fn append_camera_bsp_range(
-    kind: asset_world::CameraRangeKind,
-    begin: u32,
-    end: u32,
-    surface_vis: &mut [u8],
-    surfaces: &[asset_world::SurfaceDrawFields],
-    draw_surfs: &[GfxDrawSurf],
-    surface_materials: &[Option<assets::MaterialIndex>],
-    scratch: &mut Vec<BspDrawSurfRun<asset_world::CameraRangeKind>>,
-    draw_items: &mut Vec<WorldDrawItem>,
-    g0_surfs: &mut Vec<u16>,
-) -> BspDrawSurfCensus {
-    let range_n = end.saturating_sub(begin);
-    if end < begin {
-        return BspDrawSurfCensus {
-            input_gap_n: 1,
-            ..BspDrawSurfCensus::default()
-        };
-    }
-    let (Ok(begin_i), Ok(end_i)) = (usize::try_from(begin), usize::try_from(end)) else {
-        return BspDrawSurfCensus {
-            range_n,
-            input_gap_n: range_n.max(1),
-            ..BspDrawSurfCensus::default()
-        };
-    };
-    if end_i > surface_vis.len() || end_i > surfaces.len() || end_i > draw_surfs.len() {
-        let visible_n = surface_vis
-            .get(begin_i..surface_vis.len().min(end_i))
-            .map_or(0, |bytes| {
-                bytes.iter().filter(|byte| **byte != 0).count() as u32
-            });
-        return BspDrawSurfCensus {
-            range_n,
-            visible_n,
-            input_gap_n: range_n.max(1),
-            ..BspDrawSurfCensus::default()
-        };
-    }
-
-    let mut host_input_gap_n = 0u32;
-    for surf in begin_i..end_i {
-        if surface_vis[surf] == 0 || draw_surfs[surf].packed != 0 {
-            continue;
+impl WorldDrawItems {
+    pub(crate) fn append_camera_bsp_range(
+        &mut self,
+        range: asset_world::CameraSurfRange,
+        surface_vis: &mut [u8],
+        surfaces: &[asset_world::SurfaceDrawFields],
+        draw_surfs: &[GfxDrawSurf],
+        surface_materials: &[Option<assets::MaterialIndex>],
+    ) -> BspDrawSurfCensus {
+        let asset_world::CameraSurfRange { kind, begin, end } = range;
+        let scratch = &mut self.bsp_run_scratch;
+        let draw_items = &mut self.items;
+        let g0_surfs = &mut self.g0_surfs;
+        let range_n = end.saturating_sub(begin);
+        if end < begin {
+            return BspDrawSurfCensus {
+                input_gap_n: 1,
+                ..BspDrawSurfCensus::default()
+            };
         }
-        surface_vis[surf] = 0;
-        host_input_gap_n = host_input_gap_n.saturating_add(1);
-        if let Ok(surf) = u16::try_from(surf) {
-            g0_surfs.push(surf);
+        let (Ok(begin_i), Ok(end_i)) = (usize::try_from(begin), usize::try_from(end)) else {
+            return BspDrawSurfCensus {
+                range_n,
+                input_gap_n: range_n.max(1),
+                ..BspDrawSurfCensus::default()
+            };
+        };
+        if end_i > surface_vis.len() || end_i > surfaces.len() || end_i > draw_surfs.len() {
+            let visible_n = surface_vis
+                .get(begin_i..surface_vis.len().min(end_i))
+                .map_or(0, |bytes| {
+                    bytes.iter().filter(|byte| **byte != 0).count() as u32
+                });
+            return BspDrawSurfCensus {
+                range_n,
+                visible_n,
+                input_gap_n: range_n.max(1),
+                ..BspDrawSurfCensus::default()
+            };
         }
-    }
 
-    let placeholder = BspDrawSurfRun {
-        kind,
-        first_surf: 0,
-        surf_count: 0,
-        draw_surf: GfxDrawSurf::from_packed(0),
-        setup_key_changed: false,
-    };
-    scratch.clear();
-    scratch.resize(end_i - begin_i, placeholder);
-
-    let mut census = BspDrawSurfCensus {
-        range_n,
-        ..BspDrawSurfCensus::default()
-    };
-    let material = |surf: usize| surface_materials.get(surf).copied().flatten();
-    let mut span_begin = begin;
-    let mut previous_key = None;
-    while (span_begin as usize) < end_i {
-        let head = span_begin as usize;
-        let visible = surface_vis[head] != 0;
-        let span_len = surface_vis[head..end_i]
-            .iter()
-            .enumerate()
-            .position(|(offset, &vis)| {
-                (vis != 0) != visible || (visible && material(head + offset) != material(head))
-            })
-            .unwrap_or(end_i - head);
-        let span_end = span_begin + span_len as u32;
-        if visible {
-            let output = &mut scratch[census.run_n as usize..];
-            let part = add_bsp_draw_surfs_camera(
-                kind,
-                span_begin,
-                span_end,
-                surface_vis,
-                surfaces,
-                draw_surfs,
-                output,
-            );
-            let emitted = part.run_n.saturating_sub(part.output_overflow_n) as usize;
-            if let Some(first) = output.get_mut(..emitted).and_then(|runs| runs.first_mut()) {
-                let key = dpvs_iw4::bsp_draw_surf_setup_key(first.draw_surf);
-                first.setup_key_changed = previous_key.is_some_and(|previous| previous != key);
-                previous_key = Some(dpvs_iw4::bsp_draw_surf_setup_key(
-                    output[emitted - 1].draw_surf,
-                ));
+        let mut host_input_gap_n = 0u32;
+        for surf in begin_i..end_i {
+            if surface_vis[surf] == 0 || draw_surfs[surf].packed != 0 {
+                continue;
             }
-            census.visible_n += part.visible_n;
-            census.admitted_n += part.admitted_n;
-            census.run_n += part.run_n;
-            census.input_gap_n += part.input_gap_n;
-            census.output_overflow_n += part.output_overflow_n;
+            surface_vis[surf] = 0;
+            host_input_gap_n = host_input_gap_n.saturating_add(1);
+            if let Ok(surf) = u16::try_from(surf) {
+                g0_surfs.push(surf);
+            }
         }
-        span_begin = span_end;
+
+        let placeholder = BspDrawSurfRun {
+            kind,
+            first_surf: 0,
+            surf_count: 0,
+            draw_surf: GfxDrawSurf::from_packed(0),
+            setup_key_changed: false,
+        };
+        scratch.clear();
+        scratch.resize(end_i - begin_i, placeholder);
+
+        let mut census = BspDrawSurfCensus {
+            range_n,
+            ..BspDrawSurfCensus::default()
+        };
+        let material = |surf: usize| surface_materials.get(surf).copied().flatten();
+        let mut span_begin = begin;
+        let mut previous_key = None;
+        while (span_begin as usize) < end_i {
+            let head = span_begin as usize;
+            let visible = surface_vis[head] != 0;
+            let span_len = surface_vis[head..end_i]
+                .iter()
+                .enumerate()
+                .position(|(offset, &vis)| {
+                    (vis != 0) != visible || (visible && material(head + offset) != material(head))
+                })
+                .unwrap_or(end_i - head);
+            let span_end = span_begin + span_len as u32;
+            if visible {
+                let output = &mut scratch[census.run_n as usize..];
+                let part = add_bsp_draw_surfs_camera(
+                    kind,
+                    span_begin,
+                    span_end,
+                    surface_vis,
+                    surfaces,
+                    draw_surfs,
+                    output,
+                );
+                let emitted = part.run_n.saturating_sub(part.output_overflow_n) as usize;
+                if let Some(first) = output.get_mut(..emitted).and_then(|runs| runs.first_mut()) {
+                    let key = dpvs_iw4::bsp_draw_surf_setup_key(first.draw_surf);
+                    first.setup_key_changed = previous_key.is_some_and(|previous| previous != key);
+                    previous_key = Some(dpvs_iw4::bsp_draw_surf_setup_key(
+                        output[emitted - 1].draw_surf,
+                    ));
+                }
+                census.visible_n += part.visible_n;
+                census.admitted_n += part.admitted_n;
+                census.run_n += part.run_n;
+                census.input_gap_n += part.input_gap_n;
+                census.output_overflow_n += part.output_overflow_n;
+            }
+            span_begin = span_end;
+        }
+        census.visible_n = census.visible_n.saturating_add(host_input_gap_n);
+        census.input_gap_n = census.input_gap_n.saturating_add(host_input_gap_n);
+        let emitted_n = census.run_n.saturating_sub(census.output_overflow_n) as usize;
+        for run in scratch.iter().take(emitted_n) {
+            draw_items.push(WorldDrawItem {
+                key: run.draw_surf.packed,
+                surf: run.first_surf,
+                run: run.surf_count,
+                kind: WorldDrawItemKind::Bsp(run.kind),
+                setup_key_changed: run.setup_key_changed,
+            });
+        }
+        census
     }
-    census.visible_n = census.visible_n.saturating_add(host_input_gap_n);
-    census.input_gap_n = census.input_gap_n.saturating_add(host_input_gap_n);
-    let emitted_n = census.run_n.saturating_sub(census.output_overflow_n) as usize;
-    for run in scratch.iter().take(emitted_n) {
-        draw_items.push(WorldDrawItem {
-            key: run.draw_surf.packed,
-            surf: run.first_surf,
-            run: run.surf_count,
-            kind: WorldDrawItemKind::Bsp(run.kind),
-            setup_key_changed: run.setup_key_changed,
-        });
-    }
-    census
 }
 
 fn add_one_cell_frustum_only(
@@ -811,7 +1603,7 @@ pub(crate) fn append_bmodel_colour_span(
         }
         match packed_world_colour_key(cull, surf, baked_material_keys, batch_primary_lights) {
             Some(packed) => {
-                cull.draw_items.push(WorldDrawItem {
+                cull.draws.items.push(WorldDrawItem {
                     key: packed,
                     surf: surf_u16,
                     run: 1,
@@ -830,9 +1622,25 @@ pub(crate) fn refresh_draw_items_id(cull: &mut crate::prepare::scene::world::Wor
     let mut draw_items_id = crate::assemble::drawsurf::list::CONTENT_ID_SEED;
     crate::assemble::drawsurf::list::mix_content_id(
         &mut draw_items_id,
-        cull.draw_items.len() as u64,
+        cull.draws.items.len() as u64,
     );
-    for item in &cull.draw_items {
+    for item in &cull.draws.items {
+        if item.kind == WorldDrawItemKind::BModel
+            && let Some((model, pose)) =
+                crate::assemble::drawsurf::retained_list::bmodel_owner_for_surf(
+                    item.surf,
+                    &cull.brush_models,
+                    &cull.bmodel_world_from_local,
+                )
+        {
+            crate::assemble::drawsurf::list::mix_content_id(&mut draw_items_id, u64::from(model));
+            for word in pose.to_cols_array() {
+                crate::assemble::drawsurf::list::mix_content_id(
+                    &mut draw_items_id,
+                    u64::from(word.to_bits()),
+                );
+            }
+        }
         crate::assemble::drawsurf::list::mix_content_id(&mut draw_items_id, item.key);
         crate::assemble::drawsurf::list::mix_content_id(&mut draw_items_id, u64::from(item.surf));
         crate::assemble::drawsurf::list::mix_content_id(&mut draw_items_id, u64::from(item.run));
@@ -851,7 +1659,7 @@ pub(crate) fn refresh_draw_items_id(cull: &mut crate::prepare::scene::world::Wor
             u64::from(item.setup_key_changed),
         );
     }
-    cull.draw_items_id = draw_items_id;
+    cull.draws.content_id = draw_items_id;
 }
 
 #[must_use]

@@ -1,6 +1,6 @@
 pub const FX_SYSTEM_STRIDE: usize = 0xad0;
 
-pub const FX_BUFFERS_POOL_STRIDE: usize = 0x107a_80;
+pub const FX_BUFFERS_POOL_STRIDE: usize = 0x0010_7a80;
 
 pub const FX_EFFECT_SLOT_SIZE: usize = 0x90;
 

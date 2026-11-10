@@ -49,7 +49,7 @@ pub struct LightGridLookupCorner {
     pub trace_allows: bool,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct LightGridLookupColorAccum {
     pub indices: [u16; 8],
     pub weights: [f32; 8],

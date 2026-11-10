@@ -18,99 +18,21 @@ pub struct QueryDenied;
 
 pub type QueryResult<T> = Result<T, QueryDenied>;
 
-/// Which part of the bot spent an interface query. Denial is only readable
-/// per subsystem, so the counters keep them apart.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum QuerySubsystem {
-    Perception,
-    Connector,
-    #[default]
-    Execution,
-    Tactical,
-}
-
-impl QuerySubsystem {
-    pub const COUNT: usize = 4;
-    pub const ALL: [Self; Self::COUNT] = [
-        Self::Perception,
-        Self::Connector,
-        Self::Execution,
-        Self::Tactical,
-    ];
-
-    pub const fn index(self) -> usize {
-        self as usize
-    }
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Perception => "perception",
-            Self::Connector => "connector",
-            Self::Execution => "execution",
-            Self::Tactical => "tactical",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct QueryCounters {
-    pub attempted: [u32; QuerySubsystem::COUNT],
-    pub granted: [u32; QuerySubsystem::COUNT],
-    pub denied: [u32; QuerySubsystem::COUNT],
-    /// Collision operations counted where they enter the trace API. One granted
-    /// `walk_hull` issues several of them.
-    pub primitives: u32,
-}
-
-impl QueryCounters {
-    pub const ZERO: Self = Self {
-        attempted: [0; QuerySubsystem::COUNT],
-        granted: [0; QuerySubsystem::COUNT],
-        denied: [0; QuerySubsystem::COUNT],
-        primitives: 0,
-    };
-
-    fn record(&mut self, subsystem: QuerySubsystem, granted: bool) {
-        let i = subsystem.index();
-        self.attempted[i] = self.attempted[i].saturating_add(1);
-        let side = if granted {
-            &mut self.granted[i]
-        } else {
-            &mut self.denied[i]
-        };
-        *side = side.saturating_add(1);
-    }
-
-    pub fn merge(&mut self, other: &Self) {
-        for i in 0..QuerySubsystem::COUNT {
-            self.attempted[i] = self.attempted[i].saturating_add(other.attempted[i]);
-            self.granted[i] = self.granted[i].saturating_add(other.granted[i]);
-            self.denied[i] = self.denied[i].saturating_add(other.denied[i]);
-        }
-        self.primitives = self.primitives.saturating_add(other.primitives);
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TraceBudget {
     pub remaining: u32,
-    pub counters: QueryCounters,
 }
 
 impl TraceBudget {
     pub const fn new(remaining: u32) -> Self {
-        Self {
-            remaining,
-            counters: QueryCounters::ZERO,
-        }
+        Self { remaining }
     }
 
-    fn take(&mut self, subsystem: QuerySubsystem) -> bool {
+    fn take(&mut self) -> bool {
         let granted = self.remaining != 0;
         if granted {
             self.remaining -= 1;
         }
-        self.counters.record(subsystem, granted);
         granted
     }
 }
@@ -199,8 +121,15 @@ pub trait WorldQuery {
         })
     }
 
-    /// Attribute the queries that follow to a subsystem in the shared counters.
-    fn enter(&mut self, _subsystem: QuerySubsystem) {}
+    /// Positions at which a target can appear to this observer through doors.
+    fn apparent_positions(&self, _observer: [f32; 3], target: [f32; 3]) -> Vec<[f32; 3]> {
+        vec![target]
+    }
+
+    /// Target just beyond the entrance plane of an explicit portal edge.
+    fn portal_waypoint(&self, _entry: [f32; 3], _exit: [f32; 3]) -> Option<[f32; 3]> {
+        None
+    }
 
     fn objective_contains(&self, obj: ModeObjective, feet: [f32; 3]) -> bool {
         let dx = feet[0] - obj.origin[0];
@@ -219,74 +148,18 @@ pub trait WorldQuery {
     }
 }
 
-/// Counts the collision operations a composite check issues without charging
-/// them against the interface quota, which stays in walk/trace units.
-struct Primitives<'a, W> {
-    world: &'a mut W,
-    count: u32,
-}
-
-impl<W: WorldQuery> WorldQuery for Primitives<'_, W> {
-    fn sight_ray(
-        &mut self,
-        start: [f32; 3],
-        end: [f32; 3],
-        ignore: ClientId,
-    ) -> QueryResult<SightSample> {
-        self.count += 1;
-        self.world.sight_ray(start, end, ignore)
-    }
-
-    fn shot_ray(
-        &mut self,
-        start: [f32; 3],
-        end: [f32; 3],
-        ignore: ClientId,
-    ) -> QueryResult<SightSample> {
-        self.count += 1;
-        self.world.shot_ray(start, end, ignore)
-    }
-
-    fn hull_trace(&mut self, start: [f32; 3], end: [f32; 3]) -> QueryResult<HullTrace> {
-        self.count += 1;
-        self.world.hull_trace(start, end)
-    }
-
-    fn navigation_trace(&mut self, start: [f32; 3], end: [f32; 3]) -> QueryResult<HullTrace> {
-        self.count += 1;
-        self.world.navigation_trace(start, end)
-    }
-
-    fn objective_contains(&self, obj: ModeObjective, feet: [f32; 3]) -> bool {
-        self.world.objective_contains(obj, feet)
-    }
-
-    fn weapon_class(&self, weapon: u16) -> WeaponClass {
-        self.world.weapon_class(weapon)
-    }
-
-    fn weapon_facts(&self, weapon: u16) -> Option<WeaponFacts> {
-        self.world.weapon_facts(weapon)
-    }
-}
-
 pub struct Budgeted<'a, W> {
     pub world: &'a mut W,
     pub budget: &'a mut TraceBudget,
-    pub subsystem: QuerySubsystem,
 }
 
 impl<'a, W> Budgeted<'a, W> {
     pub fn new(world: &'a mut W, budget: &'a mut TraceBudget) -> Self {
-        Self {
-            world,
-            budget,
-            subsystem: QuerySubsystem::default(),
-        }
+        Self { world, budget }
     }
 
     fn grant(&mut self) -> QueryResult<()> {
-        if self.budget.take(self.subsystem) {
+        if self.budget.take() {
             Ok(())
         } else {
             Err(QueryDenied)
@@ -302,7 +175,6 @@ impl<W: WorldQuery> WorldQuery for Budgeted<'_, W> {
         ignore: ClientId,
     ) -> QueryResult<SightSample> {
         self.grant()?;
-        self.budget.counters.primitives += 1;
         self.world.sight_ray(start, end, ignore)
     }
 
@@ -313,36 +185,30 @@ impl<W: WorldQuery> WorldQuery for Budgeted<'_, W> {
         ignore: ClientId,
     ) -> QueryResult<SightSample> {
         self.grant()?;
-        self.budget.counters.primitives += 1;
         self.world.shot_ray(start, end, ignore)
     }
 
     fn hull_trace(&mut self, start: [f32; 3], end: [f32; 3]) -> QueryResult<HullTrace> {
         self.grant()?;
-        self.budget.counters.primitives += 1;
         self.world.hull_trace(start, end)
     }
 
     fn navigation_trace(&mut self, start: [f32; 3], end: [f32; 3]) -> QueryResult<HullTrace> {
         self.grant()?;
-        self.budget.counters.primitives += 1;
         self.world.navigation_trace(start, end)
     }
 
     fn walk_hull(&mut self, start: [f32; 3], end: [f32; 3]) -> QueryResult<WalkSample> {
         self.grant()?;
-        let mut probe = Primitives {
-            world: self.world,
-            count: 0,
-        };
-        let sample = probe.walk_hull(start, end);
-        let issued = probe.count;
-        self.budget.counters.primitives += issued;
-        sample
+        self.world.walk_hull(start, end)
     }
 
-    fn enter(&mut self, subsystem: QuerySubsystem) {
-        self.subsystem = subsystem;
+    fn apparent_positions(&self, observer: [f32; 3], target: [f32; 3]) -> Vec<[f32; 3]> {
+        self.world.apparent_positions(observer, target)
+    }
+
+    fn portal_waypoint(&self, entry: [f32; 3], exit: [f32; 3]) -> Option<[f32; 3]> {
+        self.world.portal_waypoint(entry, exit)
     }
 
     fn objective_contains(&self, obj: ModeObjective, feet: [f32; 3]) -> bool {
@@ -399,6 +265,78 @@ impl WorldQuery for SimWorld {
         Ok(crate::nav::BakeTraces::bake_navigation(self, start, end))
     }
 
+    fn apparent_positions(&self, observer: [f32; 3], target: [f32; 3]) -> Vec<[f32; 3]> {
+        let content = self.content();
+        let Some(atlas) = content.atlas() else {
+            return vec![target];
+        };
+        let (here, there) = (
+            sim::world_graph::world_at(observer),
+            sim::world_graph::world_at(target),
+        );
+        let eye = [observer[0], observer[1], observer[2] + 60.0];
+        let chest = [target[0], target[1], target[2] + 48.0];
+        let mut positions = if here == there && atlas.crossing(eye, chest).is_none() {
+            vec![target]
+        } else {
+            Vec::new()
+        };
+        for (index, pair) in atlas.portals.iter().enumerate() {
+            for from_a in [true, false] {
+                let (near, far, yaw) = pair.oriented(from_a);
+                if near.world.index() != here
+                    || far.world.index() != there
+                    || self
+                        .world_objects()
+                        .portal_blocked_exits()
+                        .get(index)
+                        .is_some_and(|doors| doors[usize::from(from_a)])
+                {
+                    continue;
+                }
+                let apparent = sim::world_graph::carry_point(&far, &near, -yaw, target);
+                let chest = [apparent[0], apparent[1], apparent[2] + 48.0];
+                if atlas
+                    .crossing(eye, chest)
+                    .is_some_and(|(_, id, side)| id.index() == index && side == from_a)
+                {
+                    positions.push(apparent);
+                }
+            }
+        }
+        positions
+    }
+
+    fn portal_waypoint(&self, entry: [f32; 3], exit: [f32; 3]) -> Option<[f32; 3]> {
+        let content = self.content();
+        let atlas = content.atlas()?;
+        let close =
+            |a: [f32; 3], b: [f32; 3]| (0..3).map(|i| (a[i] - b[i]).powi(2)).sum::<f32>() < 4.0;
+        for (index, pair) in atlas.portals.iter().enumerate() {
+            for (side, (near, far)) in [(pair.a, pair.b), (pair.b, pair.a)].into_iter().enumerate()
+            {
+                if self
+                    .world_objects()
+                    .portal_blocked_exits()
+                    .get(index)
+                    .is_some_and(|doors| doors[1 - side])
+                {
+                    continue;
+                }
+                if close(crate::nav::portal_entrance(near), entry)
+                    && close(crate::nav::portal_entrance(far), exit)
+                {
+                    let offset = sim::world_graph::world_offset(near.world.index());
+                    return Some(std::array::from_fn(|i| {
+                        near.base[i] + offset[i] - near.normal[i] * 6.0
+                            + if i == 2 { 1.5 } else { 0.0 }
+                    }));
+                }
+            }
+        }
+        None
+    }
+
     fn objective_contains(&self, obj: ModeObjective, feet: [f32; 3]) -> bool {
         let dx = feet[0] - obj.origin[0];
         let dy = feet[1] - obj.origin[1];
@@ -427,6 +365,15 @@ impl WorldQuery for SimWorld {
 }
 
 impl crate::nav::BakeTraces for SimWorld {
+    fn bake_hull(&self, start: [f32; 3], end: [f32; 3]) -> HullTrace {
+        hull(self.trace_world(start, end, PLAYER_MINS, PLAYER_MAXS, MASK_PLAYER_SOLID))
+    }
+
+    fn bake_navigation(&self, start: [f32; 3], end: [f32; 3]) -> HullTrace {
+        hull(self.trace_navigation(start, end, PLAYER_MINS, PLAYER_MAXS, MASK_PLAYER_SOLID))
+    }
+}
+impl crate::nav::BakeTraces for sim::CollisionScene {
     fn bake_hull(&self, start: [f32; 3], end: [f32; 3]) -> HullTrace {
         hull(self.trace_world(start, end, PLAYER_MINS, PLAYER_MAXS, MASK_PLAYER_SOLID))
     }
@@ -470,7 +417,10 @@ fn classify_shot(outcome: TraceOutcome) -> SightSample {
         },
         TraceOutcome::Hit {
             fraction,
-            collider: ColliderId::EntityDObjBone { .. } | ColliderId::EntityLinkedBrush { .. },
+            collider:
+                ColliderId::EntityDObjBone { .. }
+                | ColliderId::EntityLinkedBrush { .. }
+                | ColliderId::EntityBody { .. },
             ..
         } => SightSample::Blocked {
             fraction,

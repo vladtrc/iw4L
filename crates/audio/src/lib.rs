@@ -5,7 +5,6 @@ mod backend;
 mod breath;
 mod clip_store;
 mod decode_budget;
-mod emit;
 mod entity_events;
 mod frontend;
 mod media_queue;
@@ -18,22 +17,22 @@ mod rumble;
 mod shellshock;
 mod space;
 mod start;
+mod weapon_sounds;
 
 pub use aliases::{
-    StepGait, explosion_surface_aliases, footstep_aliases, gear_alias, gear_rattle_alias,
-    land_aliases, quiet_surface_alias, select_cg_fire_alias, select_fire_alias, step_prefix,
-    surface_alias_candidates, world_surface_alias,
+    StepGait, footstep_aliases, gear_alias, gear_rattle_alias, land_aliases, quiet_surface_alias,
+    select_cg_fire_alias, select_fire_alias, step_prefix, surface_alias_candidates,
+    world_surface_alias,
 };
 pub use ambient::{
     MapAmbientBooted, SoundIwd, prepared_match_audio_key, stage_prepared_match_audio,
 };
 pub use clip_store::{ClipPath, ClipPathCost, ClipPrepCost, ClipStore, clip_prep_cost};
-pub use emit::{BobCycleTracker, emit_footstep_on_bob_wrap, emit_weapon_fire};
 pub use frontend::FrontendAudio;
 pub use match_set::{AudioReady, AudioSilent};
 pub use messages::{
     AliasCommand, BoundWeaponSound, FlameFire, Footstep, LandSound, PlayAlias, SND_ENT_LOCAL,
-    ViewmodelNotetrack, ViewmodelNotetracks, WeaponSound, ent_from_number,
+    SurfaceSound, ViewmodelNotetrack, ViewmodelNotetracks, WeaponSound, ent_from_number,
 };
 pub use playback::{
     AmbientListener, MissingAliasGaps, SoundBank, world_oneshot_channel_gains, world_oneshot_pan,
@@ -52,11 +51,17 @@ mod projectile_loops;
 
 mod weapon_lock;
 
+mod eq;
+mod master;
+mod room_dsp;
+mod room_mix;
 mod script_ambient;
 mod script_mix;
 mod script_music;
+mod script_sounds;
 
 mod admission;
+mod control;
 mod cue;
 mod pending;
 pub use cue::CueFailure;
@@ -86,4 +91,6 @@ mod cue_execution;
 mod event;
 pub use event::{AnimationMarkerId, AudioEvent, AudioEventId, AudioOccurrence};
 
-pub use ambient::{LoadingAudioOwner, LoadingAudioStatus, PreparedMatchAudio};
+pub use ambient::{LoadingAudio, LoadingAudioStatus, PreparedMatchAudio};
+
+mod portal_space;

@@ -22,6 +22,8 @@ CA key never leaves the local machine.
 on whichever unit serves its port. `update` restarts only when the binary
 changed; uninstall retains certificates and the descriptor.
 
+The core `community` crate owns descriptor validation, certificate trust, and the immutable selected-community context shared by networking and UI. Desktop startup discovers descriptors and publishes that context; desktop also supplies the platform restart callback. Core validates restart selection against the published descriptor list before invoking it.
+
 ## TLS identity
 
 The descriptor supplies `master.address`, `master.server_name` and an embedded
@@ -70,8 +72,8 @@ before atomically replacing `manifest.toml`; see [`DEPLOY.md`](DEPLOY.md).
 A community descriptor is required for master networking. Address, TLS name
 and CA come only from that file.
 On Linux, selecting a descriptor retains the locally built executable and
-skips the Windows update flow. `IW4L_COMMUNITY` selects a descriptor next to the
-executable (an absolute path is also accepted).
+skips the Windows update flow. Descriptors are the `.iw4l-server` files in the
+games root; the selected one is saved in `iw4l-artifacts/community.json`.
 
 | Setting | What it changes and when to set it |
 | --- | --- |
@@ -101,3 +103,26 @@ When a setting appears in more than one place:
   See GNU make's [environment rules](https://www.gnu.org/software/make/manual/html_node/Environment.html).
 * **Community launch:** the selected descriptor supplies master address, TLS
   name and CA. See [`WINDOWS.md`](WINDOWS.md) for selection and updating.
+
+## Family content versions
+
+Families ship together in one builder release. The builder version identifies
+the content version; a family change that changes a match descriptor ships as a
+new builder build through the updater. Lobby `ContentFamilies` advertises family
+names for availability, not independent content versions. Signon compares the
+map/weapon/class content hashes in `MatchDescriptor` and refuses mismatches.
+A room may therefore be listed before an incompatible build is refused at
+connect. Revisit per-family digests and earlier lobby diagnostics when a game
+repo first ships independently.
+
+## Browser pagination
+
+Master protocol 12 limits each room-list page by both the 16 KiB control-frame
+budget and 128 advertisements. `ListRooms.after` starts after the supplied
+`AdvertId`; `RoomList.next` supplies the next cursor, or is absent on the last
+page. Both the game browser and `iw4l-master list` collect every page.
+
+Advertisements are ordered by ID. Pages describe the live room list rather
+than a frozen snapshot: rooms inserted before the cursor appear on the next
+refresh, and closed rooms disappear immediately. The response generation
+identifies the service state used to build each page.

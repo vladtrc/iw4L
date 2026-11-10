@@ -12,8 +12,13 @@ use lighting_iw4::{
     spot_shadow_tess_scene_dobj_indices, spot_shadow_tess_scene_model_indices,
     spot_shadow_walk_casters, spot_shadow_xmodel_is_caster,
 };
-use render_frame::PackedFrontendLists;
 pub use render_frame::SpotShadowFrameSlot;
+use render_frame::{
+    LIST_TOKEN, PackedFrontendLists, SMODEL_RIGID_ENTRY_STRIDE, SRC_SMODEL_CACHED_BYTES,
+    SRC_SMODEL_CACHED_PTR, SRC_SMODEL_PRETESS_BYTES, SRC_SMODEL_PRETESS_PTR,
+    SRC_SMODEL_RIGID_COUNT, SRC_SMODEL_RIGID_PTR, SRC_SMODEL_SKINNED_BYTES, SRC_SMODEL_SKINNED_PTR,
+    SRC_WORLD_COUNT, SRC_WORLD_PTR, SRC_XMODEL_RIGID_COUNT, SRC_XMODEL_RIGID_PTR,
+};
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -37,8 +42,14 @@ pub struct SpotShadowCasterPlan {
     pub marked_n: u32,
 }
 
-fn remap_sidecar(indices: &mut [u32], input: &Range<usize>, compact: &[u32]) {
-    for index in indices {
+fn remap_sidecar<T>(
+    entries: &mut Vec<T>,
+    indices: &mut Vec<u32>,
+    input: &Range<usize>,
+    compact: &[u32],
+) {
+    assert_eq!(entries.len(), indices.len());
+    for index in indices.iter_mut() {
         let local = usize::try_from(*index).expect("spot packed provenance fits usize");
         let source = input
             .start
@@ -49,6 +60,9 @@ fn remap_sidecar(indices: &mut [u32], input: &Range<usize>, compact: &[u32]) {
             .get(source)
             .expect("spot product compaction covers every slot input");
     }
+    let mut owners = indices.iter();
+    entries.retain(|_| *owners.next().expect("entry has owner") != u32::MAX);
+    indices.retain(|&owner| owner != u32::MAX);
 }
 
 impl SpotShadowCasterPlan {
@@ -93,12 +107,73 @@ impl SpotShadowCasterPlan {
             .zip(emitted)
             .zip(ranges)
             .map(|((mut packed, emitted), input)| {
-                remap_sidecar(&mut packed.world_draw_indices, &input, compact);
-                remap_sidecar(&mut packed.xmodel_draw_indices, &input, compact);
-                remap_sidecar(&mut packed.smodel_draw_indices, &input, compact);
-                remap_sidecar(&mut packed.smodel_cached_draw_indices, &input, compact);
-                remap_sidecar(&mut packed.smodel_pretess_draw_indices, &input, compact);
-                remap_sidecar(&mut packed.smodel_skinned_draw_indices, &input, compact);
+                remap_sidecar(
+                    &mut packed.world,
+                    &mut packed.world_draw_indices,
+                    &input,
+                    compact,
+                );
+                remap_sidecar(
+                    &mut packed.xmodel,
+                    &mut packed.xmodel_draw_indices,
+                    &input,
+                    compact,
+                );
+                remap_sidecar(
+                    &mut packed.smodel,
+                    &mut packed.smodel_draw_indices,
+                    &input,
+                    compact,
+                );
+                remap_sidecar(
+                    &mut packed.smodel_cached,
+                    &mut packed.smodel_cached_draw_indices,
+                    &input,
+                    compact,
+                );
+                remap_sidecar(
+                    &mut packed.smodel_pretess,
+                    &mut packed.smodel_pretess_draw_indices,
+                    &input,
+                    compact,
+                );
+                remap_sidecar(
+                    &mut packed.smodel_skinned,
+                    &mut packed.smodel_skinned_draw_indices,
+                    &input,
+                    compact,
+                );
+                for (ptr, extent, count) in [
+                    (SRC_WORLD_PTR, SRC_WORLD_COUNT, packed.world.len()),
+                    (
+                        SRC_XMODEL_RIGID_PTR,
+                        SRC_XMODEL_RIGID_COUNT,
+                        packed.xmodel.len(),
+                    ),
+                    (
+                        SRC_SMODEL_RIGID_PTR,
+                        SRC_SMODEL_RIGID_COUNT,
+                        packed.smodel.len(),
+                    ),
+                    (
+                        SRC_SMODEL_CACHED_PTR,
+                        SRC_SMODEL_CACHED_BYTES,
+                        packed.smodel_cached.len() * SMODEL_RIGID_ENTRY_STRIDE,
+                    ),
+                    (
+                        SRC_SMODEL_PRETESS_PTR,
+                        SRC_SMODEL_PRETESS_BYTES,
+                        packed.smodel_pretess.len() * SMODEL_RIGID_ENTRY_STRIDE,
+                    ),
+                    (
+                        SRC_SMODEL_SKINNED_PTR,
+                        SRC_SMODEL_SKINNED_BYTES,
+                        packed.smodel_skinned.len() * SMODEL_RIGID_ENTRY_STRIDE,
+                    ),
+                ] {
+                    packed.src[ptr] = if count == 0 { 0 } else { LIST_TOKEN };
+                    packed.src[extent] = u32::try_from(count).expect("spot packed extent fits u32");
+                }
                 SpotShadowFrameSlot {
                     emitted,
                     packed: Arc::new(packed),
@@ -283,7 +358,7 @@ fn retained_smodel_for_lod_in(
     index: &RetainedIdentityIndex<'_>,
     plan: Option<&SmodelGpuPlan>,
     eye: Vec3,
-    ramp: LodRampArgs,
+    ramp: &LodRampArgs,
 ) -> Vec<RetainedDrawItem> {
     let Some(plan) = plan else {
         return Vec::new();
@@ -372,6 +447,10 @@ fn used_from_shadow_geom_and_xmodel(world: &WorldScene, draws: &[XModelSurfaceDr
     used
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The shadow planner takes distinct immutable render owners at its assembly boundary."
+)]
 pub fn fill_spot_shadow_caster_plan(
     plan: &mut SpotShadowCasterPlan,
     occ: &SpotShadowSceneOccupancy,
@@ -390,6 +469,7 @@ pub fn fill_spot_shadow_caster_plan(
     scene_time: u32,
     sm_enable: Option<bool>,
     sm_sun_enable: Option<bool>,
+    portal: Option<&render_frame::PortalView>,
 ) {
     plan.clear_frame();
     let lights = spot_lights(world);
@@ -413,18 +493,24 @@ pub fn fill_spot_shadow_caster_plan(
     let Some(choose) = spot_shadow_choose(
         &mut plan.history,
         used,
-        &lights,
-        view.eye.to_array(),
-        view.forward.to_array(),
+        lighting_iw4::SpotShadowScene {
+            lights: &lights,
+            sun_primary_index: world.sun_primary_light_count,
+            shadowable_light_count: lights.len() as u32,
+            primary_light_count: lights.len() as u32,
+            dist_cull_regions: None,
+        },
+        lighting_iw4::SpotShadowView {
+            origin: view.eye.to_array(),
+            forward: view.forward.to_array(),
+        },
         scene_time,
-        world.sun_primary_light_count,
-        lights.len() as u32,
-        lights.len() as u32,
-        lighting_iw4::SpotShadowUsedForce::None,
-        false,
-        host_dvars(world.sun_sample_size_near),
-        SPOT_SHADOW_SCORE_LUMA,
-        None,
+        lighting_iw4::SpotShadowSelectionPolicy {
+            force: lighting_iw4::SpotShadowUsedForce::None,
+            fast: false,
+            dvars: host_dvars(world.sun_sample_size_near),
+            luma: SPOT_SHADOW_SCORE_LUMA,
+        },
     ) else {
         return;
     };
@@ -592,17 +678,13 @@ pub fn fill_spot_shadow_caster_plan(
                     return None;
                 }
                 let mesh = world.static_model_meshes.get(inst.mesh);
-                if smodel_camera_lod(
+                smodel_camera_lod(
                     mesh.and_then(|m| m.lod),
                     inst.origin,
                     inst.scale,
                     Some(view.eye),
-                    lod_ramp,
-                )
-                .is_none()
-                {
-                    return None;
-                }
+                    &lod_ramp,
+                )?;
                 Some(inst.flags)
             },
             &mut smodel_ids,
@@ -612,7 +694,7 @@ pub fn fill_spot_shadow_caster_plan(
             &identity,
             smodel,
             view.eye,
-            lod_ramp,
+            &lod_ramp,
         ));
         for brush in &world.dyn_ent_brushes {
             if brush.brush_model == 0 {
@@ -658,7 +740,7 @@ pub fn fill_spot_shadow_caster_plan(
                     .map(|d| render_frontend::scene_info_entnum(d.info))
                     .collect()
             })
-            .unwrap_or_default();
+            .unwrap_or(Vec::new());
         let pose_ok: Vec<bool> = gfx
             .map(|s| {
                 s.scene_dobjs
@@ -666,7 +748,7 @@ pub fn fill_spot_shadow_caster_plan(
                     .map(|d| lighting_iw4::spot_shadow_175d0_pose_ok(d.cull_gate))
                     .collect()
             })
-            .unwrap_or_default();
+            .unwrap_or(Vec::new());
         spot_shadow_fill_scene_dobj_vis(
             &mut dobj_vis,
             slot.slot_index,
@@ -739,10 +821,13 @@ pub fn fill_spot_shadow_caster_plan(
             } => model_surfaces.insert((surface, object_id)),
             _ => true,
         });
+        if let Some(portal) = portal {
+            append_portal_spot_casters(&mut items, &shadow_materials, draws, portal, light);
+        }
         let xmodel_ranges = xmodel.map(|p| p.range_rows()).unwrap_or(&[]);
         let pack_draws = items
             .iter()
-            .map(super::retained_list::pack_draw)
+            .map(crate::assemble::pack::PackDraw::from)
             .collect::<Vec<_>>();
         let packed = pack_spot_shadow_frontend(
             &pack_draws,
@@ -760,4 +845,67 @@ pub fn fill_spot_shadow_caster_plan(
             plan.packed.push(packed);
         }
     }
+}
+
+// Native scene visibility belongs to the owner pose. A destination clone must
+// be tested against the destination light even when that owner was not marked.
+fn append_portal_spot_casters(
+    items: &mut Vec<RetainedDrawItem>,
+    materials: &[RetainedDrawItem],
+    draws: &[XModelSurfaceDraw],
+    portal: &render_frame::PortalView,
+    light: &SpotShadowableLight,
+) {
+    let bounds: HashMap<_, _> = draws
+        .iter()
+        .map(|draw| ((draw.surface, draw.object_id), draw.caster_bound))
+        .collect();
+    for item in materials {
+        let RetainedDrawKind::XModel {
+            surface,
+            object_id,
+            world_from_local,
+            ..
+        } = item.kind
+        else {
+            continue;
+        };
+        let instances = portal.entity_instances(&item.kind);
+        if instances.len() < 2 {
+            continue;
+        }
+        items.retain(|row| {
+            !matches!(row.kind, RetainedDrawKind::XModel {
+            surface: s, object_id: o, .. } if s == surface && o == object_id)
+        });
+        for placement in instances {
+            let bound = super::retained_list::portal_caster_bound(
+                bounds.get(&(surface, object_id)).copied().flatten(),
+                world_from_local,
+                placement.world_from_local,
+            );
+            if !portal_spot_caster_kept(portal, placement.world_from_local, bound, light) {
+                continue;
+            }
+            let mut copy = *item;
+            placement.apply_to(&mut copy.kind);
+            items.push(copy);
+        }
+    }
+}
+
+fn portal_spot_caster_kept(
+    portal: &render_frame::PortalView,
+    pose: Mat4,
+    bound: Option<render_scene::XModelCasterBound>,
+    light: &SpotShadowableLight,
+) -> bool {
+    if portal.point_tag(pose.w_axis.truncate().to_array()) != portal.point_tag(light.origin) {
+        return false;
+    }
+    // Conservative sphere rejection; the light projection clips the cone.
+    bound.is_none_or(|bound| {
+        Vec3::from_array(bound.origin).distance_squared(Vec3::from_array(light.origin))
+            <= (light.radius + bound.radius).powi(2)
+    })
 }

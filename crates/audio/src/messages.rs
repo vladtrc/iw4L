@@ -1,13 +1,13 @@
 use bevy::prelude::*;
 
-use asset_core::AssetNamespace;
+use asset_core::FamilyId;
 
 pub const SND_ENT_LOCAL: u32 = u32::MAX;
 
 #[derive(Clone, Debug)]
 pub struct PlayAlias {
     pub event: Option<crate::AudioEvent>,
-    pub namespace: AssetNamespace,
+    pub namespace: FamilyId,
     pub alias: String,
 
     pub fallback: Option<String>,
@@ -17,7 +17,9 @@ pub struct PlayAlias {
 
 #[derive(Message, Clone, Debug)]
 pub enum AliasCommand {
+    PlayMusic(PlayAlias),
     Play(PlayAlias),
+    PlayAsMaster(PlayAlias),
     PlayPitched {
         sound: PlayAlias,
         pitch: f32,
@@ -26,14 +28,14 @@ pub enum AliasCommand {
         snd_ent: u32,
     },
     Stop {
-        namespace: AssetNamespace,
+        namespace: FamilyId,
         alias: String,
         snd_ent: Option<u32>,
     },
 }
 
-#[derive(Message, Clone, Debug)]
-pub struct Footstep {
+#[derive(Clone, Debug)]
+pub struct SurfaceSound {
     pub event: Option<crate::AudioEvent>,
     pub volume_scale: f32,
     pub alias: &'static str,
@@ -43,9 +45,14 @@ pub struct Footstep {
 }
 
 #[derive(Message, Clone, Debug)]
+pub struct Footstep {
+    pub sound: SurfaceSound,
+}
+
+#[derive(Message, Clone, Debug)]
 pub struct WeaponSound {
     pub event: Option<crate::AudioEvent>,
-    pub namespace: AssetNamespace,
+    pub namespace: FamilyId,
     pub alias: String,
     pub origin_inches: Option<[f32; 3]>,
     pub snd_ent: Option<u32>,
@@ -53,7 +60,7 @@ pub struct WeaponSound {
 
 #[derive(Message, Clone, Debug)]
 pub struct FlameFire {
-    pub number: u32,
+    pub entity: Entity,
     pub weapon: u32,
     pub player_view: bool,
     pub origin_inches: [f32; 3],
@@ -76,7 +83,6 @@ pub struct ViewmodelNotetrack {
 
 #[derive(Message, Clone, Debug)]
 pub struct ViewmodelNotetracks {
-    pub generation: frame::WorldStamp,
     pub client: sim::ClientId,
     pub life: sim::LifeSequence,
     pub weapon: u32,
@@ -86,12 +92,7 @@ pub struct ViewmodelNotetracks {
 
 #[derive(Message, Clone, Debug)]
 pub struct LandSound {
-    pub event: Option<crate::AudioEvent>,
-    pub volume_scale: f32,
-    pub alias: &'static str,
-    pub fallback: &'static str,
-    pub origin_inches: Option<[f32; 3]>,
-    pub snd_ent: Option<u32>,
+    pub sound: SurfaceSound,
 }
 
 pub fn ent_from_number(number: i32) -> Option<u32> {

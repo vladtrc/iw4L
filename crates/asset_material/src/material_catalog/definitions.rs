@@ -25,7 +25,7 @@ pub struct ImageVariantId {
 
 #[derive(Clone, Debug)]
 pub struct AuthoredImage {
-    pub namespace: crate::AssetNamespace,
+    pub namespace: crate::FamilyId,
     pub name: AssetRef,
     pub map_type: u8,
     pub semantic: u8,
@@ -102,7 +102,7 @@ pub struct MaterialConstant {
 
 #[derive(Clone, Debug)]
 pub struct AuthoredShader {
-    pub namespace: crate::AssetNamespace,
+    pub namespace: crate::FamilyId,
     pub name: AssetRef,
     pub kind: AssetType,
 
@@ -121,7 +121,7 @@ impl AuthoredShader {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuthoredVertexDecl {
-    pub family: crate::VertexLayoutFamily,
+    pub layout: crate::VertexLayout,
     pub name: AssetRef,
     pub stream_count: u8,
     pub has_optional_source: u8,
@@ -145,16 +145,14 @@ pub struct VertexDeclStreamCensus {
     pub ppcc_stream_count: Option<u8>,
 }
 
-#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Resource, Clone, Debug, Default, PartialEq, Eq)]
 pub struct AssetRefDumpCensus {
     pub materials: AssetRefCensus,
     pub images: AssetRefCensus,
     pub shaders: AssetRefCensus,
     pub decls: AssetRefCensus,
 
-    pub mat_iw4_n: usize,
-    pub mat_t5_n: usize,
-    pub mat_iw5_n: usize,
+    pub by_family: BTreeMap<crate::FamilyId, usize>,
 }
 
 impl AssetRefDumpCensus {
@@ -164,14 +162,18 @@ impl AssetRefDumpCensus {
             images: catalog.image_ref_census(),
             shaders: catalog.shader_ref_census(),
             decls: catalog.vertex_decl_ref_census(),
-            mat_iw4_n: catalog.namespace_count(crate::AssetNamespace::Iw4),
-            mat_t5_n: catalog.namespace_count(crate::AssetNamespace::T5),
-            mat_iw5_n: catalog.namespace_count(crate::AssetNamespace::Iw5),
+            by_family: catalog
+                .materials
+                .iter()
+                .fold(BTreeMap::new(), |mut counts, material| {
+                    *counts.entry(material.namespace).or_default() += 1;
+                    counts
+                }),
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct AssetPointerIdentity {
     pub block: u8,
     pub offset: u32,
@@ -183,6 +185,34 @@ impl From<Ptr> for AssetPointerIdentity {
             block: pointer.block,
             offset: pointer.offset,
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct MaterialLinkAddress {
+    pub identity: AssetPointerIdentity,
+    pub aliasable: bool,
+}
+impl MaterialLinkAddress {
+    pub const fn new(block: u8, offset: u32, aliasable: bool) -> Self {
+        Self {
+            identity: AssetPointerIdentity { block, offset },
+            aliasable,
+        }
+    }
+}
+impl From<Ptr> for MaterialLinkAddress {
+    fn from(pointer: Ptr) -> Self {
+        Self::new(
+            pointer.block,
+            pointer.offset,
+            fastfile_iw4::block_is_aliasable(pointer.block),
+        )
+    }
+}
+impl From<MaterialLinkAddress> for AssetPointerIdentity {
+    fn from(address: MaterialLinkAddress) -> Self {
+        address.identity
     }
 }
 
@@ -302,73 +332,60 @@ impl Default for TechniqueTable {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct T5TechniqueOccupancy {
-    pub slots: [u64; fastfile_t5::TECHNIQUE_OCCUPANCY_WORDS],
-    pub scanned: [u64; fastfile_t5::TECHNIQUE_OCCUPANCY_WORDS],
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SourceTechniqueOccupancy {
+    pub slots: Vec<u64>,
+    pub scanned: Vec<u64>,
     pub technique0_flags: u8,
     pub max_pass_count: u16,
-    pub pass_count_by_slot: [u8; fastfile_t5::TECHNIQUE_SLOT_COUNT],
+    pub pass_count_by_slot: Vec<u8>,
 }
-
-impl Default for T5TechniqueOccupancy {
-    fn default() -> Self {
-        Self {
-            slots: [0; fastfile_t5::TECHNIQUE_OCCUPANCY_WORDS],
-            scanned: [0; fastfile_t5::TECHNIQUE_OCCUPANCY_WORDS],
-            technique0_flags: 0,
-            max_pass_count: 0,
-            pass_count_by_slot: [0; fastfile_t5::TECHNIQUE_SLOT_COUNT],
-        }
-    }
-}
-
-impl T5TechniqueOccupancy {
-    pub fn slot_occupied(self, slot: usize) -> bool {
-        fastfile_t5::occupancy_test(&self.slots, slot)
+impl SourceTechniqueOccupancy {
+    pub fn slot_occupied(&self, slot: usize) -> bool {
+        self.slots
+            .get(slot / 64)
+            .is_some_and(|word| word & (1u64 << (slot % 64)) != 0)
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CrossGameReason {
-    T5FeatureTokenDonor,
+    FeatureVariantDonor,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CrossGameTechsetResolution {
-    pub want_namespace: crate::AssetNamespace,
+    pub want_namespace: crate::FamilyId,
     pub want_name: String,
-    pub got_namespace: crate::AssetNamespace,
+    pub got_namespace: crate::FamilyId,
     pub got_name: String,
     pub reason: CrossGameReason,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TechniqueSetFacts {
-    pub namespace: crate::AssetNamespace,
+    pub namespace: crate::FamilyId,
     pub name: AssetRef,
 
     pub zone: crate::ZoneOwner,
 
     pub table: Option<TechniqueTable>,
 
-    pub t5_occupancy: Option<T5TechniqueOccupancy>,
+    pub source_occupancy: Option<SourceTechniqueOccupancy>,
 
-    pub iw5_fallback_table: Option<TechniqueTable>,
-
-    pub t5_fallback_table: Option<TechniqueTable>,
+    pub fallback_table: Option<TechniqueTable>,
 
     pub world_vert_format: u8,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TechsetKey<'a> {
-    pub namespace: crate::AssetNamespace,
+    pub namespace: crate::FamilyId,
     pub name: &'a str,
 }
 
 impl<'a> TechsetKey<'a> {
-    pub fn new(namespace: crate::AssetNamespace, name: &'a str) -> Self {
+    pub fn new(namespace: crate::FamilyId, name: &'a str) -> Self {
         Self { namespace, name }
     }
 }
@@ -385,7 +402,7 @@ pub enum TechsetResolve<'a> {
     },
 
     Foreign {
-        got: crate::AssetNamespace,
+        got: crate::FamilyId,
         index: usize,
     },
     Missing,
@@ -395,7 +412,7 @@ pub enum TechsetResolve<'a> {
 pub struct AuthoredMaterial {
     pub name: AssetRef,
 
-    pub namespace: crate::AssetNamespace,
+    pub namespace: crate::FamilyId,
     pub technique_set: AssetRef,
 
     pub technique_set_edge: crate::AssetEdge<crate::TechniqueSetSpace>,
@@ -407,7 +424,7 @@ pub struct AuthoredMaterial {
     pub texture_atlas: Option<[u8; 2]>,
 
     pub surface_type_bits: Option<u32>,
-    pub t5_layered_surface_types: Option<u32>,
+    pub layered_surface_types: Option<u32>,
 
     pub state_flags: u8,
 
@@ -417,9 +434,7 @@ pub struct AuthoredMaterial {
 
     pub state_bits_entry: Option<[u8; asset_iw4::size::TECHNIQUE_SLOT_COUNT]>,
 
-    pub t5_state_bits_entry: Option<[u8; fastfile_t5::TECHNIQUE_SLOT_COUNT]>,
-
-    pub iw5_state_bits_entry: Option<[u8; fastfile_iw5::size::TECHNIQUE_SLOT_COUNT]>,
+    pub native_state_bits_entry: Option<Vec<u8>>,
 
     pub technique_table: Option<TechniqueTable>,
 
@@ -428,6 +443,85 @@ pub struct AuthoredMaterial {
     pub constants: Vec<MaterialConstant>,
 
     pub zone: crate::asset_graph::ZoneOwner,
+}
+
+impl AuthoredMaterial {
+    pub fn state_bits_agreement<T: PartialEq>(
+        &self,
+        decode: impl Fn([u32; 2]) -> T,
+    ) -> asset_iw4::ColorPassAgreement<T> {
+        asset_iw4::color_pass_agreement(
+            self.state_bits_entry.as_ref(),
+            &self.state_bits,
+            self.route.map(|route| route.technique_slots),
+            decode,
+        )
+    }
+
+    pub fn agreed_draw_mode(&self) -> Option<crate::MaterialDrawMode> {
+        self.state_bits_agreement(crate::MaterialDrawMode::from_state_bits)
+            .agreed()
+    }
+
+    pub fn agreed_alpha_test_cutoff(&self) -> Option<Option<f32>> {
+        self.state_bits_agreement(crate::alpha_test_cutoff_from_state_bits)
+            .agreed()
+    }
+
+    pub fn is_sky(&self) -> bool {
+        matches!(
+            self.route.map(|route| route.pass),
+            Some(asset_iw4::MaterialPass::Sky(_))
+        )
+    }
+
+    pub fn is_multiply(&self) -> bool {
+        self.agreed_draw_mode() == Some(crate::MaterialDrawMode::Multiply)
+    }
+
+    pub fn is_shadowcaster(&self) -> bool {
+        matches!(
+            self.route.map(|route| route.pass),
+            Some(asset_iw4::MaterialPass::ShadowOnly)
+        )
+    }
+
+    pub fn takes_model_lighting(&self) -> Option<bool> {
+        Some(self.route?.takes_model_lighting())
+    }
+
+    pub fn is_unlit(&self) -> Option<bool> {
+        Some(matches!(
+            self.route?.pass,
+            asset_iw4::MaterialPass::Unlit | asset_iw4::MaterialPass::Sky(_)
+        ))
+    }
+
+    pub fn cull_face(&self) -> Option<crate::MaterialCullFace> {
+        self.state_bits_agreement(crate::cull_face_from_state_bits)
+            .agreed()
+    }
+
+    pub fn color_map_transform(&self) -> crate::ColorMapTransform {
+        match self.agreed_draw_mode() {
+            Some(
+                crate::MaterialDrawMode::Blend
+                | crate::MaterialDrawMode::Additive
+                | crate::MaterialDrawMode::Screen,
+            ) => crate::ColorMapTransform::Unknown,
+            None => match self.route.map(|route| route.pass) {
+                Some(
+                    asset_iw4::MaterialPass::Lit
+                    | asset_iw4::MaterialPass::Unlit
+                    | asset_iw4::MaterialPass::Sky(_),
+                ) => crate::ColorMapTransform::Square,
+                Some(asset_iw4::MaterialPass::ShadowOnly) | None => {
+                    crate::ColorMapTransform::Unknown
+                }
+            },
+            Some(_) => crate::ColorMapTransform::Square,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -440,16 +534,16 @@ pub struct MaterialDefinitions {
 
     pub capture_gaps: usize,
 
-    pub leftover_iw5_arg_n: u32,
-    pub(super) leftover_iw5_arg_hits: BTreeMap<String, u32>,
-
-    pub leftover_t5_arg_n: u32,
-    pub(super) leftover_t5_arg_hits: BTreeMap<String, u32>,
+    pub argument_gaps: BTreeMap<crate::FamilyId, BTreeMap<String, u32>>,
 
     pub link_reused_materials: usize,
     pub link_reused_images: usize,
 
     pub cross_game_techset_resolutions: Vec<CrossGameTechsetResolution>,
+
+    /// Zones whose materials sort after the retail 4096, like a foreign
+    /// common's: the other maps of a projectile_flight atlas, drawn with the match.
+    pub sort_leftover_zones: std::collections::BTreeSet<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -477,51 +571,22 @@ impl MaterialImageMemory {
     }
 }
 
-pub fn t5_feature_token_stripped(name: &str) -> String {
-    name.replace("x0", "").replace("x1", "")
+pub fn alternate_techset_name(family: crate::FamilyId, name: &str) -> String {
+    crate::material_compile::compiler::compiler_for(family).map_or_else(
+        || name.to_owned(),
+        |compiler| compiler.alternate_techset_name(name),
+    )
 }
 
 impl MaterialDefinitions {
-    pub fn leftover_iw5_arg_top(&self) -> Option<String> {
-        self.leftover_iw5_arg_ranked(0)
+    pub fn note_argument_gap(&mut self, family: crate::FamilyId, key: String) {
+        *self
+            .argument_gaps
+            .entry(family)
+            .or_default()
+            .entry(key)
+            .or_default() += 1;
     }
-
-    pub fn leftover_iw5_arg_ranked(&self, rank: usize) -> Option<String> {
-        let mut hits: Vec<(&String, &u32)> = self.leftover_iw5_arg_hits.iter().collect();
-        hits.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
-        hits.get(rank).map(|(key, count)| format!("{key}:{count}"))
-    }
-
-    pub fn leftover_t5_arg_top(&self) -> Option<String> {
-        self.leftover_t5_arg_ranked(0)
-    }
-
-    pub fn leftover_t5_arg_ranked(&self, rank: usize) -> Option<String> {
-        let mut hits: Vec<(&String, &u32)> = self.leftover_t5_arg_hits.iter().collect();
-        hits.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
-        hits.get(rank).map(|(key, count)| format!("{key}:{count}"))
-    }
-
-    pub fn leftover_t5_arg_dest(&self, dest: u16) -> Option<String> {
-        let prefix = format!("d{dest}i");
-        let mut hits: Vec<(&String, &u32)> = self
-            .leftover_t5_arg_hits
-            .iter()
-            .filter(|(key, _)| key.starts_with(&prefix))
-            .collect();
-        hits.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
-        if hits.is_empty() {
-            return None;
-        }
-        Some(
-            hits.into_iter()
-                .take(4)
-                .map(|(key, count)| format!("{key}:{count}"))
-                .collect::<Vec<_>>()
-                .join(","),
-        )
-    }
-
     pub(super) fn resolve_technique_set_in<'a>(
         techsets: &'a [TechniqueSetFacts],
         key: TechsetKey<'_>,
@@ -541,24 +606,23 @@ impl MaterialDefinitions {
             if facts.table.is_some() {
                 return TechsetResolve::Hit { index, facts };
             }
-            let stripped = t5_feature_token_stripped(want);
-            if stripped != want {
-                if let Some((index, facts)) = find_named(&stripped) {
-                    if facts.table.is_some() {
-                        return TechsetResolve::Hit { index, facts };
-                    }
-                }
+            let stripped = alternate_techset_name(key.namespace, want);
+            if stripped != want
+                && let Some((index, facts)) = find_named(&stripped)
+                && facts.table.is_some()
+            {
+                return TechsetResolve::Hit { index, facts };
             }
             return TechsetResolve::GraphMissing { index };
         }
-        let stripped = t5_feature_token_stripped(want);
-        if stripped != want {
-            if let Some((index, facts)) = find_named(&stripped) {
-                if facts.table.is_some() {
-                    return TechsetResolve::Hit { index, facts };
-                }
-                return TechsetResolve::GraphMissing { index };
+        let stripped = alternate_techset_name(key.namespace, want);
+        if stripped != want
+            && let Some((index, facts)) = find_named(&stripped)
+        {
+            if facts.table.is_some() {
+                return TechsetResolve::Hit { index, facts };
             }
+            return TechsetResolve::GraphMissing { index };
         }
         if let Some((index, facts)) = techsets.iter().enumerate().find(|(_, facts)| {
             facts.namespace != key.namespace
@@ -597,7 +661,7 @@ impl MaterialDefinitions {
         census
     }
 
-    pub fn namespace_count(&self, ns: crate::AssetNamespace) -> usize {
+    pub fn namespace_count(&self, ns: crate::FamilyId) -> usize {
         self.materials.iter().filter(|m| m.namespace == ns).count()
     }
 
@@ -605,7 +669,7 @@ impl MaterialDefinitions {
         self.materials
             .get(index)
             .map(|material| material.zone)
-            .unwrap_or_default()
+            .unwrap_or(asset_core::ZoneOwner::UNKNOWN)
     }
 
     pub fn material_index_by_key(&self, key: &crate::MaterialKey) -> Option<crate::MaterialIndex> {
@@ -614,7 +678,7 @@ impl MaterialDefinitions {
 
     pub fn material_index_by_ns(
         &self,
-        namespace: crate::AssetNamespace,
+        namespace: crate::FamilyId,
         name: &str,
     ) -> Option<crate::MaterialIndex> {
         let want = AssetRef::bare_name(name);
@@ -627,11 +691,7 @@ impl MaterialDefinitions {
             .map(crate::MaterialIndex::from_order)
     }
 
-    pub fn image_index_by_key(
-        &self,
-        namespace: crate::AssetNamespace,
-        name: &str,
-    ) -> Option<usize> {
+    pub fn image_index_by_key(&self, namespace: crate::FamilyId, name: &str) -> Option<usize> {
         let want = AssetRef::bare_name(name);
         if want.is_empty() {
             return None;
@@ -674,33 +734,10 @@ impl MaterialDefinitions {
         census
     }
 
-    pub fn state_bits_agreement<T: PartialEq>(
-        &self,
-        material: &AuthoredMaterial,
-        decode: impl Fn([u32; 2]) -> T,
-    ) -> asset_iw4::ColorPassAgreement<T> {
-        asset_iw4::color_pass_agreement(
-            material.state_bits_entry.as_ref(),
-            &material.state_bits,
-            material.route.map(|route| route.technique_slots),
-            decode,
-        )
-    }
-
-    pub fn agreed_draw_mode(&self, material: &AuthoredMaterial) -> Option<crate::MaterialDrawMode> {
-        self.state_bits_agreement(material, crate::MaterialDrawMode::from_state_bits)
-            .agreed()
-    }
-
-    pub fn agreed_alpha_test_cutoff(&self, material: &AuthoredMaterial) -> Option<Option<f32>> {
-        self.state_bits_agreement(material, crate::alpha_test_cutoff_from_state_bits)
-            .agreed()
-    }
-
     pub fn agreed_draw_mode_count(&self) -> usize {
         self.materials
             .iter()
-            .filter(|material| self.agreed_draw_mode(material).is_some())
+            .filter(|material| material.agreed_draw_mode().is_some())
             .count()
     }
 
@@ -729,37 +766,8 @@ impl MaterialDefinitions {
     pub fn unresolved_draw_mode_count(&self) -> usize {
         self.materials
             .iter()
-            .filter(|material| self.agreed_draw_mode(material).is_none())
+            .filter(|material| material.agreed_draw_mode().is_none())
             .count()
-    }
-
-    pub fn is_sky(&self, material: &AuthoredMaterial) -> bool {
-        matches!(
-            material.route.map(|route| route.pass),
-            Some(asset_iw4::MaterialPass::Sky(_))
-        )
-    }
-
-    pub fn is_multiply(&self, material: &AuthoredMaterial) -> bool {
-        self.agreed_draw_mode(material) == Some(crate::MaterialDrawMode::Multiply)
-    }
-
-    pub fn is_shadowcaster(&self, material: &AuthoredMaterial) -> bool {
-        matches!(
-            material.route.map(|route| route.pass),
-            Some(asset_iw4::MaterialPass::ShadowOnly)
-        )
-    }
-
-    pub fn takes_model_lighting(&self, material: &AuthoredMaterial) -> Option<bool> {
-        Some(material.route?.takes_model_lighting())
-    }
-
-    pub fn is_unlit(&self, material: &AuthoredMaterial) -> Option<bool> {
-        Some(matches!(
-            material.route?.pass,
-            asset_iw4::MaterialPass::Unlit | asset_iw4::MaterialPass::Sky(_)
-        ))
     }
 
     pub fn technique_set_facts(&self) -> &[TechniqueSetFacts] {
@@ -801,11 +809,6 @@ impl MaterialDefinitions {
             .count()
     }
 
-    pub fn cull_face(&self, material: &AuthoredMaterial) -> Option<crate::MaterialCullFace> {
-        self.state_bits_agreement(material, crate::cull_face_from_state_bits)
-            .agreed()
-    }
-
     pub fn constant(material: &AuthoredMaterial, name: &str) -> Option<[f32; 4]> {
         material
             .constants
@@ -824,27 +827,6 @@ impl MaterialDefinitions {
             return [uv_anim, [0.0; 4], [0.0; 4], [0.0; 4]];
         };
         [uv_anim, parms, [begin[0], begin[1], begin[2], 1.0], end]
-    }
-
-    pub fn color_map_transform(&self, material: &AuthoredMaterial) -> crate::ColorMapTransform {
-        match self.agreed_draw_mode(material) {
-            Some(
-                crate::MaterialDrawMode::Blend
-                | crate::MaterialDrawMode::Additive
-                | crate::MaterialDrawMode::Screen,
-            ) => crate::ColorMapTransform::Unknown,
-            None => match material.route.map(|route| route.pass) {
-                Some(
-                    asset_iw4::MaterialPass::Lit
-                    | asset_iw4::MaterialPass::Unlit
-                    | asset_iw4::MaterialPass::Sky(_),
-                ) => crate::ColorMapTransform::Square,
-                Some(asset_iw4::MaterialPass::ShadowOnly) | None => {
-                    crate::ColorMapTransform::Unknown
-                }
-            },
-            Some(_) => crate::ColorMapTransform::Square,
-        }
     }
 
     pub fn hud_image_name(&self, material: &AuthoredMaterial) -> Option<&str> {
@@ -888,7 +870,8 @@ impl MaterialDefinitions {
         self.materials
             .iter()
             .filter(|material| {
-                self.agreed_alpha_test_cutoff(material)
+                material
+                    .agreed_alpha_test_cutoff()
                     .is_some_and(|v| v.is_some())
             })
             .count()
@@ -899,7 +882,7 @@ impl MaterialDefinitions {
             .iter()
             .filter(|material| {
                 matches!(
-                    self.agreed_draw_mode(material),
+                    material.agreed_draw_mode(),
                     Some(crate::MaterialDrawMode::Blend)
                 )
             })
@@ -909,14 +892,14 @@ impl MaterialDefinitions {
     pub fn multiply_count(&self) -> usize {
         self.materials
             .iter()
-            .filter(|material| self.is_multiply(material))
+            .filter(|material| material.is_multiply())
             .count()
     }
 
     pub fn sky_count(&self) -> usize {
         self.materials
             .iter()
-            .filter(|material| self.is_sky(material))
+            .filter(|material| material.is_sky())
             .count()
     }
 }

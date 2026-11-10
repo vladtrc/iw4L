@@ -1,6 +1,6 @@
 use trace_iw4::{BrushRef, Trace, trace_capsule};
 
-use crate::BrushView;
+use crate::{BrushView, TraceExtents};
 
 #[derive(Clone, Copy, Debug)]
 pub struct ClipCmodel {
@@ -15,78 +15,90 @@ pub fn clip_handle_to_model(cmodels: &[ClipCmodel], handle: u32) -> Option<&Clip
     cmodels.get(handle as usize)
 }
 
+pub fn transformed_box_sight_trace<B: BrushView>(
+    cmodel: &ClipCmodel,
+    leafbrushes: &[u16],
+    brushes: &[B],
+    ext: &TraceExtents,
+    origin: [f32; 3],
+    angles: [f32; 3],
+) -> bool {
+    let axis = angles_to_axis(angles);
+    let half: [f32; 3] = core::array::from_fn(|i| (ext.maxs[i] - ext.mins[i]) * 0.5);
+    let mid: [f32; 3] = core::array::from_fn(|i| (ext.maxs[i] + ext.mins[i]) * 0.5);
+    let mut start = core::array::from_fn(|i| ext.start[i] + mid[i] - origin[i]);
+    let mut end = core::array::from_fn(|i| ext.end[i] + mid[i] - origin[i]);
+    rotate_point(&mut start, &axis);
+    rotate_point(&mut end, &axis);
+    let first = cmodel.first_brush as usize;
+    let last = first + usize::from(cmodel.num_brushes);
+    for &index in leafbrushes.get(first..last).unwrap_or(&[]) {
+        let Some(brush) = brushes.get(usize::from(index)) else {
+            continue;
+        };
+        let brush = crate::brush_ref(brush);
+        if brush.contents & ext.mask == 0 || brush.planes.is_empty() {
+            continue;
+        }
+        let (mut enter, mut leave) = (0.0f32, 1.0f32);
+        let mut outside = false;
+        for plane in brush.planes {
+            let radius: f32 = (0..3).map(|i| plane[i].abs() * half[i]).sum();
+            let a: f32 = (0..3).map(|i| plane[i] * start[i]).sum::<f32>() - plane[3] - radius;
+            let b: f32 = (0..3).map(|i| plane[i] * end[i]).sum::<f32>() - plane[3] - radius;
+            if a > 0.0 && b > 0.0 {
+                outside = true;
+                break;
+            }
+            if a <= 0.0 && b <= 0.0 {
+                continue;
+            }
+            let fraction = a / (a - b);
+            if a > b {
+                enter = enter.max(fraction);
+            } else {
+                leave = leave.min(fraction);
+            }
+            if enter > leave {
+                outside = true;
+                break;
+            }
+        }
+        if !outside {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn transformed_capsule_trace<B: BrushView>(
     cmodel: &ClipCmodel,
     leafbrushes: &[u16],
     brushes: &[B],
-    start: [f32; 3],
-    end: [f32; 3],
-    mins: [f32; 3],
-    maxs: [f32; 3],
+    ext: &TraceExtents,
     origin: [f32; 3],
     angles: [f32; 3],
-    mask: u32,
 ) -> Trace {
     if angles[0] == 0.0 && angles[1] == 0.0 && angles[2] == 0.0 {
-        return transformed_capsule_trace_origin_only(
-            cmodel,
-            leafbrushes,
-            brushes,
-            start,
-            end,
-            mins,
-            maxs,
-            origin,
-            mask,
-        );
+        return transformed_capsule_trace_origin_only(cmodel, leafbrushes, brushes, ext, origin);
     }
-
-    transformed_capsule_trace_rotated(
-        cmodel,
-        leafbrushes,
-        brushes,
-        start,
-        end,
-        mins,
-        maxs,
-        origin,
-        angles,
-        mask,
-    )
+    transformed_capsule_trace_rotated(cmodel, leafbrushes, brushes, ext, origin, angles)
 }
 
 fn transformed_capsule_trace_origin_only<B: BrushView>(
     cmodel: &ClipCmodel,
     leafbrushes: &[u16],
     brushes: &[B],
-    start: [f32; 3],
-    end: [f32; 3],
-    mins: [f32; 3],
-    maxs: [f32; 3],
+    ext: &TraceExtents,
     origin: [f32; 3],
-    mask: u32,
 ) -> Trace {
-    let local_start = [
-        start[0] - origin[0],
-        start[1] - origin[1],
-        start[2] - origin[2],
-    ];
-    let local_end = [end[0] - origin[0], end[1] - origin[1], end[2] - origin[2]];
-    let mut hit = capsule_vs_cmodel(
-        cmodel,
-        leafbrushes,
-        brushes,
-        local_start,
-        local_end,
-        mins,
-        maxs,
-        mask,
-    );
-    hit.endpos = [
-        hit.endpos[0] + origin[0],
-        hit.endpos[1] + origin[1],
-        hit.endpos[2] + origin[2],
-    ];
+    let local = TraceExtents {
+        start: core::array::from_fn(|i| ext.start[i] - origin[i]),
+        end: core::array::from_fn(|i| ext.end[i] - origin[i]),
+        ..*ext
+    };
+    let mut hit = capsule_vs_cmodel(cmodel, leafbrushes, brushes, &local);
+    hit.endpos = core::array::from_fn(|i| hit.endpos[i] + origin[i]);
     hit
 }
 
@@ -94,45 +106,27 @@ fn transformed_capsule_trace_rotated<B: BrushView>(
     cmodel: &ClipCmodel,
     leafbrushes: &[u16],
     brushes: &[B],
-    start: [f32; 3],
-    end: [f32; 3],
-    mins: [f32; 3],
-    maxs: [f32; 3],
+    ext: &TraceExtents,
     origin: [f32; 3],
     angles: [f32; 3],
-    mask: u32,
 ) -> Trace {
     let matrix = angles_to_axis(angles);
-    let mut start_l = [
-        start[0] - origin[0],
-        start[1] - origin[1],
-        start[2] - origin[2],
-    ];
-    let mut end_l = [end[0] - origin[0], end[1] - origin[1], end[2] - origin[2]];
-    rotate_point(&mut start_l, &matrix);
-    rotate_point(&mut end_l, &matrix);
+    let mut local = TraceExtents {
+        start: core::array::from_fn(|i| ext.start[i] - origin[i]),
+        end: core::array::from_fn(|i| ext.end[i] - origin[i]),
+        ..*ext
+    };
+    rotate_point(&mut local.start, &matrix);
+    rotate_point(&mut local.end, &matrix);
 
-    let mut hit = capsule_vs_cmodel(
-        cmodel,
-        leafbrushes,
-        brushes,
-        start_l,
-        end_l,
-        mins,
-        maxs,
-        mask,
-    );
+    let mut hit = capsule_vs_cmodel(cmodel, leafbrushes, brushes, &local);
     if hit.fraction < 1.0 {
         let transpose = transpose_matrix(&matrix);
         rotate_point(&mut hit.normal, &transpose);
     }
     let inv = transpose_matrix(&matrix);
     rotate_point(&mut hit.endpos, &inv);
-    hit.endpos = [
-        hit.endpos[0] + origin[0],
-        hit.endpos[1] + origin[1],
-        hit.endpos[2] + origin[2],
-    ];
+    hit.endpos = core::array::from_fn(|i| hit.endpos[i] + origin[i]);
     hit
 }
 
@@ -140,11 +134,7 @@ fn capsule_vs_cmodel<B: BrushView>(
     cmodel: &ClipCmodel,
     leafbrushes: &[u16],
     brushes: &[B],
-    start: [f32; 3],
-    end: [f32; 3],
-    mins: [f32; 3],
-    maxs: [f32; 3],
-    mask: u32,
+    ext: &TraceExtents,
 ) -> Trace {
     let first = cmodel.first_brush as usize;
     let last = first.saturating_add(cmodel.num_brushes as usize);
@@ -154,7 +144,14 @@ fn capsule_vs_cmodel<B: BrushView>(
         .filter_map(|&id| brushes.get(id as usize))
         .map(crate::brush_ref)
         .collect();
-    trace_capsule(selected.iter().copied(), start, end, mins, maxs, mask)
+    trace_capsule(
+        selected.iter().copied(),
+        ext.start,
+        ext.end,
+        ext.mins,
+        ext.maxs,
+        ext.mask,
+    )
 }
 
 fn angles_to_axis(angles: [f32; 3]) -> [[f32; 3]; 3] {

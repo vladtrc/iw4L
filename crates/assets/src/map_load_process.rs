@@ -14,8 +14,7 @@ use asset_transport::progress::{LoadProgress, StageHandle, StageId};
 
 #[derive(Resource)]
 pub struct MapLoadProcess {
-    pub request_id: u64,
-    pub load_key: frame::LocalLoadKey,
+    pub match_key: frame::MatchKey,
     pub zone: String,
     pub progress: LoadProgress,
     requested_at: Instant,
@@ -27,15 +26,13 @@ pub struct MapLoadProcess {
 
 impl MapLoadProcess {
     pub fn new(
-        request_id: u64,
-        load_key: frame::LocalLoadKey,
+        match_key: frame::MatchKey,
         zone: impl Into<String>,
         progress: LoadProgress,
     ) -> Self {
         let requested_at = progress.requested_at();
         Self {
-            request_id,
-            load_key,
+            match_key,
             zone: zone.into(),
             progress,
             requested_at,
@@ -78,10 +75,10 @@ impl MapLoadProcess {
         let with_trim_ms = self.requested_at.elapsed().as_secs_f32() * 1000.0;
         let rss = asset_transport::process_resident_bytes()
             .map(|bytes| format!(" rss_mib={}", bytes >> 20))
-            .unwrap_or_default();
+            .unwrap_or(String::new());
         let heap = diag::process_live_heap_bytes()
             .map(|bytes| format!(" heap_mib={}", bytes >> 20))
-            .unwrap_or_default();
+            .unwrap_or(String::new());
         diag::info!(
             World,
             "load complete: {installed_ms:.0}ms overlay-to-world-installed (+trim {with_trim_ms:.0}ms) for `{}`{rss}{heap} trim={trim_ms:.1}ms",

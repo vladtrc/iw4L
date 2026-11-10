@@ -3,6 +3,9 @@ use anim_iw4::{
     time_to_frame,
 };
 
+mod delta;
+pub use delta::{RootMotionDelta, RootMotionPose};
+
 const ANIM_LOOP: u8 = 0x1;
 const ANIM_DELTA: u8 = 0x2;
 
@@ -25,6 +28,8 @@ pub struct RawXAnimParts {
     pub indices: Vec<u16>,
 
     pub delta_trans: Option<RawDeltaTrans>,
+    pub delta_quat2: Option<RawDeltaQuat>,
+    pub delta_quat: Option<RawDeltaQuat>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -39,8 +44,20 @@ pub struct RawDeltaTrans {
     pub packed: Vec<u8>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct RawDeltaQuat {
+    pub size: u16,
+    pub indices: Vec<u16>,
+    /// Planar records are expanded to [0,0,z,w]; full records keep all four shorts.
+    pub values: Vec<[i16; 4]>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClipError {
+    InvalidDeltaData {
+        name: String,
+        channel: &'static str,
+    },
     Exhausted {
         pool: &'static str,
         needed: usize,
@@ -122,7 +139,11 @@ pub struct AnimClip {
     pub tracks: Vec<Track>,
     pub notifies: Vec<ClipNotify>,
 
+    pub delta_enabled: bool,
+    pub delta_3d_enabled: bool,
     pub delta_translation: Translation,
+    pub delta_rotation: Rotation,
+    pub delta_rotation_3d: Rotation,
 }
 
 #[derive(Debug, Clone)]
@@ -276,7 +297,9 @@ impl AnimClip {
         }
         cursor.finish()?;
 
-        let delta_translation = decode_delta_trans(parts).unwrap_or(Translation::Default);
+        let delta_translation = decode_delta_trans(parts)?;
+        let delta_rotation = decode_delta_quat(parts, parts.delta_quat2.as_ref(), true)?;
+        let delta_rotation_3d = decode_delta_quat(parts, parts.delta_quat.as_ref(), false)?;
 
         Ok(Self {
             name: parts.name.clone(),
@@ -285,7 +308,11 @@ impl AnimClip {
             looping: parts.flags & ANIM_LOOP != 0,
             tracks,
             notifies: parts.notifies.clone(),
+            delta_enabled: parts.flags & ANIM_DELTA != 0,
+            delta_3d_enabled: parts.flags & 4 != 0,
             delta_translation,
+            delta_rotation,
+            delta_rotation_3d,
         })
     }
 
@@ -317,6 +344,15 @@ impl AnimClip {
 
     #[must_use]
     pub fn abs_delta_trans(&self, frac: f32) -> [f32; 3] {
+        if frac == 1.0 || self.numframes == 0 {
+            return match &self.delta_translation {
+                Translation::Default => [0.0; 3],
+                Translation::Constant(value) => *value,
+                Translation::SmallKeyed(keys) | Translation::FullKeyed(keys) => {
+                    keys.values.last().copied().unwrap_or([0.0; 3])
+                }
+            };
+        }
         let Some(v) = self
             .delta_translation
             .sample(frac.clamp(0.0, 1.0) * f32::from(self.numframes))
@@ -327,6 +363,9 @@ impl AnimClip {
     }
 
     pub fn move_speed(&self) -> f32 {
+        if !self.delta_enabled {
+            return 0.0;
+        }
         let duration = self.duration();
         if duration == 0.0 {
             return 0.0;
@@ -343,14 +382,11 @@ impl AnimClip {
 
     #[must_use]
     pub fn has_delta(&self) -> bool {
-        !matches!(self.delta_translation, Translation::Default)
+        self.delta_enabled && !matches!(self.delta_translation, Translation::Default)
     }
 }
 
 fn decode_delta_trans(parts: &RawXAnimParts) -> Result<Translation> {
-    if parts.flags & ANIM_DELTA == 0 {
-        return Ok(Translation::Default);
-    }
     let Some(delta) = parts.delta_trans.as_ref() else {
         return Ok(Translation::Default);
     };
@@ -359,13 +395,19 @@ fn decode_delta_trans(parts: &RawXAnimParts) -> Result<Translation> {
     }
     let n = delta.size as usize + 1;
     if delta.indices.len() != n {
-        return Ok(Translation::Default);
+        return Err(ClipError::InvalidDeltaData {
+            name: parts.name.clone(),
+            channel: "translation",
+        });
     }
     let mins = delta.mins;
     let step = delta.step;
     let values = if delta.small {
         if delta.packed.len() < n * 3 {
-            return Ok(Translation::Default);
+            return Err(ClipError::InvalidDeltaData {
+                name: parts.name.clone(),
+                channel: "translation",
+            });
         }
         (0..n)
             .map(|i| {
@@ -379,7 +421,10 @@ fn decode_delta_trans(parts: &RawXAnimParts) -> Result<Translation> {
             .collect()
     } else {
         if delta.packed.len() < n * 6 {
-            return Ok(Translation::Default);
+            return Err(ClipError::InvalidDeltaData {
+                name: parts.name.clone(),
+                channel: "translation",
+            });
         }
         (0..n)
             .map(|i| {
@@ -395,6 +440,43 @@ fn decode_delta_trans(parts: &RawXAnimParts) -> Result<Translation> {
         Translation::SmallKeyed(Keyed::new(values, delta.indices.clone(), &parts.name)?)
     } else {
         Translation::FullKeyed(Keyed::new(values, delta.indices.clone(), &parts.name)?)
+    })
+}
+
+fn decode_delta_quat(
+    parts: &RawXAnimParts,
+    delta: Option<&RawDeltaQuat>,
+    planar: bool,
+) -> Result<Rotation> {
+    let Some(delta) = delta else {
+        return Ok(Rotation::Default);
+    };
+    let count = usize::from(delta.size) + 1;
+    if delta.values.len() != count || (delta.size != 0 && delta.indices.len() != count) {
+        return Err(ClipError::InvalidDeltaData {
+            name: parts.name.clone(),
+            channel: if planar { "rotation2" } else { "rotation4" },
+        });
+    }
+    // Delta interpolation uses the stored short magnitudes, without normalizing
+    // individual keys before interpolation.
+    let values: Vec<_> = delta
+        .values
+        .iter()
+        .map(|value| value.map(|v| f32::from(v) / 32767.0))
+        .collect();
+    if delta.size == 0 {
+        return Ok(if planar {
+            Rotation::HalfConstant(values[0])
+        } else {
+            Rotation::FullConstant(values[0])
+        });
+    }
+    let keys = Keyed::new(values, delta.indices.clone(), &parts.name)?;
+    Ok(if planar {
+        Rotation::HalfKeyed(keys)
+    } else {
+        Rotation::FullKeyed(keys)
     })
 }
 

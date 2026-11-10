@@ -51,10 +51,10 @@ impl VertexColorStats {
         if rgba[3] == 0 {
             self.alpha_zero += 1;
         }
-        for i in 0..4 {
-            self.min_rgba[i] = self.min_rgba[i].min(rgba[i]);
-            self.max_rgba[i] = self.max_rgba[i].max(rgba[i]);
-            self.sum_rgba[i] += u64::from(rgba[i]);
+        for (i, rgba_entry) in rgba[..4].iter().enumerate() {
+            self.min_rgba[i] = self.min_rgba[i].min(*rgba_entry);
+            self.max_rgba[i] = self.max_rgba[i].max(*rgba_entry);
+            self.sum_rgba[i] += u64::from(*rgba_entry);
         }
     }
 
@@ -133,7 +133,8 @@ pub fn census_model_mesh(model: &ModelMesh) -> ModelColorCensus {
     let mut surfaces = Vec::with_capacity(model.lod_surfaces[0].len());
     let mut total = VertexColorStats::empty();
     for (surface_index, surface) in model.lod_surfaces[0].iter().enumerate() {
-        let stats = census_mesh_vertex_colors(&surface.mesh).unwrap_or_default();
+        let stats =
+            census_mesh_vertex_colors(&surface.mesh).unwrap_or_else(VertexColorStats::empty);
         total.merge(&stats);
         surfaces.push(SurfaceColorCensus {
             surface_index,
@@ -259,12 +260,6 @@ impl Default for PackedVertexPayload {
     }
 }
 
-fn lod0_only_surfaces(draws: Vec<ModelSurfaceDraw>) -> [Vec<ModelSurfaceDraw>; 4] {
-    let mut lods: [Vec<ModelSurfaceDraw>; 4] = Default::default();
-    lods[0] = draws;
-    lods
-}
-
 #[derive(Clone, Debug)]
 pub struct ModelMesh {
     pub name: String,
@@ -290,7 +285,7 @@ impl ModelMesh {
 
 #[derive(Clone, Copy, Debug)]
 pub struct StaticModelInstance {
-    pub model_slot: Ptr,
+    pub model_slot: asset_material::AssetPointerIdentity,
     pub origin: [f32; 3],
 
     pub axis: [[f32; 3]; 3],
@@ -323,6 +318,11 @@ pub struct StaticModelPlacement {
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct MapXModelAssetKey(pub String);
+impl MapXModelAssetKey {
+    pub fn atlas(world: usize, native_name: &str) -> Self {
+        Self(format!("__atlas/{world}/{native_name}"))
+    }
+}
 
 impl Borrow<str> for MapXModelAssetKey {
     fn borrow(&self) -> &str {
@@ -332,14 +332,13 @@ impl Borrow<str> for MapXModelAssetKey {
 
 #[derive(Clone, Debug)]
 pub enum MapXModelSceneAsset {
-    Iw4(Arc<ModelSkel>),
-
-    T5(Arc<ModelSkel>),
-
-    Iw5(Arc<ModelSkel>),
-
-    T6(Arc<ModelSkel>),
-    Unavailable { reason: &'static str },
+    Captured {
+        family: asset_core::FamilyId,
+        skel: Arc<ModelSkel>,
+    },
+    Unavailable {
+        reason: &'static str,
+    },
 }
 
 #[derive(Clone, Debug, Default, Resource)]
@@ -388,10 +387,7 @@ impl MapXModelSceneCatalog {
         self.surface_materials.clear();
         for (key, asset) in &self.assets {
             let skel = match asset {
-                MapXModelSceneAsset::Iw4(skel)
-                | MapXModelSceneAsset::Iw5(skel)
-                | MapXModelSceneAsset::T6(skel)
-                | MapXModelSceneAsset::T5(skel) => skel,
+                MapXModelSceneAsset::Captured { skel, .. } => skel,
                 MapXModelSceneAsset::Unavailable { .. } => continue,
             };
             census.models += 1;
@@ -446,11 +442,7 @@ impl MapXModelSceneCatalog {
 
     pub fn remap_walk_materials(&mut self, donor_to_host: &[usize]) {
         for asset in self.assets.values_mut() {
-            let (MapXModelSceneAsset::Iw4(skel)
-            | MapXModelSceneAsset::T5(skel)
-            | MapXModelSceneAsset::Iw5(skel)
-            | MapXModelSceneAsset::T6(skel)) = asset
-            else {
+            let MapXModelSceneAsset::Captured { skel, .. } = asset else {
                 continue;
             };
             let skel = Arc::make_mut(skel);
@@ -462,6 +454,28 @@ impl MapXModelSceneCatalog {
                 });
             }
         }
+    }
+
+    /// Keep foreign scene captures separate even when native names collide.
+    /// Walk-local material slots must already be remapped by the caller.
+    pub fn absorb_atlas(&mut self, mut other: Self, world: usize) -> Result<(), String> {
+        if self.resolved || other.resolved {
+            return Err("atlas scene assets must be merged before material resolution".into());
+        }
+        for (i, native) in other.order.into_iter().enumerate() {
+            let key = MapXModelAssetKey::atlas(world, &native.0);
+            if self.assets.contains_key(&key) {
+                return Err(format!("duplicate atlas scene model {}", key.0));
+            }
+            let asset = other
+                .assets
+                .remove(&native)
+                .ok_or("atlas scene asset order mismatch")?;
+            self.zones.push(other.zones[i]);
+            self.order.push(key.clone());
+            self.assets.insert(key, asset);
+        }
+        Ok(())
     }
 
     pub fn absorb_captured(&mut self, mut earlier: Self) {
@@ -489,6 +503,12 @@ impl MapXModelSceneCatalog {
                 }
             }
         }
+    }
+
+    /// Retains scene captures owned by the selected map family.
+    pub fn retain_family(&mut self, family: asset_core::FamilyId) {
+        let names = self.assets.iter().filter(|&(_key, asset)| matches!(asset, MapXModelSceneAsset::Captured { family: owner, .. } if *owner == family)).map(|(key, _asset)| key.0.clone()).collect();
+        self.retain_names(&names);
     }
 
     pub fn retain_names(&mut self, names: &std::collections::BTreeSet<String>) {
@@ -523,7 +543,7 @@ impl MapXModelSceneCatalog {
         let zone = self
             .index_by_name(to)
             .map(|index| self.zone_of(index))
-            .unwrap_or_default();
+            .unwrap_or(asset_core::ZoneOwner::UNKNOWN);
         let key = MapXModelAssetKey(from.to_owned());
         match self.order.iter().position(|k| k == &key) {
             Some(slot) => self.zones[slot] = zone,
@@ -537,7 +557,10 @@ impl MapXModelSceneCatalog {
     }
 
     pub fn zone_of(&self, index: usize) -> ZoneOwner {
-        self.zones.get(index).copied().unwrap_or_default()
+        self.zones
+            .get(index)
+            .copied()
+            .unwrap_or(asset_core::ZoneOwner::UNKNOWN)
     }
 
     pub fn index_by_name(&self, name: &str) -> Option<usize> {
@@ -712,7 +735,10 @@ pub enum ModelMeshError {
         reason: asset_iw4::XSurfaceCollisionRangeError,
     },
     Zone(ZoneError),
-    T5Zone(fastfile_t5::ZoneError),
+    Source {
+        family: asset_core::FamilyId,
+        detail: String,
+    },
 }
 
 impl std::fmt::Display for ModelMeshError {
@@ -740,7 +766,9 @@ impl std::fmt::Display for ModelMeshError {
                 "XModel surface {surface} rigid vert list {vert_list} has invalid collision data: {reason:?}"
             ),
             Self::Zone(error) => write!(f, "reading XModel geometry: {error}"),
-            Self::T5Zone(error) => write!(f, "reading T5 XModel geometry: {error}"),
+            Self::Source { family, detail } => {
+                write!(f, "reading {} XModel geometry: {detail}", family.as_str())
+            }
         }
     }
 }
@@ -762,7 +790,7 @@ pub fn build_static_model_instances(
             }
         }
         out.push(StaticModelInstance {
-            model_slot: inst.at(stream.layout(0x34, 56)),
+            model_slot: inst.at(stream.layout(0x34, 56)).into(),
             origin: [
                 stream.f32_at(inst, 0)?,
                 stream.f32_at(inst, 4)?,
@@ -779,150 +807,7 @@ pub fn build_static_model_instances(
     Ok(out)
 }
 
-pub fn build_iw5_static_model_instances(
-    stream: &fastfile_iw5::ZoneStream<'_>,
-    world: fastfile_iw5::GfxWorldGeometry,
-) -> Result<Vec<StaticModelInstance>, ModelMeshError> {
-    let (Some(draw_insts), Some(_insts)) = (world.smodel_draw_insts, world.smodel_insts) else {
-        return Err(ModelMeshError::MissingStaticModelInstances);
-    };
-    let draw_inst = stream.layout(fastfile_iw5::size::GFX_STATIC_MODEL_DRAW_INST, 88);
-    let model_off = stream.layout(0x34, 56);
-    let mut out = Vec::with_capacity(world.smodel_count);
-    for index in 0..world.smodel_count {
-        let inst = draw_insts.at(index * draw_inst);
-        let mut axis = [[0.0; 3]; 3];
-        for (row, values) in axis.iter_mut().enumerate() {
-            for (column, value) in values.iter_mut().enumerate() {
-                *value = stream
-                    .f32_at(inst, 12 + (row * 3 + column) * 4)
-                    .map_err(|_| ModelMeshError::MissingStaticModelInstances)?;
-            }
-        }
-        out.push(StaticModelInstance {
-            model_slot: Ptr {
-                block: inst.block,
-                offset: inst.offset + model_off as u32,
-            },
-            origin: [
-                stream
-                    .f32_at(inst, 0)
-                    .map_err(|_| ModelMeshError::MissingStaticModelInstances)?,
-                stream
-                    .f32_at(inst, 4)
-                    .map_err(|_| ModelMeshError::MissingStaticModelInstances)?,
-                stream
-                    .f32_at(inst, 8)
-                    .map_err(|_| ModelMeshError::MissingStaticModelInstances)?,
-            ],
-            axis,
-            scale: stream
-                .f32_at(inst, 0x30)
-                .map_err(|_| ModelMeshError::MissingStaticModelInstances)?,
-            cull_dist: stream
-                .u16_at(inst, stream.layout(0x38, 64))
-                .map_err(|_| ModelMeshError::MissingStaticModelInstances)?,
-            reflection_probe_index: stream
-                .u8_at(inst, stream.layout(0x3c, 68))
-                .map_err(|_| ModelMeshError::MissingStaticModelInstances)?,
-            primary_light_index: stream
-                .u8_at(inst, stream.layout(0x3d, 69))
-                .map_err(|_| ModelMeshError::MissingStaticModelInstances)?,
-            flags: stream
-                .u8_at(inst, stream.layout(GFX_STATIC_MODEL_DRAW_INST_FLAGS, 70))
-                .map_err(|_| ModelMeshError::MissingStaticModelInstances)?,
-        });
-    }
-    Ok(out)
-}
-
-pub fn build_t5_static_model_instances(
-    stream: &fastfile_t5::ZoneStream<'_>,
-    world: fastfile_t5::GfxWorldGeometry,
-) -> Result<Vec<StaticModelInstance>, ModelMeshError> {
-    let (Some(draw_insts), Some(_insts)) = (world.smodel_draw_insts, world.smodel_insts) else {
-        return Err(ModelMeshError::MissingStaticModelInstances);
-    };
-    const DRAW_INST: usize = 76;
-
-    const CULL_DIST_OFF: usize = 0x00;
-    const PLACEMENT_OFF: usize = 0x04;
-    const ORIGIN_OFF: usize = PLACEMENT_OFF;
-    const AXIS_OFF: usize = PLACEMENT_OFF + 12;
-    const SCALE_OFF: usize = PLACEMENT_OFF + 0x30;
-    const MODEL_OFF: usize = 0x38;
-    let mut out = Vec::with_capacity(world.smodel_count);
-    for index in 0..world.smodel_count {
-        let inst = draw_insts.at(index * DRAW_INST);
-        let mut axis = [[0.0; 3]; 3];
-        for (row, values) in axis.iter_mut().enumerate() {
-            for (column, value) in values.iter_mut().enumerate() {
-                *value = stream
-                    .f32_at(inst, AXIS_OFF + (row * 3 + column) * 4)
-                    .map_err(|_| ModelMeshError::MissingStaticModelInstances)?;
-            }
-        }
-        let model = match stream
-            .ptr_at(inst, MODEL_OFF)
-            .map_err(|_| ModelMeshError::MissingStaticModelInstances)?
-        {
-            fastfile_t5::ZonePtr::Offset(p) => p,
-            _ => {
-                continue;
-            }
-        };
-        out.push(StaticModelInstance {
-            model_slot: Ptr {
-                block: model.block,
-                offset: model.offset,
-            },
-            origin: [
-                stream
-                    .f32_at(inst, ORIGIN_OFF)
-                    .map_err(|_| ModelMeshError::MissingStaticModelInstances)?,
-                stream
-                    .f32_at(inst, ORIGIN_OFF + 4)
-                    .map_err(|_| ModelMeshError::MissingStaticModelInstances)?,
-                stream
-                    .f32_at(inst, ORIGIN_OFF + 8)
-                    .map_err(|_| ModelMeshError::MissingStaticModelInstances)?,
-            ],
-            axis,
-            scale: stream
-                .f32_at(inst, SCALE_OFF)
-                .map_err(|_| ModelMeshError::MissingStaticModelInstances)?,
-
-            cull_dist: {
-                let dist = stream
-                    .f32_at(inst, CULL_DIST_OFF)
-                    .map_err(|_| ModelMeshError::MissingStaticModelInstances)?;
-                if dist.is_finite() && (0.0..=f32::from(u16::MAX)).contains(&dist) {
-                    dist as u16
-                } else {
-                    0
-                }
-            },
-
-            reflection_probe_index: stream
-                .u8_at(inst, 0x4a)
-                .map_err(|_| ModelMeshError::MissingStaticModelInstances)?,
-            primary_light_index: stream
-                .u8_at(inst, 0x4b)
-                .map_err(|_| ModelMeshError::MissingStaticModelInstances)?,
-
-            flags: 0,
-        });
-    }
-    Ok(out)
-}
-
 impl std::error::Error for ModelMeshError {}
-
-impl From<fastfile_t5::ZoneError> for ModelMeshError {
-    fn from(error: fastfile_t5::ZoneError) -> Self {
-        Self::T5Zone(error)
-    }
-}
 
 impl From<ZoneError> for ModelMeshError {
     fn from(error: ZoneError) -> Self {
@@ -1037,7 +922,7 @@ pub fn build_xmodel_mesh(
     let mut total_vertices = 0usize;
     let mut total_triangles = 0usize;
     let mut any = false;
-    for lod in 0..4 {
+    for (lod, lod_surfaces_entry) in lod_surfaces[..4].iter_mut().enumerate() {
         let Some(surfaces) = geometry.lod_xsurfaces[lod] else {
             continue;
         };
@@ -1057,7 +942,7 @@ pub fn build_xmodel_mesh(
         any = any || !draws.is_empty();
         total_vertices += verts;
         total_triangles += tris;
-        lod_surfaces[lod] = draws;
+        (*lod_surfaces_entry) = draws;
     }
     if !any {
         return Err(ModelMeshError::MissingSurfaces);
@@ -1069,335 +954,12 @@ pub fn build_xmodel_mesh(
         vertices: total_vertices,
         triangles: total_triangles,
         lod_smc: Some(geometry.lod_smc),
-        lod: Some(asset_model::ModelLodSelector::Iw4 {
+        lod: Some(asset_model::ModelLodSelector {
+            family: asset_core::FamilyId::IW4,
             lod_start: geometry.lod_start,
-            num_lods: geometry.num_lods,
+            num_lods: i16::from(geometry.num_lods),
             lod_dist: geometry.lod_dist,
         }),
-    })
-}
-
-pub fn build_t5_xmodel_mesh(
-    stream: &fastfile_t5::ZoneStream<'_>,
-    geometry: fastfile_t5::XModelGeometry,
-    materials: Option<&MaterialCatalog>,
-) -> Result<ModelMesh, ModelMeshError> {
-    let name = geometry
-        .name
-        .map(|ptr| stream.cstr(ptr))
-        .transpose()
-        .map_err(|_| ModelMeshError::MissingName)?
-        .ok_or(ModelMeshError::MissingName)?
-        .to_owned();
-    let surfaces = geometry.surfaces.ok_or(ModelMeshError::MissingSurfaces)?;
-
-    let mut lod_surfaces: [Vec<ModelSurfaceDraw>; 4] = Default::default();
-    let mut total_vertices = 0usize;
-    let mut total_triangles = 0usize;
-    for lod in 0..4 {
-        let (first_surface, surface_count) = geometry.lod_surf_span[lod];
-        let first_surface = usize::from(first_surface);
-        if surface_count == 0 || first_surface + usize::from(surface_count) > geometry.surface_count
-        {
-            continue;
-        }
-        let (draws, verts, tris) = decode_t5_xsurfaces(
-            stream,
-            surfaces,
-            first_surface,
-            usize::from(surface_count),
-            geometry.material_handles,
-            materials,
-        )?;
-        total_vertices += verts;
-        total_triangles += tris;
-        lod_surfaces[lod] = draws;
-    }
-    if lod_surfaces.iter().all(|lod| lod.is_empty()) {
-        return Err(ModelMeshError::MissingSurfaces);
-    }
-
-    Ok(ModelMesh {
-        name,
-        lod_surfaces,
-        vertices: total_vertices,
-        triangles: total_triangles,
-        lod_smc: None,
-        lod: Some(asset_model::ModelLodSelector::T5 {
-            num_lods: geometry.num_lods,
-            lod_dist: geometry.lod_dist,
-        }),
-    })
-}
-
-#[allow(clippy::type_complexity)]
-fn decode_t5_xsurfaces(
-    stream: &fastfile_t5::ZoneStream<'_>,
-    surfaces: fastfile_t5::Ptr,
-    first_surface: usize,
-    surface_count: usize,
-    material_handles: Option<fastfile_t5::Ptr>,
-    materials: Option<&MaterialCatalog>,
-) -> Result<(Vec<ModelSurfaceDraw>, usize, usize), ModelMeshError> {
-    const XSURFACE: usize = 68;
-    const VERT_COUNT_OFF: usize = 4;
-    const TRI_COUNT_OFF: usize = 6;
-    const TRIANGLES_OFF: usize = 12;
-    const VERTICES_OFF: usize = 32;
-    const PACKED_VERTEX: usize = 32;
-
-    let end_surface = first_surface + surface_count;
-    let mut draws = Vec::with_capacity(surface_count);
-    let mut total_vertices = 0usize;
-    let mut total_triangles = 0usize;
-
-    for surface_index in first_surface..end_surface {
-        let surface = surfaces.at(surface_index * XSURFACE);
-        let vertex_count = stream
-            .u16_at(surface, VERT_COUNT_OFF)
-            .map_err(|_| ModelMeshError::MissingSurfaces)? as usize;
-        let tri_count = stream
-            .u16_at(surface, TRI_COUNT_OFF)
-            .map_err(|_| ModelMeshError::MissingSurfaces)? as usize;
-        let vertices = resolved_ptr_t5(stream, surface, VERTICES_OFF)?;
-        let triangles = resolved_ptr_t5(stream, surface, TRIANGLES_OFF)?;
-
-        let mut positions = Vec::with_capacity(vertex_count);
-        let mut normals = Vec::with_capacity(vertex_count);
-        let mut colors = Vec::with_capacity(vertex_count);
-        let mut uvs = Vec::with_capacity(vertex_count);
-        let mut packed_vertices = Vec::with_capacity(vertex_count);
-        let mut indices = Vec::with_capacity(tri_count * 3);
-
-        for vertex_index in 0..vertex_count {
-            let vertex = vertices.at(vertex_index * PACKED_VERTEX);
-            let mut packed = [0u8; PACKED_VERTEX];
-            for (offset, byte) in packed.iter_mut().enumerate() {
-                *byte = stream
-                    .u8_at(vertex, offset)
-                    .map_err(|_| ModelMeshError::MissingSurfaces)?;
-            }
-            packed_vertices.push(packed);
-            positions.push([
-                stream
-                    .f32_at(vertex, 0)
-                    .map_err(|_| ModelMeshError::MissingSurfaces)?,
-                stream
-                    .f32_at(vertex, 4)
-                    .map_err(|_| ModelMeshError::MissingSurfaces)?,
-                stream
-                    .f32_at(vertex, 8)
-                    .map_err(|_| ModelMeshError::MissingSurfaces)?,
-            ]);
-            colors.push(unpack_color(
-                stream
-                    .u32_at(vertex, 16)
-                    .map_err(|_| ModelMeshError::MissingSurfaces)?,
-            ));
-            uvs.push(unpack_packed_tex_coords(
-                stream
-                    .u32_at(vertex, 20)
-                    .map_err(|_| ModelMeshError::MissingSurfaces)?,
-            ));
-            normals.push(normalize_or_up(unpack_unit_vec(
-                stream
-                    .u32_at(vertex, 24)
-                    .map_err(|_| ModelMeshError::MissingSurfaces)?,
-            )));
-        }
-        for index_offset in 0..tri_count * 3 {
-            let index = stream
-                .u16_at(triangles, index_offset * 2)
-                .map_err(|_| ModelMeshError::MissingSurfaces)?;
-            if usize::from(index) >= vertex_count {
-                return Err(ModelMeshError::InvalidIndex {
-                    surface: surface_index,
-                    index,
-                    vertices: vertex_count,
-                });
-            }
-            indices.push(u32::from(index));
-        }
-
-        let mut mesh = Mesh::new(
-            PrimitiveTopology::TriangleList,
-            RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
-        );
-        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
-        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
-        mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
-        mesh.insert_indices(Indices::U32(indices));
-
-        let material = material_handles.and_then(|handles| {
-            let slot = Ptr {
-                block: handles.block,
-                offset: handles.offset + (surface_index * 4) as u32,
-            };
-            materials?.material_index(slot).map(|i| i.get())
-        });
-
-        total_vertices += vertex_count;
-        total_triangles += tri_count;
-        draws.push(ModelSurfaceDraw {
-            mesh,
-            material,
-            packed_vertices,
-
-            xsurface_plus_1: Some(u8::from(
-                stream
-                    .u16_at(surface, 2)
-                    .map_err(|_| ModelMeshError::MissingSurfaces)?
-                    & 0x80
-                    != 0,
-            )),
-            xsurface_base_index: 0,
-            xsurface_vert_offset: 0,
-            collision: capture_t5_xsurface_collision(stream, surface, surface_index, tri_count)?,
-        });
-    }
-
-    Ok((draws, total_vertices, total_triangles))
-}
-
-pub fn build_iw5_xmodel_mesh(
-    stream: &fastfile_iw5::ZoneStream<'_>,
-    geometry: fastfile_iw5::XModelGeometry,
-    materials: Option<&MaterialCatalog>,
-) -> Result<ModelMesh, ModelMeshError> {
-    use fastfile_iw5::size as iw5sz;
-
-    let name = geometry
-        .name
-        .map(|ptr| stream.cstr(ptr))
-        .transpose()
-        .map_err(|_| ModelMeshError::MissingName)?
-        .ok_or(ModelMeshError::MissingName)?
-        .to_owned();
-    let surfaces = geometry.surfaces.ok_or(ModelMeshError::MissingSurfaces)?;
-
-    let mut draws = Vec::with_capacity(geometry.surface_count);
-    let mut total_vertices = 0usize;
-    let mut total_triangles = 0usize;
-
-    for surface_index in 0..geometry.surface_count {
-        let surface = surfaces.at(surface_index * stream.layout(iw5sz::XSURFACE, 88));
-        let vertex_count = stream
-            .u16_at(surface, 2)
-            .map_err(|_| ModelMeshError::MissingSurfaces)? as usize;
-        let tri_count = stream
-            .u16_at(surface, 4)
-            .map_err(|_| ModelMeshError::MissingSurfaces)? as usize;
-        let vertices = resolved_ptr_iw5(
-            stream,
-            surface,
-            stream.layout(iw5sz::XSURFACE_VERTS0_OFF, 40),
-        )?;
-        let triangles = resolved_ptr_iw5(stream, surface, iw5sz::XSURFACE_TRI_INDICES_OFF)?;
-        let xsurface_flags = stream
-            .u8_at(surface, iw5sz::XSURFACE_FLAGS_OFF)
-            .map_err(|_| ModelMeshError::MissingSurfaces)?;
-
-        let mut positions = Vec::with_capacity(vertex_count);
-        let mut normals = Vec::with_capacity(vertex_count);
-        let mut colors = Vec::with_capacity(vertex_count);
-        let mut uvs = Vec::with_capacity(vertex_count);
-        let mut packed_vertices = Vec::with_capacity(vertex_count);
-        let mut indices = Vec::with_capacity(tri_count * 3);
-
-        for vertex_index in 0..vertex_count {
-            let vertex = vertices.at(vertex_index * iw5sz::GFX_PACKED_VERTEX);
-            let mut packed = [0u8; iw5sz::GFX_PACKED_VERTEX];
-            for (offset, byte) in packed.iter_mut().enumerate() {
-                *byte = stream
-                    .u8_at(vertex, offset)
-                    .map_err(|_| ModelMeshError::MissingSurfaces)?;
-            }
-            packed_vertices.push(packed);
-            positions.push([
-                stream
-                    .f32_at(vertex, 0)
-                    .map_err(|_| ModelMeshError::MissingSurfaces)?,
-                stream
-                    .f32_at(vertex, 4)
-                    .map_err(|_| ModelMeshError::MissingSurfaces)?,
-                stream
-                    .f32_at(vertex, 8)
-                    .map_err(|_| ModelMeshError::MissingSurfaces)?,
-            ]);
-            colors.push(unpack_color(
-                stream
-                    .u32_at(vertex, 16)
-                    .map_err(|_| ModelMeshError::MissingSurfaces)?,
-            ));
-            uvs.push(unpack_packed_tex_coords(
-                stream
-                    .u32_at(vertex, 20)
-                    .map_err(|_| ModelMeshError::MissingSurfaces)?,
-            ));
-            normals.push(normalize_or_up(unpack_unit_vec(
-                stream
-                    .u32_at(vertex, 24)
-                    .map_err(|_| ModelMeshError::MissingSurfaces)?,
-            )));
-        }
-        for index_offset in 0..tri_count * 3 {
-            let index = stream
-                .u16_at(triangles, index_offset * 2)
-                .map_err(|_| ModelMeshError::MissingSurfaces)?;
-            if usize::from(index) >= vertex_count {
-                return Err(ModelMeshError::InvalidIndex {
-                    surface: surface_index,
-                    index,
-                    vertices: vertex_count,
-                });
-            }
-            indices.push(u32::from(index));
-        }
-
-        let mut mesh = Mesh::new(
-            PrimitiveTopology::TriangleList,
-            RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
-        );
-        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
-        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
-        mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
-        mesh.insert_indices(Indices::U32(indices));
-
-        let material = geometry.material_handles.and_then(|handles| {
-            let slot = Ptr {
-                block: handles.block,
-                offset: handles.offset + (surface_index * stream.pointer_bytes()) as u32,
-            };
-            materials?.material_index(slot).map(|i| i.get())
-        });
-
-        total_vertices += vertex_count;
-        total_triangles += tri_count;
-        draws.push(ModelSurfaceDraw {
-            mesh,
-            material,
-            packed_vertices,
-            xsurface_plus_1: Some(u8::from(
-                xsurface_flags & iw5sz::XSURFACE_FLAG_DEFORMED != 0,
-            )),
-            xsurface_base_index: 0,
-            xsurface_vert_offset: 0,
-            collision: XSurfaceCollisionPayload::Unavailable {
-                source_layout: "IW5 XSurface collision layout not retained",
-            },
-        });
-    }
-
-    Ok(ModelMesh {
-        name,
-        lod_surfaces: lod0_only_surfaces(draws),
-        vertices: total_vertices,
-        triangles: total_triangles,
-        lod_smc: None,
-
-        lod: None,
     })
 }
 
@@ -1538,158 +1100,4 @@ fn capture_iw4_collision_tree(
         nodes,
         leafs,
     })
-}
-
-fn capture_t5_xsurface_collision(
-    stream: &fastfile_t5::ZoneStream<'_>,
-    surface: fastfile_t5::Ptr,
-    surface_index: usize,
-    surface_tri_count: usize,
-) -> Result<XSurfaceCollisionPayload, ModelMeshError> {
-    let count = stream.u8_at(surface, 1)? as usize;
-    if count == 0 {
-        return Ok(XSurfaceCollisionPayload::Iw4(Vec::new()));
-    }
-    let lists = resolved_ptr_t5(stream, surface, 40)?;
-    stream.slice_at(lists, 0, count * fastfile_t5::size::XRIGID_VERT_LIST)?;
-    let mut trees = Vec::with_capacity(count);
-    for list_index in 0..count {
-        let list = lists.at(list_index * fastfile_t5::size::XRIGID_VERT_LIST);
-        let tri_offset = stream.u16_at(list, 4)?;
-        let tri_count = stream.u16_at(list, 6)?;
-        let tri_end = usize::from(tri_offset)
-            .checked_add(usize::from(tri_count))
-            .filter(|end| *end <= surface_tri_count)
-            .ok_or(ModelMeshError::InvalidCollisionTree {
-                surface: surface_index,
-                vert_list: list_index,
-                reason: asset_iw4::XSurfaceCollisionRangeError::RigidTriangleRange,
-            })?;
-        let tree = match stream.ptr_at(list, 8)? {
-            fastfile_t5::ZonePtr::Null => None,
-            fastfile_t5::ZonePtr::Offset(tree) => {
-                let tree = capture_t5_collision_tree(stream, stream.resolve_alias(tree))?;
-                asset_iw4::validate_xsurface_collision_ranges(
-                    &tree.nodes,
-                    &tree.leafs,
-                    usize::from(tri_offset),
-                    tri_end,
-                )
-                .map_err(|reason| ModelMeshError::InvalidCollisionTree {
-                    surface: surface_index,
-                    vert_list: list_index,
-                    reason,
-                })?;
-                Some(tree)
-            }
-            fastfile_t5::ZonePtr::Following | fastfile_t5::ZonePtr::Insert => {
-                return Err(ModelMeshError::MissingSurfaces);
-            }
-        };
-        trees.push(OwnedXRigidVertListCollision {
-            tri_offset,
-            tri_count,
-            tree,
-        });
-    }
-    Ok(XSurfaceCollisionPayload::Iw4(trees))
-}
-
-fn capture_t5_collision_tree(
-    stream: &fastfile_t5::ZoneStream<'_>,
-    tree: fastfile_t5::Ptr,
-) -> Result<OwnedXSurfaceCollisionTree, ModelMeshError> {
-    let mut trans = [0.0; 3];
-    let mut scale = [0.0; 3];
-    for axis in 0..3 {
-        trans[axis] = stream.f32_at(tree, axis * 4)?;
-        scale[axis] = stream.f32_at(tree, 12 + axis * 4)?;
-    }
-    let node_count = stream.u32_at(tree, 24)? as usize;
-    let leaf_count = stream.u32_at(tree, 32)? as usize;
-    let nodes_ptr = if node_count == 0 {
-        None
-    } else {
-        let rows = resolved_ptr_t5(stream, tree, 28)?;
-        stream.slice_at(
-            rows,
-            0,
-            node_count * asset_iw4::size::XSURFACE_COLLISION_NODE,
-        )?;
-        Some(rows)
-    };
-    let leafs_ptr = if leaf_count == 0 {
-        None
-    } else {
-        let rows = resolved_ptr_t5(stream, tree, 36)?;
-        stream.slice_at(
-            rows,
-            0,
-            leaf_count * asset_iw4::size::XSURFACE_COLLISION_LEAF,
-        )?;
-        Some(rows)
-    };
-    let mut nodes = Vec::with_capacity(node_count);
-    if let Some(rows) = nodes_ptr {
-        for index in 0..node_count {
-            let row = rows.at(index * asset_iw4::size::XSURFACE_COLLISION_NODE);
-            nodes.push(asset_iw4::XSurfaceCollisionNode {
-                mins: [
-                    stream.u16_at(row, 0)?,
-                    stream.u16_at(row, 2)?,
-                    stream.u16_at(row, 4)?,
-                ],
-                maxs: [
-                    stream.u16_at(row, 6)?,
-                    stream.u16_at(row, 8)?,
-                    stream.u16_at(row, 10)?,
-                ],
-                child_begin_index: stream.u16_at(row, 12)?,
-                child_count: stream.u16_at(row, 14)?,
-            });
-        }
-    }
-    let mut leafs = Vec::with_capacity(leaf_count);
-    if let Some(rows) = leafs_ptr {
-        for index in 0..leaf_count {
-            leafs.push(asset_iw4::XSurfaceCollisionLeaf {
-                triangle_begin_index: stream
-                    .u16_at(rows, index * asset_iw4::size::XSURFACE_COLLISION_LEAF)?,
-            });
-        }
-    }
-    Ok(OwnedXSurfaceCollisionTree {
-        trans,
-        scale,
-        nodes,
-        leafs,
-    })
-}
-
-fn resolved_ptr_t5(
-    stream: &fastfile_t5::ZoneStream<'_>,
-    parent: fastfile_t5::Ptr,
-    field: usize,
-) -> Result<fastfile_t5::Ptr, ModelMeshError> {
-    match stream
-        .ptr_at(parent, field)
-        .map_err(|_| ModelMeshError::MissingSurfaces)?
-    {
-        fastfile_t5::ZonePtr::Offset(ptr) => Ok(stream.resolve_alias(ptr)),
-        _ => Err(ModelMeshError::MissingSurfaces),
-    }
-}
-
-fn resolved_ptr_iw5(
-    stream: &fastfile_iw5::ZoneStream<'_>,
-    parent: fastfile_iw5::Ptr,
-    field: usize,
-) -> Result<fastfile_iw5::Ptr, ModelMeshError> {
-    match stream
-        .ptr_at(parent, field)
-        .map_err(|_| ModelMeshError::MissingSurfaces)?
-    {
-        fastfile_iw5::ZonePtr::Offset(ptr) => Ok(stream.resolve_alias(ptr)),
-        _ => Err(ModelMeshError::MissingSurfaces),
-    }
 }

@@ -1,4 +1,4 @@
-use asset_core::AssetNamespace;
+use asset_core::FamilyId;
 use bevy::prelude::*;
 use frame::{UiMenuDvars, UiMenuRequest};
 use ui::classes::display::{category_label, class_name, label, localized, preview_image};
@@ -11,7 +11,7 @@ const PAGE_SIZE: usize = 10;
 #[derive(Default)]
 pub(crate) struct ClassMenuState {
     row: Option<ClassEditRow>,
-    game: Option<AssetNamespace>,
+    game: Option<FamilyId>,
     folder: Option<ClassPickerFolder>,
     page: usize,
     attachments: bool,
@@ -131,7 +131,7 @@ fn camo_slot(row: ClassEditRow) -> Option<usize> {
 }
 
 impl ClassMenuState {
-    fn games(&self, catalog: &ClassLoadoutCatalog) -> Vec<AssetNamespace> {
+    fn games(&self, catalog: &ClassLoadoutCatalog) -> Vec<FamilyId> {
         let mut games = Vec::new();
         if let Some(row) = self.row {
             for folder in catalog.categories_for(row) {
@@ -152,7 +152,7 @@ impl ClassMenuState {
                     .filter(|folder| Some(folder.namespace) == self.game)
                     .collect()
             })
-            .unwrap_or_default()
+            .unwrap_or(Vec::new())
     }
 
     fn choices(&self, catalog: &ClassLoadoutCatalog, store: &SessionClassStore) -> Vec<String> {
@@ -234,19 +234,24 @@ fn open_class_setup(
     menus.write(UiMenuRequest::Open("class_setup".into()));
 }
 
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct ClassEditor<'w, 's> {
+    state: Local<'s, ClassMenuState>,
+    store: ResMut<'w, SessionClassStore>,
+    catalog: Res<'w, ClassLoadoutCatalog>,
+    player_data: Res<'w, sim::LocalPlayerData>,
+    dvars: ResMut<'w, UiMenuDvars>,
+}
+
 pub(crate) fn route(
     mut events: MessageReader<ConsoleCommand>,
-    mut state: Local<ClassMenuState>,
-    mut store: ResMut<SessionClassStore>,
-    catalog: Res<ClassLoadoutCatalog>,
+    mut editor: ClassEditor,
     loading: Option<Res<frame::FrontendContentLoading>>,
     menu_state: hud::MenuState,
-    player_data: Res<sim::LocalPlayerData>,
     loc: (
         Res<asset_game::LocalizeCatalog>,
         Option<Res<assets::PreparedLocalizedStrings>>,
     ),
-    mut dvars: ResMut<UiMenuDvars>,
     mut menus: MessageWriter<UiMenuRequest>,
     mut echo: crate::feature_dispatch::ConsoleEcho,
 ) {
@@ -256,11 +261,16 @@ pub(crate) fn route(
         .map_or(&*shell_loc, |strings| &strings.0);
     if loading.is_none() && menu_state.is_some_and(|menus| menus.is_open("class_loading")) {
         menus.write(UiMenuRequest::Close("class_loading".into()));
-        if let Some(reason) = catalog.progression_lock("cac", &player_data) {
-            dvars.set("ui_class_status", &reason);
+        if let Some(reason) = editor.catalog.progression_lock("cac", &editor.player_data) {
+            editor.dvars.set("ui_class_status", &reason);
             echo.write(format!("menu: {reason}"));
         } else {
-            open_class_setup(&mut state, &mut store, &player_data, &mut menus);
+            open_class_setup(
+                &mut editor.state,
+                &mut editor.store,
+                &editor.player_data,
+                &mut menus,
+            );
         }
     }
     for command in events
@@ -276,41 +286,56 @@ pub(crate) fn route(
                 command.name.as_str(),
                 "ui_class_hover" | "ui_class_preview_slot"
             ) {
-                if let Some(reason) = catalog.progression_lock("cac", &player_data) {
+                if let Some(reason) = editor.catalog.progression_lock("cac", &editor.player_data) {
                     return Err(reason);
                 }
                 if !matches!(command.name.as_str(), "ui_class_setup" | "ui_class_slot")
-                    && !player_data.custom_class_available(store.selected)
+                    && !editor
+                        .player_data
+                        .custom_class_available(editor.store.selected)
                 {
                     return Err("Custom class slot is locked".into());
                 }
             }
             match command.name.as_str() {
                 "ui_class_setup" => {
-                    open_class_setup(&mut state, &mut store, &player_data, &mut menus);
+                    open_class_setup(
+                        &mut editor.state,
+                        &mut editor.store,
+                        &editor.player_data,
+                        &mut menus,
+                    );
                 }
                 "ui_class_samples" => {
-                    *state = ClassMenuState {
+                    *editor.state = ClassMenuState {
                         samples: true,
                         ..Default::default()
                     };
                     menus.write(UiMenuRequest::Open("class_samples_picker".into()));
                 }
-                "ui_class_hover" => state.hover = index(command)?.min(PAGE_SIZE - 1),
+                "ui_class_hover" => editor.state.hover = index(command)?.min(PAGE_SIZE - 1),
                 "ui_class_preview_slot" => {
                     let selected = index(command)?;
-                    store.slots.get(selected).ok_or("Class is unavailable")?;
-                    store.selected = selected;
+                    editor
+                        .store
+                        .slots
+                        .get(selected)
+                        .ok_or("Class is unavailable")?;
+                    editor.store.selected = selected;
                 }
                 "ui_class_slot" => {
                     let selected = index(command)?;
-                    if !player_data.custom_class_available(selected) {
+                    if !editor.player_data.custom_class_available(selected) {
                         return Err("Custom class slot is locked".into());
                     }
-                    let slot = store.slots.get(selected).ok_or("Class is unavailable")?;
-                    dvars.set("ui_class_name", &slot.name);
-                    store.selected = selected;
-                    *state = ClassMenuState::default();
+                    let slot = editor
+                        .store
+                        .slots
+                        .get(selected)
+                        .ok_or("Class is unavailable")?;
+                    editor.dvars.set("ui_class_name", &slot.name);
+                    editor.store.selected = selected;
+                    *editor.state = ClassMenuState::default();
                     menus.write(UiMenuRequest::Open("class_editor".into()));
                 }
                 "ui_class_edit" | "ui_class_attachments" => {
@@ -318,24 +343,25 @@ pub(crate) fn route(
                         .get(index(command)?)
                         .copied()
                         .ok_or("Unknown loadout slot")?;
-                    state.row = Some(row);
-                    state.game = None;
-                    state.folder = None;
-                    state.page = 0;
-                    state.hover = 0;
-                    state.attachments = command.name == "ui_class_attachments";
-                    state.camo = false;
-                    state.samples = false;
-                    if state.attachments
+                    editor.state.row = Some(row);
+                    editor.state.game = None;
+                    editor.state.folder = None;
+                    editor.state.page = 0;
+                    editor.state.hover = 0;
+                    editor.state.attachments = command.name == "ui_class_attachments";
+                    editor.state.camo = false;
+                    editor.state.samples = false;
+                    if editor.state.attachments
                         && !matches!(row, ClassEditRow::Primary | ClassEditRow::Secondary)
                     {
                         return Err("This slot does not accept attachments".into());
                     }
-                    let menu = if !state.attachments && ClassLoadoutCatalog::uses_categories(row) {
-                        "class_games"
-                    } else {
-                        "class_picker"
-                    };
+                    let menu =
+                        if !editor.state.attachments && ClassLoadoutCatalog::uses_categories(row) {
+                            "class_games"
+                        } else {
+                            "class_picker"
+                        };
                     menus.write(UiMenuRequest::Open(menu.into()));
                 }
                 "ui_class_camo" => {
@@ -344,14 +370,15 @@ pub(crate) fn route(
                         1 => ClassEditRow::Secondary,
                         _ => return Err("Unknown weapon slot".into()),
                     };
-                    let slot = store
+                    let slot = editor
+                        .store
                         .slots
-                        .get(store.selected)
+                        .get(editor.store.selected)
                         .ok_or("Class is unavailable")?;
-                    if camo_names(&catalog, slot.row_value(row)).is_empty() {
+                    if camo_names(&editor.catalog, slot.row_value(row)).is_empty() {
                         return Err("This weapon has no camouflage".into());
                     }
-                    *state = ClassMenuState {
+                    *editor.state = ClassMenuState {
                         row: Some(row),
                         camo: true,
                         ..Default::default()
@@ -359,84 +386,93 @@ pub(crate) fn route(
                     menus.write(UiMenuRequest::Open("class_picker".into()));
                 }
                 "ui_class_game" => {
-                    let games = state.games(&catalog);
-                    state.game = Some(*games.get(index(command)?).ok_or("Game is unavailable")?);
-                    state.folder = None;
-                    state.page = 0;
-                    state.hover = 0;
-                    let folders = state.folders(&catalog);
+                    let games = editor.state.games(&editor.catalog);
+                    editor.state.game =
+                        Some(*games.get(index(command)?).ok_or("Game is unavailable")?);
+                    editor.state.folder = None;
+                    editor.state.page = 0;
+                    editor.state.hover = 0;
+                    let folders = editor.state.folders(&editor.catalog);
                     if folders.len() == 1 && folders[0].category.is_none() {
-                        state.folder = Some(folders[0]);
+                        editor.state.folder = Some(folders[0]);
                         menus.write(UiMenuRequest::Open("class_picker".into()));
                     } else {
                         menus.write(UiMenuRequest::Open("class_categories".into()));
                     }
                 }
                 "ui_class_category" => {
-                    state.folder = Some(
-                        *state
-                            .folders(&catalog)
+                    editor.state.folder = Some(
+                        *editor
+                            .state
+                            .folders(&editor.catalog)
                             .get(index(command)?)
                             .ok_or("Category is unavailable")?,
                     );
-                    state.page = 0;
-                    state.hover = 0;
+                    editor.state.page = 0;
+                    editor.state.hover = 0;
                     menus.write(UiMenuRequest::Open("class_picker".into()));
                 }
                 "ui_class_page" => {
-                    let len = state.choices(&catalog, &store).len();
+                    let len = editor.state.choices(&editor.catalog, &editor.store).len();
                     let delta = command
                         .args
                         .first()
                         .and_then(|arg| arg.parse::<isize>().ok())
                         .ok_or("Invalid page")?;
-                    state.hover = 0;
-                    state.page = state
+                    editor.state.hover = 0;
+                    editor.state.page = editor
+                        .state
                         .page
                         .saturating_add_signed(delta)
                         .min(len.saturating_sub(1) / PAGE_SIZE);
                 }
-                "ui_class_pick" if state.samples => {
+                "ui_class_pick" if editor.state.samples => {
                     let at = index(command)?;
                     if at >= PAGE_SIZE {
                         return Err("Invalid sample row".into());
                     }
                     let preset = ui::showcase_classes()
-                        .get(state.page * PAGE_SIZE + at)
+                        .get(editor.state.page * PAGE_SIZE + at)
                         .ok_or("Sample is unavailable")?;
                     let candidate = ui::ClassSlotState::from_preset(preset);
-                    catalog.validate_class(&candidate)?;
-                    catalog.validate_progression(&candidate, &player_data)?;
-                    let selected = store.selected;
-                    *store
+                    editor.catalog.validate_class(&candidate)?;
+                    editor
+                        .catalog
+                        .validate_progression(&candidate, &editor.player_data)?;
+                    let selected = editor.store.selected;
+                    *editor
+                        .store
                         .slots
                         .get_mut(selected)
                         .ok_or("Class is unavailable")? = candidate;
-                    dvars.set("ui_class_name", &store.slots[selected].name);
+                    editor
+                        .dvars
+                        .set("ui_class_name", &editor.store.slots[selected].name);
                     menus.write(UiMenuRequest::Close("class_samples_picker".into()));
-                    *state = ClassMenuState::default();
+                    *editor.state = ClassMenuState::default();
                 }
                 "ui_class_pick" => {
-                    let row = state.row.ok_or("No loadout slot selected")?;
+                    let row = editor.state.row.ok_or("No loadout slot selected")?;
                     let at = index(command)?;
                     if at >= PAGE_SIZE {
                         return Err("Invalid item row".into());
                     }
-                    let choices = state.choices(&catalog, &store);
+                    let choices = editor.state.choices(&editor.catalog, &editor.store);
                     let value = choices
-                        .get(state.page * PAGE_SIZE + at)
+                        .get(editor.state.page * PAGE_SIZE + at)
                         .ok_or("Item is unavailable")?
                         .clone();
-                    let selected = store.selected;
-                    let slot = store
+                    let selected = editor.store.selected;
+                    let slot = editor
+                        .store
                         .slots
                         .get_mut(selected)
                         .ok_or("Class is unavailable")?;
                     let mut candidate = slot.clone();
-                    if state.camo {
+                    if editor.state.camo {
                         let at = camo_slot(row).ok_or("This slot takes no camouflage")?;
                         candidate.camos[at] = value;
-                    } else if state.attachments {
+                    } else if editor.state.attachments {
                         let mut chosen = if row == ClassEditRow::Primary {
                             candidate.primary_attachments.clone()
                         } else {
@@ -452,7 +488,8 @@ pub(crate) fn route(
                             }
                             chosen.push(value);
                         }
-                        catalog
+                        editor
+                            .catalog
                             .check_attachments(
                                 candidate.row_value(row),
                                 &chosen,
@@ -472,45 +509,52 @@ pub(crate) fn route(
                             (&candidate.secondary, &mut candidate.secondary_attachments),
                         ] {
                             while !chosen.is_empty()
-                                && catalog.check_attachments(weapon, chosen, rules).is_err()
+                                && editor
+                                    .catalog
+                                    .check_attachments(weapon, chosen, rules)
+                                    .is_err()
                             {
                                 chosen.pop();
                             }
                         }
                         let weapons = [candidate.primary.clone(), candidate.secondary.clone()];
                         for (weapon, camo) in weapons.iter().zip(&mut candidate.camos) {
-                            if !camo.is_empty() && !camo_names(&catalog, weapon).contains(camo) {
+                            if !camo.is_empty()
+                                && !camo_names(&editor.catalog, weapon).contains(camo)
+                            {
                                 camo.clear();
                             }
                         }
                     }
-                    catalog.validate_edit(&candidate, row)?;
-                    if let Some(reason) =
-                        catalog.progression_lock(candidate.row_value(row), &player_data)
+                    editor.catalog.validate_edit(&candidate, row)?;
+                    if let Some(reason) = editor
+                        .catalog
+                        .progression_lock(candidate.row_value(row), &editor.player_data)
                     {
                         return Err(reason);
                     }
                     if candidate.perk1 == "specialty_bling"
                         && candidate.secondary_attachments.len() > 1
-                        && let Some(reason) =
-                            catalog.progression_lock("specialty_secondarybling", &player_data)
+                        && let Some(reason) = editor
+                            .catalog
+                            .progression_lock("specialty_secondarybling", &editor.player_data)
                     {
                         return Err(reason);
                     }
-                    candidate.lock_reason = catalog.validate_class(&candidate).err();
+                    candidate.lock_reason = editor.catalog.validate_class(&candidate).err();
                     if slot.lock_reason.is_none()
                         && let Some(reason) = &candidate.lock_reason
                     {
                         return Err(reason.clone());
                     }
                     *slot = candidate;
-                    if state.camo {
+                    if editor.state.camo {
                         let camo = camo_slot(row).map_or("", |at| slot.camos[at].as_str());
                         echo.write(format!(
                             "menu: class {} {} camouflage = {}",
                             selected + 1,
                             row.label(),
-                            localized_camo_label(&catalog, loc, slot.row_value(row), camo)
+                            localized_camo_label(&editor.catalog, loc, slot.row_value(row), camo)
                         ));
                     } else {
                         echo.write(format!(
@@ -523,26 +567,27 @@ pub(crate) fn route(
                     for menu in ["class_picker", "class_categories", "class_games"] {
                         menus.write(UiMenuRequest::Close(menu.into()));
                     }
-                    let has_camo = !camo_names(&catalog, slot.row_value(row)).is_empty();
-                    if !state.attachments
-                        && !state.camo
+                    let has_camo = !camo_names(&editor.catalog, slot.row_value(row)).is_empty();
+                    if !editor.state.attachments
+                        && !editor.state.camo
                         && matches!(row, ClassEditRow::Primary | ClassEditRow::Secondary)
                     {
-                        state.attachments = true;
-                        state.page = 0;
-                        state.hover = 0;
+                        editor.state.attachments = true;
+                        editor.state.page = 0;
+                        editor.state.hover = 0;
                         menus.write(UiMenuRequest::Open("class_picker".into()));
-                    } else if state.attachments && has_camo {
-                        state.attachments = false;
-                        state.camo = true;
-                        state.page = 0;
-                        state.hover = 0;
+                    } else if editor.state.attachments && has_camo {
+                        editor.state.attachments = false;
+                        editor.state.camo = true;
+                        editor.state.page = 0;
+                        editor.state.hover = 0;
                         menus.write(UiMenuRequest::Open("class_picker".into()));
                     }
                 }
                 "ui_class_reset" => {
-                    let selected = store.selected;
-                    let slot = store
+                    let selected = editor.store.selected;
+                    let slot = editor
+                        .store
                         .slots
                         .get_mut(selected)
                         .ok_or("Class is unavailable")?;
@@ -552,7 +597,8 @@ pub(crate) fn route(
                     {
                         ui::ClassSlotState::from_preset(preset)
                     } else {
-                        let registry = catalog
+                        let registry = editor
+                            .catalog
                             .resolver
                             .0
                             .as_deref()
@@ -565,15 +611,18 @@ pub(crate) fn route(
                         default.name.clone_from(&slot.name);
                         default
                     };
-                    catalog.validate_class(&candidate)?;
-                    catalog.validate_progression(&candidate, &player_data)?;
+                    editor.catalog.validate_class(&candidate)?;
+                    editor
+                        .catalog
+                        .validate_progression(&candidate, &editor.player_data)?;
                     *slot = candidate;
-                    dvars.set("ui_class_name", &slot.name);
+                    editor.dvars.set("ui_class_name", &slot.name);
                 }
                 "ui_class_rename" => {
-                    let name: String = dvars
+                    let name: String = editor
+                        .dvars
                         .get("ui_class_name")
-                        .unwrap_or_default()
+                        .unwrap_or("")
                         .trim()
                         .chars()
                         .take(20)
@@ -585,8 +634,9 @@ pub(crate) fn route(
                             "Enter a class name",
                         ));
                     }
-                    let selected = store.selected;
-                    store
+                    let selected = editor.store.selected;
+                    editor
+                        .store
                         .slots
                         .get_mut(selected)
                         .ok_or("Class is unavailable")?
@@ -599,28 +649,28 @@ pub(crate) fn route(
                 command.name.as_str(),
                 "ui_class_hover" | "ui_class_preview_slot"
             ) {
-                dvars.set("ui_class_status", "");
+                editor.dvars.set("ui_class_status", "");
             }
             Ok(())
         })();
         if let Err(error) = result {
-            dvars.set("ui_class_status", &error);
+            editor.dvars.set("ui_class_status", &error);
             echo.write(format!("menu: {error}"));
         }
     }
     let feature_lock = loading
         .is_none()
-        .then(|| catalog.progression_lock("cac", &player_data))
+        .then(|| editor.catalog.progression_lock("cac", &editor.player_data))
         .flatten();
-    dvars.set(
+    editor.dvars.set(
         "ui_class_available",
         if feature_lock.is_none() { "1" } else { "0" },
     );
-    dvars.set(
+    editor.dvars.set(
         "ui_class_feature_lock",
-        feature_lock.clone().unwrap_or_default(),
+        feature_lock.clone().unwrap_or(String::new()),
     );
-    dvars.set(
+    editor.dvars.set(
         "ui_class_feature_label",
         feature_lock.map_or_else(
             || "CLASSES".to_owned(),
@@ -628,25 +678,33 @@ pub(crate) fn route(
         ),
     );
     for at in 0..10 {
-        dvars.set(
+        editor.dvars.set(
             &format!("ui_class_slot_{at}"),
-            store
+            editor
+                .store
                 .slots
                 .get(at)
-                .filter(|_| player_data.custom_class_available(at))
+                .filter(|_| editor.player_data.custom_class_available(at))
                 .map(|slot| class_name(&slot.name))
-                .unwrap_or_default(),
+                .unwrap_or(String::new()),
         );
     }
-    if let Some(slot) = store.slots.get(store.selected) {
-        if dvars.get("ui_class_status").is_none_or(str::is_empty)
-            && let Some(reason) = store.lock_reason(store.selected)
+    if let Some(slot) = editor.store.slots.get(editor.store.selected) {
+        if editor
+            .dvars
+            .get("ui_class_status")
+            .is_none_or(str::is_empty)
+            && let Some(reason) = editor.store.lock_reason(editor.store.selected)
         {
-            dvars.set("ui_class_status", format!("Class unavailable: {reason}"));
+            editor
+                .dvars
+                .set("ui_class_status", format!("Class unavailable: {reason}"));
         }
-        dvars.set("ui_class_title", class_name(&slot.name));
-        dvars.set("ui_class_saved_name", &slot.name);
-        dvars.set("ui_class_index", store.selected.to_string());
+        editor.dvars.set("ui_class_title", class_name(&slot.name));
+        editor.dvars.set("ui_class_saved_name", &slot.name);
+        editor
+            .dvars
+            .set("ui_class_index", editor.store.selected.to_string());
         for (at, row, weapon) in [
             (0, ClassEditRow::Primary, &slot.primary),
             (1, ClassEditRow::Secondary, &slot.secondary),
@@ -657,48 +715,49 @@ pub(crate) fn route(
                     "attachments",
                     "MENU_ATTACHMENTS_CAPS",
                     "Attachments",
-                    !catalog.attachments(row, weapon).is_empty(),
+                    !editor.catalog.attachments(row, weapon).is_empty(),
                 ),
                 (
                     "camo",
                     "MENU_CAMO_CAPS",
                     "Camouflage",
-                    !camo_names(&catalog, weapon).is_empty(),
+                    !camo_names(&editor.catalog, weapon).is_empty(),
                 ),
             ] {
-                dvars.set(
+                editor.dvars.set(
                     &format!("ui_class_has_{kind}_{at}"),
                     if available { "1" } else { "0" },
                 );
-                dvars.set(
+                editor.dvars.set(
                     &format!("ui_class_{kind}_button_{at}"),
                     format!("{caption}: {}", localized(loc, key, fallback)),
                 );
             }
         }
         for row in ClassEditRow::ALL {
-            dvars.set(
+            editor.dvars.set(
                 &format!("ui_class_value_{}", row.as_u8()),
-                label(slot.row_value(row), &catalog, loc),
+                label(slot.row_value(row), &editor.catalog, loc),
             );
-            dvars.set(
+            editor.dvars.set(
                 &format!("ui_class_image_{}", row.as_u8()),
-                preview_image(slot.row_value(row), &catalog),
+                preview_image(slot.row_value(row), &editor.catalog),
             );
-            dvars.set(
+            editor.dvars.set(
                 &format!("ui_class_desc_{}", row.as_u8()),
-                catalog
+                editor
+                    .catalog
                     .previews
                     .get(slot.row_value(row))
                     .and_then(|preview| loc.text(preview.desc_key.trim_start_matches('@')))
-                    .unwrap_or_default(),
+                    .unwrap_or(""),
             );
         }
         for (at, camo) in slot.camos.iter().enumerate() {
-            dvars.set(
+            editor.dvars.set(
                 &format!("ui_class_camo_image_{at}"),
                 camo_preview(
-                    &catalog,
+                    &editor.catalog,
                     if at == 0 {
                         &slot.primary
                     } else {
@@ -721,24 +780,24 @@ pub(crate) fn route(
                 let key = selected
                     .get(at)
                     .map(|attachment| format!("{weapon}+{attachment}"))
-                    .unwrap_or_default();
-                dvars.set(
+                    .unwrap_or(String::new());
+                editor.dvars.set(
                     &format!("ui_class_{name}_attachment_image_{at}"),
-                    preview_image(&key, &catalog),
+                    preview_image(&key, &editor.catalog),
                 );
-                dvars.set(
+                editor.dvars.set(
                     &format!("ui_class_{name}_attachment_name_{at}"),
                     if key.is_empty() {
                         String::new()
                     } else {
-                        label(&key, &catalog, loc)
+                        label(&key, &editor.catalog, loc)
                     },
                 );
             }
-            dvars.set(
+            editor.dvars.set(
                 &format!("ui_class_{name}_attachments"),
                 if selected.is_empty() {
-                    label("", &catalog, loc)
+                    label("", &editor.catalog, loc)
                 } else {
                     selected
                         .iter()
@@ -752,7 +811,7 @@ pub(crate) fn route(
                                         &slot.secondary
                                     }
                                 ),
-                                &catalog,
+                                &editor.catalog,
                                 loc,
                             )
                         })
@@ -762,113 +821,141 @@ pub(crate) fn route(
             );
         }
     }
-    let games = state.games(&catalog);
-    let folders = state.folders(&catalog);
-    let choices = state.choices(&catalog, &store);
-    dvars.set("ui_class_game_count", games.len().to_string());
-    dvars.set("ui_class_category_count", folders.len().to_string());
-    dvars.set(
+    let games = editor.state.games(&editor.catalog);
+    let folders = editor.state.folders(&editor.catalog);
+    let choices = editor.state.choices(&editor.catalog, &editor.store);
+    editor
+        .dvars
+        .set("ui_class_game_count", games.len().to_string());
+    editor
+        .dvars
+        .set("ui_class_category_count", folders.len().to_string());
+    editor.dvars.set(
         "ui_class_choice_count",
         choices
             .len()
-            .saturating_sub(state.page * PAGE_SIZE)
+            .saturating_sub(editor.state.page * PAGE_SIZE)
             .min(PAGE_SIZE)
             .to_string(),
     );
-    dvars.set(
+    editor.dvars.set(
         "ui_class_more_pages",
         if choices.len() > PAGE_SIZE { "1" } else { "0" },
     );
-    let picker_depth = if state.attachments
-        || state.camo
-        || state
+    let picker_depth = if editor.state.attachments
+        || editor.state.camo
+        || editor
+            .state
             .row
             .is_none_or(|row| !ClassLoadoutCatalog::uses_categories(row))
     {
         1
-    } else if state.folder.is_some_and(|folder| folder.category.is_none()) {
+    } else if editor
+        .state
+        .folder
+        .is_some_and(|folder| folder.category.is_none())
+    {
         2
     } else {
         3
     };
-    dvars.set("ui_class_picker_depth", picker_depth.to_string());
-    let mut caption = state.row.map_or_else(
+    editor
+        .dvars
+        .set("ui_class_picker_depth", picker_depth.to_string());
+    let mut caption = editor.state.row.map_or_else(
         || localized(loc, "MENU_CLASSES", "Classes"),
         |row| localized(loc, row.loc_key(), row.label()),
     );
-    if state.attachments {
+    if editor.state.attachments {
         caption.push_str(" / ");
         caption.push_str(&localized(loc, "MENU_ATTACHMENTS_CAPS", "Attachments"));
-    } else if state.camo {
+    } else if editor.state.camo {
         caption.push_str(" / ");
         caption.push_str(&localized(loc, "MENU_CAMO_CAPS", "Camouflage"));
     }
-    dvars.set("ui_class_caption", caption);
-    dvars.set(
+    editor.dvars.set("ui_class_caption", caption);
+    editor.dvars.set(
         "ui_class_game_label",
-        state
+        editor
+            .state
             .game
             .map(|game| game.as_str().to_uppercase())
-            .unwrap_or_default(),
+            .unwrap_or(String::new()),
     );
-    dvars.set(
+    editor.dvars.set(
         "ui_class_category_label",
-        state
+        editor
+            .state
             .folder
             .map(|folder| category_label(folder, loc))
-            .unwrap_or_default(),
+            .unwrap_or(String::new()),
     );
-    state.page = state.page.min(choices.len().saturating_sub(1) / PAGE_SIZE);
+    editor.state.page = editor
+        .state
+        .page
+        .min(choices.len().saturating_sub(1) / PAGE_SIZE);
     for at in 0..PAGE_SIZE {
-        let choice_lock = choices.get(state.page * PAGE_SIZE + at).and_then(|value| {
-            if state.samples {
-                let preset = ui::showcase_classes()
-                    .iter()
-                    .find(|preset| preset.name == value)?;
-                let candidate = ui::ClassSlotState::from_preset(preset);
-                catalog
-                    .validate_class(&candidate)
-                    .and_then(|()| catalog.validate_progression(&candidate, &player_data))
-                    .err()
-            } else if !state.attachments && !state.camo {
-                catalog.progression_lock(value, &player_data)
-            } else {
-                None
-            }
-        });
-        dvars.set(
+        let choice_lock = choices
+            .get(editor.state.page * PAGE_SIZE + at)
+            .and_then(|value| {
+                if editor.state.samples {
+                    let preset = ui::showcase_classes()
+                        .iter()
+                        .find(|preset| preset.name == value)?;
+                    let candidate = ui::ClassSlotState::from_preset(preset);
+                    editor
+                        .catalog
+                        .validate_class(&candidate)
+                        .and_then(|()| {
+                            editor
+                                .catalog
+                                .validate_progression(&candidate, &editor.player_data)
+                        })
+                        .err()
+                } else if !editor.state.attachments && !editor.state.camo {
+                    editor.catalog.progression_lock(value, &editor.player_data)
+                } else {
+                    None
+                }
+            });
+        editor.dvars.set(
             &format!("ui_class_choice_unavailable_{at}"),
-            choice_lock.unwrap_or_default(),
+            choice_lock.unwrap_or(String::new()),
         );
-        dvars.set(
+        editor.dvars.set(
             &format!("ui_class_game_{at}"),
             games
                 .get(at)
                 .map(|game| game.as_str().to_uppercase())
-                .unwrap_or_default(),
+                .unwrap_or(String::new()),
         );
-        dvars.set(
+        editor.dvars.set(
             &format!("ui_class_category_{at}"),
             folders
                 .get(at)
                 .map(|folder| category_label(*folder, loc))
-                .unwrap_or_default(),
+                .unwrap_or(String::new()),
         );
-        dvars.set(
+        editor.dvars.set(
             &format!("ui_class_choice_{at}"),
             choices
-                .get(state.page * PAGE_SIZE + at)
+                .get(editor.state.page * PAGE_SIZE + at)
                 .map(|value| {
-                    let slot = store.slots.get(store.selected);
-                    if state.samples {
+                    let slot = editor.store.slots.get(editor.store.selected);
+                    if editor.state.samples {
                         let preset = ui::showcase_classes()
                             .iter()
                             .find(|preset| preset.name == value)
                             .expect("sample choice exists");
                         let candidate = ui::ClassSlotState::from_preset(preset);
-                        let reason = catalog
+                        let reason = editor
+                            .catalog
                             .validate_class(&candidate)
-                            .and_then(|()| catalog.validate_progression(&candidate, &player_data))
+                            .and_then(|()| {
+                                editor
+                                    .catalog
+                                    .validate_progression(&candidate, &editor.player_data)
+                            })
                             .err();
                         return format!(
                             "{}{}",
@@ -876,31 +963,31 @@ pub(crate) fn route(
                             reason.map_or_else(String::new, |reason| format!(" — {reason}"))
                         );
                     }
-                    if state.camo {
+                    if editor.state.camo {
                         let selected = slot
-                            .zip(state.row.and_then(camo_slot))
+                            .zip(editor.state.row.and_then(camo_slot))
                             .is_some_and(|(slot, at)| slot.camos[at] == *value);
                         return format!(
                             "{}{}",
                             if selected { "* " } else { "" },
                             localized_camo_label(
-                                &catalog,
+                                &editor.catalog,
                                 loc,
-                                slot.zip(state.row)
+                                slot.zip(editor.state.row)
                                     .map_or("", |(slot, row)| slot.row_value(row)),
                                 value
                             )
                         );
                     }
-                    let key = if state.attachments && !value.is_empty() {
-                        slot.zip(state.row)
+                    let key = if editor.state.attachments && !value.is_empty() {
+                        slot.zip(editor.state.row)
                             .map(|(slot, row)| format!("{}+{value}", slot.row_value(row)))
-                            .unwrap_or_default()
+                            .unwrap_or(String::new())
                     } else {
                         value.clone()
                     };
-                    let selected = slot.zip(state.row).is_some_and(|(slot, row)| {
-                        if state.attachments {
+                    let selected = slot.zip(editor.state.row).is_some_and(|(slot, row)| {
+                        if editor.state.attachments {
                             let chosen = if row == ClassEditRow::Primary {
                                 &slot.primary_attachments
                             } else {
@@ -915,53 +1002,53 @@ pub(crate) fn route(
                             slot.row_value(row) == value
                         }
                     });
-                    let lock = (!state.attachments)
-                        .then(|| catalog.progression_lock(value, &player_data))
+                    let lock = (!editor.state.attachments)
+                        .then(|| editor.catalog.progression_lock(value, &editor.player_data))
                         .flatten();
                     format!(
                         "{}{}{}",
                         if selected { "* " } else { "" },
-                        label(&key, &catalog, loc),
+                        label(&key, &editor.catalog, loc),
                         lock.map_or_else(String::new, |reason| format!(" — {reason}"))
                     )
                 })
-                .unwrap_or_default(),
+                .unwrap_or(String::new()),
         );
     }
-    let title = if state.camo {
+    let title = if editor.state.camo {
         localized(loc, "MENU_CAMO_CAPS", "Camouflage")
-    } else if state.attachments {
+    } else if editor.state.attachments {
         localized(loc, "MENU_ATTACHMENTS_CAPS", "Attachments")
-    } else if let Some(folder) = state.folder {
+    } else if let Some(folder) = editor.state.folder {
         format!(
             "{} / {}",
             folder.namespace.as_str().to_uppercase(),
             category_label(folder, loc)
         )
     } else {
-        state.row.map_or_else(
+        editor.state.row.map_or_else(
             || localized(loc, "MENU_WEAPON_CLASSES_CAPS", "Classes"),
             |row| localized(loc, row.loc_key(), row.label()),
         )
     };
-    dvars.set("ui_class_picker_title", title);
+    editor.dvars.set("ui_class_picker_title", title);
     let preview = choices
-        .get(state.page * PAGE_SIZE + state.hover)
-        .filter(|_| !state.camo)
+        .get(editor.state.page * PAGE_SIZE + editor.state.hover)
+        .filter(|_| !editor.state.camo)
         .and_then(|key| {
-            let lookup = if state.samples {
+            let lookup = if editor.state.samples {
                 ui::showcase_classes()
                     .iter()
                     .find(|preset| preset.name == key)?
                     .primary
                     .to_owned()
-            } else if state.attachments {
-                let slot = store.slots.get(store.selected)?;
-                format!("{}+{key}", slot.row_value(state.row?))
+            } else if editor.state.attachments {
+                let slot = editor.store.slots.get(editor.store.selected)?;
+                format!("{}+{key}", slot.row_value(editor.state.row?))
             } else {
                 key.clone()
             };
-            let preview = catalog.previews.get(&lookup)?;
+            let preview = editor.catalog.previews.get(&lookup)?;
             let ns = asset_core::AssetKey::parse(&lookup).ok()?.namespace;
             Some((ns, preview))
         });
@@ -974,18 +1061,19 @@ pub(crate) fn route(
                 format!("{}:material/{}", ns.as_str(), preview.image)
             }
         })
-        .unwrap_or_default();
-    let image = if state.camo {
+        .unwrap_or(String::new());
+    let image = if editor.state.camo {
         choices
-            .get(state.page * PAGE_SIZE + state.hover)
+            .get(editor.state.page * PAGE_SIZE + editor.state.hover)
             .filter(|camo| !camo.is_empty())
             .map_or_else(String::new, |camo| {
                 camo_preview(
-                    &catalog,
-                    store
+                    &editor.catalog,
+                    editor
+                        .store
                         .slots
-                        .get(store.selected)
-                        .zip(state.row)
+                        .get(editor.store.selected)
+                        .zip(editor.state.row)
                         .map_or("", |(slot, row)| slot.row_value(row)),
                     camo,
                 )
@@ -993,10 +1081,10 @@ pub(crate) fn route(
     } else {
         image
     };
-    dvars.set("ui_class_preview", image);
-    let square_preview = state.attachments
+    editor.dvars.set("ui_class_preview", image);
+    let square_preview = editor.state.attachments
         || matches!(
-            state.row,
+            editor.state.row,
             Some(
                 ClassEditRow::Perk1
                     | ClassEditRow::Perk2
@@ -1004,31 +1092,32 @@ pub(crate) fn route(
                     | ClassEditRow::Deathstreak
             )
         );
-    dvars.set(
+    editor.dvars.set(
         "ui_class_preview_width",
         if square_preview { "100" } else { "200" },
     );
-    dvars.set(
+    editor.dvars.set(
         "ui_class_preview_title",
         choices
-            .get(state.page * PAGE_SIZE + state.hover)
+            .get(editor.state.page * PAGE_SIZE + editor.state.hover)
             .map(|key| {
-                let weapon = store
+                let weapon = editor
+                    .store
                     .slots
-                    .get(store.selected)
-                    .zip(state.row)
+                    .get(editor.store.selected)
+                    .zip(editor.state.row)
                     .map_or("", |(slot, row)| slot.row_value(row));
-                if state.samples {
+                if editor.state.samples {
                     class_name(key)
-                } else if state.camo {
-                    localized_camo_label(&catalog, loc, weapon, key)
-                } else if state.attachments && !key.is_empty() {
-                    label(&format!("{weapon}+{key}"), &catalog, loc)
+                } else if editor.state.camo {
+                    localized_camo_label(&editor.catalog, loc, weapon, key)
+                } else if editor.state.attachments && !key.is_empty() {
+                    label(&format!("{weapon}+{key}"), &editor.catalog, loc)
                 } else {
-                    label(key, &catalog, loc)
+                    label(key, &editor.catalog, loc)
                 }
             })
-            .unwrap_or_default(),
+            .unwrap_or(String::new()),
     );
     for (at, bar) in asset_game::CacStatBar::ALL.into_iter().enumerate() {
         let value = preview.and_then(|(_, p)| {
@@ -1037,20 +1126,20 @@ pub(crate) fn route(
                 .find(|(kind, _)| *kind == bar)
                 .map(|(_, v)| *v)
         });
-        dvars.set(
+        editor.dvars.set(
             &format!("ui_class_stat_{at}"),
             value.unwrap_or(0).clamp(0, 100).to_string(),
         );
-        dvars.set(
+        editor.dvars.set(
             &format!("ui_class_stat_visible_{at}"),
             if value.is_some() { "1" } else { "0" },
         );
     }
-    dvars.set(
+    editor.dvars.set(
         "ui_class_description",
-        if state.samples {
+        if editor.state.samples {
             choices
-                .get(state.page * PAGE_SIZE + state.hover)
+                .get(editor.state.page * PAGE_SIZE + editor.state.hover)
                 .and_then(|name| {
                     ui::showcase_classes()
                         .iter()
@@ -1064,25 +1153,25 @@ pub(crate) fn route(
                             format!(
                                 "{}: {}",
                                 localized(loc, row.loc_key(), row.label()),
-                                label(slot.row_value(row), &catalog, loc)
+                                label(slot.row_value(row), &editor.catalog, loc)
                             )
                         })
                         .collect::<Vec<_>>()
                         .join("\n")
                 })
-                .unwrap_or_default()
+                .unwrap_or(String::new())
         } else {
             preview
                 .and_then(|(_, preview)| loc.text(preview.desc_key.trim_start_matches('@')))
-                .unwrap_or_default()
+                .unwrap_or("")
                 .to_owned()
         },
     );
-    dvars.set(
+    editor.dvars.set(
         "ui_class_page",
         format!(
             "{} / {}",
-            state.page + 1,
+            editor.state.page + 1,
             choices.len().max(1).div_ceil(PAGE_SIZE)
         ),
     );

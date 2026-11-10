@@ -53,25 +53,68 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
     );
     vision_channel!("visionsetnight", "visionsetnightforplayer", night_vision);
     vision_channel!("visionsetpain", "visionsetpainforplayer", pain_vision);
+    registry.register(Function, "setblur", |world, _, args| {
+        if world.resource::<RoundScript>().profile != asset_core::RuntimeProfile::Campaign {
+            return Err("setBlur requires the campaign native contract".into());
+        }
+        let (to, duration_ms) = campaign_blur(args)?;
+        let now = crate::level_time_ms(world.resource::<crate::step::StepRequest>().tick);
+        let mut frame = FrameWorld::from_world(world);
+        for client in frame.client_ids_sorted() {
+            change_blur(
+                &mut frame.client_meta_mut(client).view_effects,
+                now,
+                to,
+                duration_ms,
+            );
+        }
+        Ok(Value::Undefined)
+    });
     registry.register(Method, "setblurforplayer", |world, receiver, args| {
         let client = player(world, receiver)?;
-        let to = float(args, 0)?;
-        let seconds = optional(args, 1, float)?.unwrap_or(0.0);
-        if args.len() > 2 || !to.is_finite() || to < 0.0 || !seconds.is_finite() || seconds < 0.0 {
-            return Err("setBlurForPlayer requires a nonnegative blur and transition time".into());
-        }
+        let (to, duration_ms) =
+            if world.resource::<RoundScript>().profile == asset_core::RuntimeProfile::Campaign {
+                campaign_blur(args)?
+            } else {
+                let to = float(args, 0)?;
+                let seconds = optional(args, 1, float)?.unwrap_or(0.0);
+                if args.len() > 2
+                    || !to.is_finite()
+                    || to < 0.0
+                    || !seconds.is_finite()
+                    || seconds < 0.0
+                {
+                    return Err(
+                        "setBlurForPlayer requires a nonnegative blur and transition time".into(),
+                    );
+                }
+                (to, (seconds * 1000.0).round() as i32)
+            };
         let now = crate::level_time_ms(world.resource::<crate::step::StepRequest>().tick);
         edit_view(world, client, |view| {
-            view.blur = Some(crate::ScriptBlur {
-                from: view.blur.map_or(0.0, |blur| blur.sample(now)),
-                to,
-                set_ms: now,
-                duration_ms: (seconds * 1000.0).round() as i32,
-            });
+            change_blur(view, now, to, duration_ms)
         });
         Ok(Value::Undefined)
     });
     super::rumble::register(registry);
+}
+
+fn campaign_blur(args: &[Value]) -> Result<(f32, i32), String> {
+    let to = float(args, 0)?;
+    let seconds = float(args, 1)?;
+    if !to.is_finite() || to < 0.0 || !seconds.is_finite() || seconds < 0.0 {
+        return Err("setBlur requires a nonnegative blur and transition time".into());
+    }
+    Ok((to, (seconds * 1000.0) as i32))
+}
+
+fn change_blur(view: &mut crate::ViewEffects, now: i32, to: f32, duration_ms: i32) {
+    view.blur = Some(crate::ScriptBlur {
+        from: view.blur.map_or(0.0, |blur| blur.sample(now)),
+        to,
+        set_ms: now,
+        duration_ms,
+    });
 }
 
 fn local_sound(

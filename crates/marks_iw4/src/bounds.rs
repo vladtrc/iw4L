@@ -27,7 +27,7 @@ pub fn mark_model_local_box(
     axis: [[f32; 3]; 3],
     scale: f32,
 ) -> Option<([f32; 3], [f32; 3])> {
-    if !(scale > 0.0) || !scale.is_finite() || !mark_radius.is_finite() {
+    if (scale <= 0.0 || scale.is_nan()) || !scale.is_finite() || !mark_radius.is_finite() {
         return None;
     }
     let inv = 1.0 / scale;

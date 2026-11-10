@@ -80,10 +80,15 @@ impl<'a> RecordGeometry<'a> {
     }
 }
 
+#[derive(Clone, Copy)]
 pub(super) struct ColourPassInputs<'a> {
     pub(super) device: &'a RenderDevice,
     pub(super) depth: &'a SceneDepthTexture,
+    pub(super) effect_depth: &'a bevy::render::render_resource::TextureView,
     pub(super) viewport: [f32; 4],
+    pub(super) portal_level: Option<u8>,
+    pub(super) exit_clip: Option<&'a BindGroup>,
+    pub(super) scissor: Option<[u32; 4]>,
     pub(super) geometry: RecordGeometry<'a>,
     pub(super) indirect_args: Option<&'a Buffer>,
     pub(super) registry: &'a ExactPipelineRegistry,
@@ -105,7 +110,7 @@ pub(super) struct ColourRecordResult {
 }
 
 impl ColourRecordResult {
-    fn add(&mut self, run: Self) {
+    pub(super) fn add(&mut self, run: Self) {
         self.indexed = self.indexed.saturating_add(run.indexed);
         self.drop_ms += run.drop_ms;
         self.focused_drawn = self.focused_drawn.saturating_add(run.focused_drawn);
@@ -189,7 +194,18 @@ fn record_colour_run<'a>(
     label: &'static str,
 ) -> ColourRecordResult {
     let mut result = ColourRecordResult::default();
-    let attachments = [Some(attachment)];
+    let attachments = [
+        Some(attachment),
+        Some(RenderPassColorAttachment {
+            view: input.effect_depth,
+            resolve_target: None,
+            ops: bevy::render::render_resource::Operations {
+                load: LoadOp::Load,
+                store: StoreOp::Store,
+            },
+            depth_slice: None,
+        }),
+    ];
     let mut pass = TrackedRenderPass::new(
         input.device,
         encoder.begin_render_pass(&RenderPassDescriptor {
@@ -201,6 +217,13 @@ fn record_colour_run<'a>(
             multiview_mask: None,
         }),
     );
+    if let Some([x, y, w, h]) = input.scissor {
+        pass.set_scissor_rect(x, y, w, h);
+    }
+    let mut bound_exit_clip = None;
+    if let Some(level) = input.portal_level {
+        pass.set_stencil_reference(u32::from(level) << 6);
+    }
     let mut bound_pipeline = None;
     let mut bound_tess = None;
     let mut bound_smc_off = None;
@@ -238,7 +261,7 @@ fn record_colour_run<'a>(
             continue;
         }
         let (Some(constant_base), Some(constants_bind)) = (
-            draw.constant_base,
+            draw.first_instance(),
             input
                 .constants
                 .get(usize::from(draw.arena_lane))
@@ -250,6 +273,15 @@ fn record_colour_run<'a>(
             continue;
         };
         let mesh = input.geometry.mesh(draw.tess);
+        let clip = draw.slice_clip.as_deref().or(input.exit_clip);
+        let clip_id = clip.map(|group| group.id());
+        if bound_exit_clip != clip_id {
+            issue_indirect_batch!();
+            if let Some(group) = clip {
+                pass.set_bind_group(2, group, &[]);
+            }
+            bound_exit_clip = clip_id;
+        }
         let (vertex, index) = (mesh.vertex, mesh.index);
         let (Some(vertex), Some(index)) = (vertex, index) else {
             result.refused_draws = result.refused_draws.saturating_add(1);
@@ -288,11 +320,11 @@ fn record_colour_run<'a>(
                 pass.set_vertex_buffer(2, effect.slice(..));
             }
             result.bindings.state = result.bindings.state.saturating_add(2);
-            if draw.tess == ExactTessBind::World {
-                if let Some(layer) = input.geometry.world_layer {
-                    pass.set_vertex_buffer(1, layer.slice(..));
-                    result.bindings.state = result.bindings.state.saturating_add(1);
-                }
+            if draw.tess == ExactTessBind::World
+                && let Some(layer) = input.geometry.world_layer
+            {
+                pass.set_vertex_buffer(1, layer.slice(..));
+                result.bindings.state = result.bindings.state.saturating_add(1);
             }
             let index_format = if matches!(
                 draw.tess,

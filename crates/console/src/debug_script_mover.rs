@@ -20,7 +20,6 @@ pub(crate) fn route_debug_script_mover_commands(
     local: Res<LocalPresentClient>,
     authority: Option<Res<net::AuthorityWorld>>,
     mut inbox: Option<ResMut<ClientActionInbox>>,
-    mut seq: ResMut<net::ActionRequestIds>,
 ) {
     let capacity = settings.log_capacity;
     let echo = |msg: String, console: &mut ConsoleState, line: &mut ConsoleLine| {
@@ -68,18 +67,15 @@ pub(crate) fn route_debug_script_mover_commands(
             );
             continue;
         };
-        let request_id = seq.allocate();
         if let Err(error) = inbox.push(
             local.0,
-            ClientAction::BeginScriptMoverRotateVelocity { request_id, speed },
+            ClientAction::BeginScriptMoverRotateVelocity { speed },
         ) {
             echo(format!("rotatevelocity: {error}"), &mut console, &mut line);
             continue;
         }
         echo(
-            format!(
-                "rotatevelocity: queued speed={speed} request_id={request_id} (supplied, not randomfloatrange)"
-            ),
+            format!("rotatevelocity: queued speed={speed} (supplied, not randomfloatrange)"),
             &mut console,
             &mut line,
         );

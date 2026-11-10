@@ -24,6 +24,11 @@ impl WeaponCatalog {
             .and_then(|ptr| stream.cstr(ptr).ok())
             .filter(|s| !s.is_empty())
             .map(str::to_owned);
+        let clip_model = geometry
+            .clip_model_name
+            .and_then(|ptr| stream.cstr(ptr).ok())
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
         let world_model = geometry
             .world_model_name
             .and_then(|ptr| stream.cstr(ptr).ok())
@@ -75,7 +80,9 @@ impl WeaponCatalog {
             .map(|arr| read_sz_xanims(stream, arr))
             .unwrap_or([const { None }; WEAPON_ANIM_SLOTS]);
         let hide_tags = read_hide_tags(stream, &self.strings, geometry.hide_tags);
-        self.entries.push(CatalogWeapon {
+        let allow_dual_wield = !geometry.no_dual_wield
+            && weapon_iw4::has_akimbo_viewmodel_anims(sz_xanims_right[weap_anim::IDLE].as_deref());
+        self.insert_capture(crate::WeaponCaptureInput {
             namespace: self
                 .capture_ns
                 .expect("asset capture requires an explicit family"),
@@ -84,7 +91,7 @@ impl WeaponCatalog {
                 .alternate_weapon_name
                 .and_then(|p| read_name(stream, p)),
             name: name.to_owned(),
-            weap_def: geometry.weap_def.map(ptr_key),
+            weap_def: geometry.weap_def.map(capture_address),
             display_name_key: geometry.display_name.and_then(|ptr| read_name(stream, ptr)),
             reticle: WeaponReticleAssets {
                 center_material: None,
@@ -101,22 +108,16 @@ impl WeaponCatalog {
             hud_material_edges: WeaponHudMaterialEdges::default(),
             overlay_material: None,
             overlay_image: None,
-            reticle_center_slot: geometry.reticle_center_material_slot,
-            reticle_side_slot: geometry.reticle_side_material_slot,
-            overlay_material_slot: geometry.overlay_material_slot,
-            iw5_attachment_slots: std::array::from_fn(|_| None),
+            reticle_center_slot: geometry.reticle_center_material_slot.map(capture_address),
+            reticle_side_slot: geometry.reticle_side_material_slot.map(capture_address),
+            overlay_material_slot: geometry.overlay_material_slot.map(capture_address),
+            attachment_assets: Vec::new(),
             attached_models: Default::default(),
-            t6_clip_models: Default::default(),
-            t6_attachments: Vec::new(),
-            t6_attachment_stats: Vec::new(),
-            iw5_reload_overrides: Vec::new(),
-            iw5_anim_overrides: Vec::new(),
-            iw5_fx_overrides: Vec::new(),
-            iw5_notetrack_overrides: Vec::new(),
+            native_capture: Default::default(),
             hud_icon: None,
-            hud_icon_slot: geometry.hud_icon_slot,
+            hud_icon_slot: geometry.hud_icon_slot.map(capture_address),
             pickup_icon: None,
-            pickup_icon_slot: geometry.pickup_icon_slot,
+            pickup_icon_slot: geometry.pickup_icon_slot.map(capture_address),
             pickup_icon_image: None,
             pickup_icon_ratio: geometry.pickup_icon_ratio,
             hud_icon_ratio: geometry.hud_icon_ratio,
@@ -128,17 +129,18 @@ impl WeaponCatalog {
             kill_icon: geometry
                 .kill_icon_name
                 .and_then(|ptr| read_name(stream, ptr)),
-            kill_icon_slot: geometry.kill_icon_slot,
+            kill_icon_slot: geometry.kill_icon_slot.map(capture_address),
             kill_icon_image: None,
             proj_trail: None,
-            proj_trail_slot: geometry.proj_trail_slot,
+            proj_trail_slot: geometry.proj_trail_slot.map(capture_address),
             proj_beacon: None,
-            proj_beacon_slot: geometry.proj_beacon_slot,
+            proj_beacon_slot: geometry.proj_beacon_slot.map(capture_address),
             proj_ignition: None,
-            proj_ignition_slot: geometry.proj_ignition_slot,
+            proj_ignition_slot: geometry.proj_ignition_slot.map(capture_address),
             projectile_fx: WeaponProjectileFx::default(),
             gun_xmodel,
             hand_xmodel,
+            clip_model,
             world_model,
             camo_models,
             skin_parent: None,
@@ -291,28 +293,45 @@ impl WeaponCatalog {
                 fire_last_player: geometry
                     .fire_last_sound_player_name
                     .and_then(|ptr| read_name(stream, ptr)),
-                leftover_sound_overrides: Vec::new(),
+                dependency_aliases: None,
                 fire_ptr_kind: None,
                 fire_player_ptr_kind: None,
                 reload_player_ptr_kind: None,
             },
-            combat_slots: CombatFxSlots {
-                view_flash: geometry.view_flash_slot,
-                world_flash: geometry.world_flash_slot,
-                view_shell_eject: geometry.view_shell_eject_slot,
-                world_shell_eject: geometry.world_shell_eject_slot,
-                view_last_shot_eject: geometry.view_last_shot_eject_slot,
-                world_last_shot_eject: geometry.world_last_shot_eject_slot,
-                explosion: geometry.explosion_slot,
-                tracer: geometry.tracer_slot,
+            combat_slots: crate::WeaponCaptureFxSlots {
+                view_flash: geometry.view_flash_slot.map(capture_address),
+                world_flash: geometry.world_flash_slot.map(capture_address),
+                view_shell_eject: geometry.view_shell_eject_slot.map(capture_address),
+                world_shell_eject: geometry.world_shell_eject_slot.map(capture_address),
+                view_last_shot_eject: geometry.view_last_shot_eject_slot.map(capture_address),
+                world_last_shot_eject: geometry.world_last_shot_eject_slot.map(capture_address),
+                explosion: geometry.explosion_slot.map(capture_address),
+                tracer: geometry.tracer_slot.map(capture_address),
             },
             flame: None,
             combat_fx: WeaponCombatFx {
                 last_shot_eject_pair_authored: geometry.view_last_shot_eject_slot.is_some()
                     && geometry.world_last_shot_eject_slot.is_some(),
-                ..WeaponCombatFx::empty(crate::AssetNamespace::Iw4)
+                ..WeaponCombatFx::empty(crate::FamilyId::IW4)
             },
             facts: WeaponBodyFacts {
+                item_ammo: geometry.item_ammo.map(
+                    |[
+                        total_min,
+                        total_max,
+                        clip_percent_min,
+                        clip_percent_max,
+                        shared,
+                    ]| weapon_iw4::WeaponItemAmmoFacts {
+                        clip_size: geometry.clip_size,
+                        total_min,
+                        total_max,
+                        clip_percent_min,
+                        clip_percent_max,
+                        shared_ammo: shared >= 0,
+                        allow_dual_wield,
+                    },
+                ),
                 body_resolved: geometry.weap_def.is_some(),
                 fire_time_ms: geometry.fire_time_ms,
                 impact_type: geometry.impact_type,
@@ -476,5 +495,12 @@ impl WeaponCatalog {
                 no_dual_wield: geometry.no_dual_wield,
             },
         });
+    }
+}
+
+fn capture_address(slot: Ptr) -> asset_material::AssetPointerIdentity {
+    asset_material::AssetPointerIdentity {
+        block: slot.block,
+        offset: slot.offset,
     }
 }

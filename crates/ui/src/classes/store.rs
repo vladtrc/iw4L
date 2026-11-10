@@ -126,12 +126,12 @@ impl SessionClassStore {
     }
 
     pub fn server_families(&self) -> Option<frame::AssetFamilies> {
-        self.server_families
+        self.server_families.clone()
     }
 
     pub fn lock_reason(&self, index: usize) -> Option<String> {
         let slot = self.slots.get(index)?;
-        if let Some(families) = self.server_families {
+        if let Some(families) = &self.server_families {
             for reference in [&slot.primary, &slot.secondary, &slot.lethal, &slot.tactical] {
                 if let Some(key) = asset_game::FamilyKey::parse(reference)
                     && !families.enabled(key.namespace.as_str())
@@ -274,9 +274,9 @@ fn decode_slots(text: &str) -> Option<Vec<ClassSlotState>> {
         slots.push(ClassSlotState {
             name: (*name).to_owned(),
             primary: (*primary).to_owned(),
-            primary_attachments: attachments(*primary_attachments),
+            primary_attachments: attachments(primary_attachments),
             secondary: (*secondary).to_owned(),
-            secondary_attachments: attachments(*secondary_attachments),
+            secondary_attachments: attachments(secondary_attachments),
             lethal: (*lethal).to_owned(),
             tactical: (*tactical).to_owned(),
             perk1: (*perk1).to_owned(),

@@ -394,20 +394,20 @@ pub fn calculate_weapon_movement_bob_waveform(inputs: WeaponBobWaveformInputs) -
     let bob = (f32::from(inputs.bob_cycle) / 255.0) * PI;
     let cycle = TAU + bob + bob + TAU + WEAPON_BOB_LAG * PI;
     let speed = WEAPON_BOB_AMPLITUDE_BASE * inputs.xyspeed;
-    let pitch = calc_weapon_bob_vertical(
+    let pitch = -calc_weapon_bob_vertical(
         cycle,
         speed,
         inputs.view_height_target,
         inputs.pm_flags,
         inputs.weapon_pos_frac,
-    ) * -1.0;
-    let yaw = calc_weapon_bob_horizontal(
+    );
+    let yaw = -calc_weapon_bob_horizontal(
         cycle,
         speed,
         inputs.view_height_target,
         inputs.pm_flags,
         inputs.weapon_pos_frac,
-    ) * -1.0;
+    );
     let mut roll = calc_weapon_bob_horizontal(
         cycle - WEAPON_BOB_UP_PHASE,
         WEAPON_BOB_AMPLITUDE_ROLL * speed,
@@ -726,23 +726,50 @@ pub fn base_stance_movement_angles(
     );
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct WeaponPlacementFrame {
+    pub ps: WeaponPlacementPsInputs,
+    pub kinematics: WeaponMovementKinematics,
+    pub bob_waveform: Option<WeaponBobState>,
+    pub dt_secs: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct WeaponPlacementSettings {
+    pub stance: WeaponStanceStaticOfsInputs,
+    pub fade_globals: StanceTransitionFadeGlobals,
+    pub movement: WeaponMovementOfsInputs,
+    pub bob: WeaponBobInputs,
+    pub idle: WeaponIdleInputs,
+    pub gun_spring_hip: GunRecoilResponse,
+    pub gun_spring_ads: GunRecoilResponse,
+    pub gun_max_pitch: f32,
+    pub gun_max_yaw: f32,
+}
+
 pub fn weapon_placement_assemble(
     state: &mut WeaponPlacementState,
-    ps: WeaponPlacementPsInputs,
-    stance: WeaponStanceStaticOfsInputs,
-    fade_globals: StanceTransitionFadeGlobals,
-    movement: WeaponMovementOfsInputs,
-    kinematics: WeaponMovementKinematics,
-    bob_inputs: WeaponBobInputs,
-    idle: WeaponIdleInputs,
-    bob_waveform: Option<WeaponBobState>,
-    gun_spring_hip: GunRecoilResponse,
-    gun_spring_ads: GunRecoilResponse,
-    gun_max_pitch: f32,
-    gun_max_yaw: f32,
-    dt_secs: f32,
+    frame: &WeaponPlacementFrame,
+    settings: &WeaponPlacementSettings,
     steps_out: &mut [WeaponPlacementAssembleStep; PLACEMENT_ASSEMBLE_STEP_COUNT],
 ) -> WeaponPlacementContribution {
+    let WeaponPlacementFrame {
+        ps,
+        kinematics,
+        bob_waveform,
+        dt_secs,
+    } = *frame;
+    let WeaponPlacementSettings {
+        stance,
+        fade_globals,
+        movement,
+        bob: bob_inputs,
+        idle,
+        gun_spring_hip,
+        gun_spring_ads,
+        gun_max_pitch,
+        gun_max_yaw,
+    } = *settings;
     let mut step = 0_usize;
     steps_out[step] = WeaponPlacementAssembleStep::BaseStanceMovementAngles;
     step += 1;

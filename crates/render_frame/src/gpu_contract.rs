@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use asset_iw4::vertex_decl::D3dDeclType;
-use d3d9_sm3::PassWgsl;
 use render_material::{PassProgramAbi, SamplerTextureDimension};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -133,10 +132,7 @@ pub enum WgpuLayoutRefusal {
     },
 }
 
-pub fn derive_wgpu_pass_layout(
-    abi: &PassProgramAbi,
-    _module: &PassWgsl,
-) -> Result<WgpuPassLayout, WgpuLayoutRefusal> {
+pub fn derive_wgpu_pass_layout(abi: &PassProgramAbi) -> Result<WgpuPassLayout, WgpuLayoutRefusal> {
     let mut by_stream = BTreeMap::<u8, Vec<WgpuVertexAttribute>>::new();
     let mut locations = BTreeSet::new();
     for attribute in &abi.attributes {
@@ -147,7 +143,7 @@ pub fn derive_wgpu_pass_layout(
         }
         let (format, byte_len) = vertex_format(attribute.source, attribute.layout.decl_type)?;
         let stride = abi
-            .vertex_family
+            .vertex_layout
             .host_stream_stride(abi.vertex_type, attribute.layout.stream)
             .ok_or(WgpuLayoutRefusal::MissingStreamExtent {
                 vertex_type: abi.vertex_type,
@@ -178,7 +174,7 @@ pub fn derive_wgpu_pass_layout(
             WgpuVertexBufferLayout {
                 stream,
                 array_stride: u64::from(
-                    abi.vertex_family
+                    abi.vertex_layout
                         .host_stream_stride(abi.vertex_type, stream)
                         .expect("stream extent was checked above"),
                 ),

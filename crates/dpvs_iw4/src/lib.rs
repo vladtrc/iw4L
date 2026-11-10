@@ -45,7 +45,7 @@ pub use cell_caster::{
     cell_caster_matrix_words, cell_caster_row_words, generate_shadow_map_caster_cells,
     or_caster_rows_for_visible, visit_portals_no_frustum,
 };
-pub use chop::{chop_portal, chop_portal_winding};
+pub use chop::{chop_portal, chop_portal_winding, winding_survives_planes};
 pub use clip::{
     GfxMatrix, PORTAL_CLIP_PLANE_EPS, PORTAL_CLIP_SIDE_LIMIT, PORTAL_PROJECT_W_MIN, PortalBevels,
     add_bevel_planes, clip_space_winding_aabb, gfx_matrix_from_d3d_row_major,
@@ -137,8 +137,8 @@ pub use sun_shadow_smodel::{
 };
 pub use vis::{MsbBitIter, MsbBits, VisBits, msb_get, msb_iter, msb_set, words_for_bits};
 pub use walk::{
-    CellClipPlanes, CellPortalGraph, PortalView, WalkScratch, effective_portal_walk_limit,
-    visit_cells, visit_cells_facing,
+    CellClipPlanes, CellPortalGraph, PortalGraph, PortalView, PortalWalkView, WalkScratch,
+    effective_portal_walk_limit, visit_cells_facing,
 };
 pub use xmodel_lod::{
     FLOAT64_ONE, xmodel_get_lod_for_dist, xmodel_lod_camera_dist, xmodel_lod_scaled_dists,

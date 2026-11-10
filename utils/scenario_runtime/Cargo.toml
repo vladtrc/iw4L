@@ -1,0 +1,25 @@
+[package]
+name = "scenario_runtime"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Explicit in-process scene preparation and headless authority runs"
+
+[dependencies]
+asset_transport.workspace = true
+asset_game.workspace = true
+assets.workspace = true
+bevy.workspace = true
+bots.workspace = true
+playerstate_iw4.workspace = true
+frame.workspace = true
+game_family.workspace = true
+net.workspace = true
+session.workspace = true
+sim.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+scenario = { path = "../scenario" }
+
+[lints]
+workspace = true

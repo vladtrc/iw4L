@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use asset_core::AssetNamespace;
+use asset_core::FamilyId;
 use bevy::prelude::*;
 use net::PresentedSnapshot;
 
@@ -12,14 +12,13 @@ use crate::sources::{DesiredSource, SourceKey};
 
 struct PresentedLoop {
     alias: String,
-    namespace: AssetNamespace,
+    namespace: FamilyId,
     emitter: Option<u32>,
     source: DesiredSource,
 }
 
 #[derive(Resource, Default)]
 pub(crate) struct DestructibleSources {
-    epoch: u64,
     next_version: u64,
     live: HashMap<u32, PresentedLoop>,
     pub desired: Vec<DesiredSource>,
@@ -29,19 +28,13 @@ pub(crate) fn update(
     presented: Res<PresentedSnapshot>,
     bank: Option<Res<SoundBank>>,
     namespace: Option<Res<SoundBankNamespace>>,
-    epoch: Option<Res<net::EntityEventCursor>>,
     runtime: Res<AudioRuntime>,
     mut sources: ResMut<DestructibleSources>,
 ) {
-    if sources.epoch != crate::backend::presentation_epoch(epoch.as_deref()) {
-        sources.epoch = crate::backend::presentation_epoch(epoch.as_deref());
-        sources.live.clear();
-        sources.desired.clear();
-    }
     let Some(snapshot) = presented.snapshot() else {
         return;
     };
-    let ns = namespace.map_or(AssetNamespace::Iw4, |map| map.namespace);
+    let ns = namespace.map_or(FamilyId::IW4, |map| map.namespace);
     let mut speaking: Vec<_> = snapshot
         .meta
         .world_objects
@@ -68,7 +61,7 @@ pub(crate) fn update(
     for (row, alias) in speaking {
         let (ns, alias) = alias
             .split_once(':')
-            .and_then(|(family, name)| AssetNamespace::parse(family).map(|ns| (ns, name)))
+            .and_then(|(family, name)| FamilyId::parse(family).map(|ns| (ns, name)))
             .unwrap_or((ns, alias));
         let owner = row.owner.to_wire();
         let changed = sources.live.get(&owner).is_none_or(|current| {
@@ -85,7 +78,6 @@ pub(crate) fn update(
                 alias: alias.into(),
                 emitter: row.snd_ent,
                 scope: AudioScope::Match,
-                epoch: crate::backend::presentation_epoch(epoch.as_deref()),
                 group: None,
             }) else {
                 continue;
@@ -104,7 +96,6 @@ pub(crate) fn update(
                     source: DesiredSource {
                         key: SourceKey {
                             scope: AudioScope::Match,
-                            epoch: crate::backend::presentation_epoch(epoch.as_deref()),
                             object: u64::from(owner),
                             slot: 1,
                         },
@@ -123,5 +114,21 @@ pub(crate) fn update(
         current.source.origin_inches = Some(row.origin);
         let desired = current.source.clone();
         sources.desired.push(desired);
+    }
+}
+
+impl DestructibleSources {
+    pub(crate) fn retire_emitter(&mut self, emitter: u32, runtime: &crate::AudioRuntime) {
+        for row in self
+            .live
+            .values()
+            .filter(|row| row.emitter == Some(emitter))
+        {
+            runtime.stop_source(row.source.key);
+        }
+
+        self.live.retain(|_, row| row.emitter != Some(emitter));
+        self.desired
+            .retain(|source| source.cue.emitter != Some(emitter));
     }
 }

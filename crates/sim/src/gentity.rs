@@ -142,6 +142,7 @@ pub struct EntityKernelSlotSnapshot {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct EntityKernelSnapshot {
+    pub reserved_generations: Vec<u32>,
     pub slots: Vec<EntityKernelSlotSnapshot>,
     pub high_water: i32,
     pub free_fifo: Vec<i32>,
@@ -160,6 +161,7 @@ pub enum EntityKernelSnapshotError {
 impl Default for EntityKernelSnapshot {
     fn default() -> Self {
         Self {
+            reserved_generations: vec![0; GENTITY_RESERVED_COUNT as usize],
             slots: Vec::new(),
             high_water: GENTITY_RESERVED_COUNT,
             free_fifo: Vec::new(),
@@ -196,7 +198,21 @@ impl EntityKernelSnapshot {
             .map(|occupied| occupied.kind)
     }
 
+    pub fn generation(&self, number: u16) -> Option<u32> {
+        let index = usize::from(number);
+        if index < GENTITY_RESERVED_COUNT as usize {
+            self.reserved_generations.get(index).copied()
+        } else {
+            self.slots
+                .get(index - GENTITY_RESERVED_COUNT as usize)
+                .map(|slot| slot.generation)
+        }
+    }
+
     pub fn validate(&self) -> Result<(), EntityKernelSnapshotError> {
+        if self.reserved_generations.len() != GENTITY_RESERVED_COUNT as usize {
+            return Err(EntityKernelSnapshotError::SlotCountMismatch);
+        }
         if !(GENTITY_RESERVED_COUNT..=i32::from(ENTITYNUM_WORLD)).contains(&self.high_water) {
             return Err(EntityKernelSnapshotError::HighWaterOutOfRange);
         }
@@ -303,8 +319,20 @@ impl Default for EntityKernel {
 }
 
 impl EntityKernel {
+    pub(crate) fn occupy_reserved(&mut self, number: i32) {
+        assert!((0..GENTITY_RESERVED_COUNT).contains(&number));
+        let generation = &mut self.slots[number as usize].generation;
+        *generation = generation
+            .checked_add(1)
+            .expect("entity generation exhausted");
+    }
+
     pub fn to_snapshot(&self) -> EntityKernelSnapshot {
         EntityKernelSnapshot {
+            reserved_generations: self.slots[..GENTITY_RESERVED_COUNT as usize]
+                .iter()
+                .map(|slot| slot.generation)
+                .collect(),
             slots: self.slots[GENTITY_RESERVED_COUNT as usize..self.high_water as usize]
                 .iter()
                 .map(|slot| EntityKernelSlotSnapshot {
@@ -331,6 +359,9 @@ impl EntityKernel {
     ) -> Result<Self, EntityKernelSnapshotError> {
         snapshot.validate()?;
         let mut slots = vec![EntitySlot::default(); usize::from(ENTITYNUM_WORLD)];
+        for (slot, generation) in slots.iter_mut().zip(&snapshot.reserved_generations) {
+            slot.generation = *generation;
+        }
         for (index, source) in snapshot.slots.iter().enumerate() {
             slots[GENTITY_RESERVED_COUNT as usize + index] = EntitySlot {
                 generation: source.generation,
@@ -352,6 +383,13 @@ impl EntityKernel {
             level_time_ms: snapshot.level_time_ms,
             frame_serial: snapshot.frame_serial,
         })
+    }
+
+    pub fn generations(&self) -> Vec<u32> {
+        self.slots[..self.high_water as usize]
+            .iter()
+            .map(|slot| slot.generation)
+            .collect()
     }
 
     pub fn begin_frame(&mut self, level_time_ms: i32) {
@@ -382,10 +420,10 @@ impl EntityKernel {
         let mut numbers = Vec::new();
         let mut number = GENTITY_RESERVED_COUNT;
         while number < self.high_water {
-            if let Some(kind) = self.occupied_kind(number) {
-                if matches(kind) {
-                    numbers.push(number);
-                }
+            if let Some(kind) = self.occupied_kind(number)
+                && matches(kind)
+            {
+                numbers.push(number);
             }
             number += 1;
         }
@@ -606,20 +644,23 @@ pub fn collect_use_presses(cmds: &[(u32, u32)], old_buttons: &[(u32, u32)]) -> V
 }
 
 pub fn init_script_mover_state(number: i32, origin: [f32; 3], angles: [f32; 3]) -> EntityState {
-    let mut es = EntityState::default();
-    es.number = number;
-    es.e_type = ET_SCRIPTMOVER;
-    es.tr_type = TR_STATIONARY;
-    es.tr_base = origin;
-    es.apos_tr_type = TR_STATIONARY;
-    es.apos_tr_base = angles;
-    es
+    EntityState {
+        number,
+        e_type: ET_SCRIPTMOVER,
+        tr_type: TR_STATIONARY,
+        tr_base: origin,
+        apos_tr_type: TR_STATIONARY,
+        apos_tr_base: angles,
+        ..EntityState::default()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ScriptMoverGentity {
+    pub body: Option<crate::EntityBodyBounds>,
     pub id: ScriptModelId,
     pub killcam_camera: Option<playerstate_iw4::KillCamMode>,
+    pub thermal_draw: bool,
     pub state: EntityState,
 
     pub box_mid: [f32; 3],
@@ -638,8 +679,10 @@ pub struct ScriptMoverGentity {
 impl Default for ScriptMoverGentity {
     fn default() -> Self {
         Self {
+            body: None,
             id: ScriptModelId::from_wire(0),
             killcam_camera: None,
+            thermal_draw: false,
             state: EntityState::default(),
             box_mid: [0.0; 3],
             box_half: [0.0; 3],
@@ -694,11 +737,13 @@ pub fn init_missile_state(
     apos: Trajectory,
     launch_time: i32,
 ) -> EntityState {
-    let mut es = EntityState::default();
-    es.number = number;
-    es.e_type = ET_MISSILE;
-    es.e_flags = 0;
-    es.index = weapon as i32;
+    let mut es = EntityState {
+        number,
+        e_type: ET_MISSILE,
+        e_flags: 0,
+        index: weapon as i32,
+        ..EntityState::default()
+    };
     write_pos(&mut es, pos);
     write_apos(&mut es, apos);
     es.set_launch_time(launch_time);
@@ -712,12 +757,14 @@ pub fn init_item_state(
     apos: Trajectory,
     owner_num: i32,
 ) -> EntityState {
-    let mut es = EntityState::default();
-    es.number = number;
-    es.e_type = ET_ITEM;
-    es.e_flags = 0;
-    es.index = weapon as i32;
-    es.client_num = owner_num;
+    let mut es = EntityState {
+        number,
+        e_type: ET_ITEM,
+        e_flags: 0,
+        index: weapon as i32,
+        client_num: owner_num,
+        ..EntityState::default()
+    };
     write_pos(&mut es, pos);
     write_apos(&mut es, apos);
     es

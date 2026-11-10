@@ -6,27 +6,24 @@ use super::helpers::{
     decode_reflection_probes, report_dpvs, report_ffa_spawns, report_intermission,
     report_map_models, report_world_batches, smodel_lighting_samples,
 };
-use super::{
-    CommonCensus, CommonWalkSink, LaneGap, LoadedWorld, MaterialPopulation, MaterialPopulationSink,
-    ZoneLane, ZoneWalkSink,
-};
+use super::sink::{CommonWalkSink, MaterialPopulationSink, ZoneWalkSink};
+use crate::{CommonCensus, LaneGap, LoadedWorld, MaterialPopulation, ZoneLane};
 use crate::{
+    PreparedWorld,
     lane_capability::{LaneStatus, PreparedCapability},
-    session_load::PreparedWorld,
 };
-use asset_core::ZoneGame;
+use asset_core::FamilyId;
 use asset_material::decode_material_color_maps;
 use asset_transport::{LoadProgress, StageId, ZoneImage, ZoneMemory};
 use asset_world::{
-    WorldDrawPolicy, build_clip_collision, build_world_draw, census_entity_string_keys,
-    dm_spawn_points, intermission_view, map_ents_entity_string, minimap_corners,
-    worldspawn_north_yaw,
+    WorldDrawPolicy, build_clip_collision, census_entity_string_keys, dm_spawn_points,
+    intermission_view, map_ents_entity_string, minimap_corners, worldspawn_north_yaw,
 };
 
 pub struct Iw4Lane;
 
 impl Iw4Lane {
-    pub const GAME: ZoneGame = ZoneGame::Iw4;
+    pub const GAME: FamilyId = FamilyId::IW4;
     pub const CAPABILITIES: &'static [(PreparedCapability, LaneStatus)] = &[
         (PreparedCapability::Envelope, LaneStatus::SupportedPopulated),
         (
@@ -52,23 +49,17 @@ impl Iw4Lane {
     ];
 }
 
-impl ZoneLane for Iw4Lane {
-    fn game(&self) -> ZoneGame {
-        Self::GAME
-    }
-
-    fn capabilities(&self) -> &'static [(PreparedCapability, LaneStatus)] {
-        Self::CAPABILITIES
-    }
-
-    fn load_world(
+impl Iw4Lane {
+    #[allow(clippy::too_many_arguments)]
+    fn load_world_selected(
         &self,
         path: &Path,
         image: &ZoneImage,
         progress: &LoadProgress,
         shared_surfaces: asset_model::SharedXModelSurfaces,
         material_seed: asset_material::MaterialCatalog,
-        common_film_visions: &super::FilmVisionCatalog,
+        common_film_visions: &crate::FilmVisionCatalog,
+        region: Option<asset_world::WorldRegion>,
     ) -> LoadedWorld {
         let mut report = Vec::new();
         let stage = progress.begin_scoped(StageId::MapAssets, "header", None);
@@ -115,13 +106,16 @@ impl ZoneLane for Iw4Lane {
         let mut sink =
             ZoneWalkSink::with_stage(progress.begin_scoped(StageId::MapAssets, "walk", None));
         let seeded_techsets = material_seed.technique_set_facts().to_vec();
+        sink.region_only = region.is_some();
+        sink.capture_weapons =
+            image.runtime_profile().ok() == Some(asset_core::RuntimeProfile::Campaign);
         sink.seed_materials(material_seed);
         sink.map_xmodels.shared_surfaces = shared_surfaces;
         sink.set_capture_zone(asset_core::ZoneOwner::from_zone_path(path));
-        sink.set_capture_ns(asset_core::AssetNamespace::Iw4);
+        sink.set_capture_ns(asset_core::FamilyId::IW4);
         sink.sound = Some(asset_audio::ZoneSoundCapture::for_map(
             path,
-            asset_audio::ZoneGame::Iw4,
+            asset_audio::FamilyId::IW4,
             "map",
         ));
         let walked = load_zone(&mut stream, &mut sink);
@@ -144,6 +138,28 @@ impl ZoneLane for Iw4Lane {
         if let Some(stage) = sink.stage.take() {
             stage.finish_from(&walked);
         }
+        let (region_keys, smodel_mask) = match region {
+            Some(region) => {
+                let result = stream
+                    .gfx_world()
+                    .ok_or_else(|| "region world has no GfxWorld".to_owned())
+                    .and_then(|geometry| {
+                        super::region::compile_models(&mut sink, &stream, geometry, region)
+                    });
+                match result {
+                    Ok((keys, mask)) => (Some(keys), Some(mask)),
+                    Err(error) => {
+                        return LoadedWorld::with_gap(
+                            WorldDrawPolicy::iw4(),
+                            PreparedCapability::PreparedWorld,
+                            error,
+                            None,
+                        );
+                    }
+                }
+            }
+            None => (None, None),
+        };
         let light_def_table = sink.light_def_table;
         let light_def_bodies = sink.light_def_bodies;
         let mut materials = std::mem::take(&mut sink.materials);
@@ -160,6 +176,26 @@ impl ZoneLane for Iw4Lane {
         let mut scripts = std::mem::take(&mut sink.scripts);
         if let Some(entities) = map_ents_entity_string(&stream) {
             scripts.set_entities(entities.to_owned());
+        }
+        if let Some(geometry) = stream.path_data() {
+            match asset_world::capture_path_nodes(&stream, geometry, sink.script_strings) {
+                Ok(nodes) => {
+                    report.push(format!(
+                        "campaign path nodes: nodes={} links={}",
+                        nodes.len(),
+                        nodes.iter().map(|node| node.links.len()).sum::<usize>()
+                    ));
+                    scripts.set_path_nodes(nodes);
+                }
+                Err(error) => {
+                    return LoadedWorld::with_gap(
+                        WorldDrawPolicy::iw4(),
+                        PreparedCapability::PreparedWorld,
+                        format!("campaign path node capture: {error}"),
+                        None,
+                    );
+                }
+            }
         }
         let script_sound = std::mem::take(&mut sink.script_sound).finish();
         let exp_fog = sink.exp_fog.take();
@@ -234,6 +270,38 @@ impl ZoneLane for Iw4Lane {
         let mut impact_fx = sink.impact_fx.take_table();
         let mut map_xmodels = std::mem::take(&mut sink.map_xmodels);
         let phys_presets = std::mem::take(&mut sink.phys_presets);
+        let weapon_assets =
+            if image.runtime_profile().ok() == Some(asset_core::RuntimeProfile::Campaign) {
+                sink.weapons.resolve_reticles(&materials);
+                sink.weapons.resolve_projectile_fx_edges(&fx);
+                let projectile_keys = sink.weapons.projectile_model_hints();
+                sink.projectile_meshes.keep_referenced(&projectile_keys);
+                for key in &projectile_keys {
+                    if !sink.projectile_meshes.contains(key.namespace, &key.name)
+                        && let Some(model) = sink.world_weapons.get(key.namespace, &key.name)
+                    {
+                        sink.projectile_meshes.absorb_world_weapon(model);
+                    }
+                }
+                let mut weapons = std::mem::take(&mut sink.weapons).into_build();
+                weapons.resolve_zone_combat_fx(&fx, &sink.tracers);
+                weapons.apply_stats_tables(sink.stats_tables.values());
+                report.push(format!(
+                "map weapons: {} definitions; {} world models; {} projectile models; {} tracers",
+                weapons.len(),
+                sink.world_weapons.len(),
+                sink.projectile_meshes.len(),
+                sink.tracers.len()
+            ));
+                crate::MapWeaponAssets {
+                    weapons,
+                    world_models: std::mem::take(&mut sink.world_weapons),
+                    projectiles: std::mem::take(&mut sink.projectile_meshes),
+                    tracers: std::mem::take(&mut sink.tracers),
+                }
+            } else {
+                crate::MapWeaponAssets::default()
+            };
         let bodies = std::mem::take(&mut sink.bodies);
         let fpv_meshes = std::mem::take(&mut sink.fpv_meshes);
         let map_xanims = std::mem::take(&mut sink.xanims);
@@ -280,6 +348,7 @@ impl ZoneLane for Iw4Lane {
                     image_stage,
                     fx_material_keys,
                     glass_names,
+                    region_keys,
                 )
             });
 
@@ -359,6 +428,47 @@ impl ZoneLane for Iw4Lane {
             };
             clip_stage.done();
         });
+        if let Some(region) = region {
+            if let Some(clip) = clip.as_mut() {
+                let before = (
+                    clip.brushes.len(),
+                    clip.mesh.tri_count(),
+                    clip.static_models.len(),
+                );
+                if let Err(error) =
+                    asset_world::crop_collision(clip, region, asset_core::FamilyId::IW4)
+                {
+                    return LoadedWorld::with_gap(
+                        WorldDrawPolicy::iw4(),
+                        PreparedCapability::CollisionSpawns,
+                        error,
+                        None,
+                    );
+                }
+                report.push(format!(
+                    "world region collision: brushes={}/{} triangles={}/{} smodels={}/{}",
+                    clip.brushes.len(),
+                    before.0,
+                    clip.mesh.tri_count(),
+                    before.1,
+                    clip.static_models.len(),
+                    before.2
+                ));
+            }
+            let after = clip.as_ref().map(|clip| {
+                (
+                    clip.brushes.len(),
+                    clip.mesh.tri_count(),
+                    clip.static_models.len(),
+                )
+            });
+            report.push(format!(
+                "world region: native bounds={:?}..{:?}, retained collision={after:?}",
+                region.min, region.max
+            ));
+            dyn_ents.models.retain(|row| region.contains(row.origin));
+            dyn_ents.brushes.retain(|row| region.contains(row.origin));
+        }
         report.extend(image_report.into_iter().flatten());
         report.extend(clip_report);
         let map_content = std::sync::Arc::new(asset_world::build_map_content(
@@ -404,7 +514,7 @@ impl ZoneLane for Iw4Lane {
             report.push("no GfxWorld reached — nothing to draw".into());
             push_mapents_key_census(&mut report, &stream);
             let dm_spawns = dm_spawn_points(&stream);
-            drop(stream);
+
             let arena_bytes = memory.total_bytes();
             drop(memory);
             report.push(format!(
@@ -412,6 +522,7 @@ impl ZoneLane for Iw4Lane {
                 arena_bytes as f64 / (1024.0 * 1024.0),
             ));
             return LoadedWorld {
+                weapon_assets,
                 scripts,
                 sound: map_sound,
                 materials,
@@ -449,7 +560,8 @@ impl ZoneLane for Iw4Lane {
             };
         };
 
-        let world_draw = build_world_draw(&stream, geometry, materials);
+        let world_draw =
+            asset_world::world_draw::build_world_draw_region(&stream, geometry, materials, region);
         report.push(format!(
             "GfxLightDef map zone: table={light_def_table} bodies={light_def_bodies} recorded={}",
             stream.light_defs().len()
@@ -457,8 +569,40 @@ impl ZoneLane for Iw4Lane {
         stage.finish_from(&world_draw);
         match world_draw {
             Ok((draw, map_materials)) => {
+                if region.is_some() {
+                    report.push(format!(
+                        "world region render: vertices={}/{} triangles={}/{} surfaces={}/{}",
+                        draw.positions.len(),
+                        geometry.vertex_count,
+                        draw.packed_indices.len() / 3,
+                        geometry.index_count / 3,
+                        draw.surface_index_ranges
+                            .iter()
+                            .filter(|(_, count)| *count != 0)
+                            .count(),
+                        geometry.surface_count
+                    ));
+                }
                 let stage = progress.begin_scoped(StageId::MapAssets, "models", None);
-                let map_models = super::build_static_model_draw(&stream, geometry, map_xmodels);
+                let mut map_models = super::build_static_model_draw(&stream, geometry, map_xmodels);
+                if let Some(region) = region {
+                    for (instance, keep) in map_models
+                        .static_draw
+                        .placements
+                        .iter_mut()
+                        .zip(smodel_mask.iter().flatten())
+                    {
+                        if !keep {
+                            *instance = None;
+                        }
+                    }
+                    map_models.script_instances.retain(|instance| {
+                        region.contains(instance.transform.translation.to_array())
+                    });
+                    map_models
+                        .script_brush_models
+                        .retain(|instance| region.contains(instance.origin));
+                }
                 {
                     let n = draw.primary_lights.len();
                     let dir = draw
@@ -510,6 +654,16 @@ impl ZoneLane for Iw4Lane {
                 let stage = progress.begin_scoped(StageId::MapAssets, "lighting", None);
                 let light_grid =
                     asset_model::OwnedLightGrid::from_stream(&stream, geometry.light_grid);
+                report.push(match &light_grid {
+                    Some(grid) => format!(
+                        "hero-only lighting: {} authored lights retained",
+                        grid.hero_lights.len()
+                    ),
+                    None => format!(
+                        "hero-only lighting: unavailable light grid ({} authored records)",
+                        geometry.light_grid.hero_light_count
+                    ),
+                });
                 let smodel_lighting_samples = match &light_grid {
                     Some(grid) => smodel_lighting_samples(
                         &mut report,
@@ -533,7 +687,7 @@ impl ZoneLane for Iw4Lane {
                 let airstrike_height = asset_world::airstrike_height(&stream);
                 let dm_spawns = dm_spawn_points(&stream);
                 push_mapents_key_census(&mut report, &stream);
-                drop(stream);
+
                 let arena_bytes = memory.total_bytes();
                 drop(memory);
                 report.push(format!(
@@ -638,11 +792,12 @@ impl ZoneLane for Iw4Lane {
                 let world_bounds = draw.stats.bounds;
                 handoff.done();
                 LoadedWorld {
+                    weapon_assets,
                     scripts,
                     sound: map_sound,
                     materials: map_materials,
                     world: PreparedWorld {
-                        source_namespace: Some(asset_core::AssetNamespace::Iw4),
+                        source_namespace: Some(asset_core::FamilyId::IW4),
                         draw: Some(draw),
                         dynamic_light: None,
                         static_model_meshes,
@@ -696,10 +851,11 @@ impl ZoneLane for Iw4Lane {
                 report.push(format!("world mesh: {e}"));
                 let dm_spawns = dm_spawn_points(&stream);
                 push_mapents_key_census(&mut report, &stream);
-                drop(stream);
+
                 let arena_bytes = memory.total_bytes();
                 drop(memory);
                 LoadedWorld {
+                    weapon_assets,
                     scripts,
                     sound: map_sound,
                     materials: asset_material::MaterialCatalog::default(),
@@ -738,24 +894,75 @@ impl ZoneLane for Iw4Lane {
             }
         }
     }
+}
 
-    fn load_common_mp(
+impl ZoneLane for Iw4Lane {
+    fn game(&self) -> FamilyId {
+        Self::GAME
+    }
+
+    fn capabilities(&self) -> &'static [(PreparedCapability, LaneStatus)] {
+        Self::CAPABILITIES
+    }
+
+    fn load_world(
         &self,
         path: &Path,
         image: &ZoneImage,
+        progress: &LoadProgress,
+        shared_surfaces: asset_model::SharedXModelSurfaces,
+        material_seed: asset_material::MaterialCatalog,
+        common_film_visions: &crate::FilmVisionCatalog,
+    ) -> LoadedWorld {
+        self.load_world_selected(
+            path,
+            image,
+            progress,
+            shared_surfaces,
+            material_seed,
+            common_film_visions,
+            None,
+        )
+    }
+
+    fn load_world_region(
+        &self,
+        path: &Path,
+        image: &ZoneImage,
+        progress: &LoadProgress,
+        material_seed: asset_material::MaterialCatalog,
+        common_film_visions: &crate::FilmVisionCatalog,
+        region: asset_world::WorldRegion,
+    ) -> LoadedWorld {
+        self.load_world_selected(
+            path,
+            image,
+            progress,
+            Default::default(),
+            material_seed,
+            common_film_visions,
+            Some(region),
+        )
+    }
+
+    fn load_common(
+        &self,
+        path: &Path,
+        image: &ZoneImage,
+        profile: asset_core::RuntimeProfile,
         progress: &LoadProgress,
         decode_color_maps: bool,
         material_seed: asset_material::MaterialCatalog,
     ) -> CommonCensus {
         let zone_name = path.file_stem().map_or_else(
-            || "common_mp".to_owned(),
+            || profile.common_zone().to_owned(),
             |stem| stem.to_string_lossy().into_owned(),
         );
         let header = match image.header() {
             Ok(header) => header,
             Err(error) => {
                 return CommonCensus {
-                    report: vec![format!("common_mp models: zone header: {error}")],
+                    report: vec![format!("{zone_name} models: zone header: {error}")],
                     ..Default::default()
                 };
             }
@@ -765,13 +972,13 @@ impl ZoneLane for Iw4Lane {
             Ok(stream) => stream,
             Err(error) => {
                 return CommonCensus {
-                    report: vec![format!("common_mp models: zone arenas: {error}")],
+                    report: vec![format!("{zone_name} models: zone arenas: {error}")],
                     ..Default::default()
                 };
             }
         };
         let mut report_arenas = vec![asset_transport::xfile_arena_row(
-            "zone arenas common_mp",
+            &format!("zone arenas {zone_name}"),
             &header.block_size,
             fastfile_iw4::XFILE_BLOCK_TEMP,
             fastfile_iw4::XFILE_BLOCK_VIRTUAL,
@@ -781,12 +988,13 @@ impl ZoneLane for Iw4Lane {
             zone_name.clone(),
             None,
         ));
+        sink.runtime_profile = profile;
         sink.seed_materials(material_seed);
         sink.set_capture_zone(asset_core::ZoneOwner::intern(&zone_name));
-        sink.set_capture_ns(asset_core::AssetNamespace::Iw4);
+        sink.set_capture_ns(asset_core::FamilyId::IW4);
         sink.sound = asset_audio::ZoneSoundCapture::claim_common(
             path,
-            asset_audio::ZoneGame::Iw4,
+            asset_audio::FamilyId::IW4,
             "common census",
         );
         let walk = load_zone(&mut stream, &mut sink);
@@ -829,10 +1037,12 @@ impl ZoneLane for Iw4Lane {
                 sink.projectile_meshes.absorb_world_weapon(gun);
             }
         }
-        let graph = crate::resolve_after_absorb(
-            &sink.materials,
-            &mut sink.tracers,
-            &mut sink.fx,
+        let graph = crate::AssetGraphLinker {
+            materials: &sink.materials,
+            tracers: &mut sink.tracers,
+            fx: &mut sink.fx,
+        }
+        .resolve_after_absorb(
             Some(&mut sink.weapons),
             None,
             Some(&mut sink.world_weapons),
@@ -933,11 +1143,15 @@ impl ZoneLane for Iw4Lane {
                 .join(" ")
         ));
         if sink.pen_table.is_some() {
-            report.push("common_mp bullet_penetration_mp: loaded (4x31)".into());
+            report.push(format!(
+                "{zone_name} {}: loaded (4x31)",
+                asset_game::penetration_table_name(profile)
+            ));
         } else {
-            report.push(
-                "common_mp bullet_penetration_mp: missing — FirePenetrate depths are 0".into(),
-            );
+            report.push(format!(
+                "{zone_name} {}: missing — FirePenetrate depths are 0",
+                asset_game::penetration_table_name(profile)
+            ));
         }
         if sink.lochit_table.is_some() {
             report.push("common_mp mp_lochit_dmgtable: loaded (20)".into());
@@ -970,7 +1184,7 @@ impl ZoneLane for Iw4Lane {
             sink.light_def_bodies,
             light_defs.len()
         ));
-        drop(stream);
+
         let s1_common_bytes = memory.total_bytes();
         drop(memory);
         report.push(format!(
@@ -1105,7 +1319,9 @@ impl ZoneLane for Iw4Lane {
                 material_population,
                 light_defs,
                 report,
-                pen_table: sink.pen_table.unwrap_or_default(),
+                pen_table: sink
+                    .pen_table
+                    .unwrap_or_else(weapon_iw4::PenetrationDepthTable::default),
                 pen_table_loaded: sink.pen_table.is_some(),
                 lochit_table: sink.lochit_table,
                 xmodel_walk: sink.models.walk_census(),
@@ -1143,7 +1359,9 @@ impl ZoneLane for Iw4Lane {
                 material_population: sink.materials,
                 light_defs,
                 report,
-                pen_table: sink.pen_table.unwrap_or_default(),
+                pen_table: sink
+                    .pen_table
+                    .unwrap_or_else(weapon_iw4::PenetrationDepthTable::default),
                 pen_table_loaded: sink.pen_table.is_some(),
                 lochit_table: sink.lochit_table,
                 xmodel_walk: sink.models.walk_census(),
@@ -1195,10 +1413,10 @@ impl ZoneLane for Iw4Lane {
         ));
         sink.seed_materials(material_seed);
         sink.set_capture_zone(asset_core::ZoneOwner::intern(&zone_name));
-        sink.set_capture_ns(asset_core::AssetNamespace::Iw4);
+        sink.set_capture_ns(asset_core::FamilyId::IW4);
         sink.sound = asset_audio::ZoneSoundCapture::claim_common(
             path,
-            asset_audio::ZoneGame::Iw4,
+            asset_audio::FamilyId::IW4,
             "material population",
         );
         let walk = load_zone(&mut stream, &mut sink);
@@ -1217,13 +1435,19 @@ impl ZoneLane for Iw4Lane {
         }
         let memory = sink.materials.image_memory();
         report.push(format!(
-            "startup material walk: zone={zone_name} assets={} materials={} images={} decoded={} fpv=0 weapons=0 (materials-only sink; not load_common_mp)",
+            "startup material walk: zone={zone_name} assets={} materials={} images={} decoded={} fpv=0 weapons=0 (startup population sink; no common census)",
             sink.walked,
             sink.materials.materials.len(),
             memory.images,
             memory.decoded_images,
         ));
+        report.push(format!(
+            "startup animations: zone={zone_name} clips={} gaps={}",
+            sink.xanims.len(),
+            sink.xanims.capture_gaps
+        ));
         MaterialPopulation {
+            xanims: sink.xanims,
             walked: sink.walked,
             light_defs: asset_world::capture_light_defs(&stream, &sink.materials),
             materials: sink.materials,
@@ -1247,28 +1471,55 @@ fn decode_map_material_images(
     stage: asset_transport::progress::StageHandle,
     fx_material_keys: Vec<asset_core::MaterialKey>,
     glass_names: Vec<String>,
+    region_keys: Option<Vec<asset_core::MaterialKey>>,
 ) -> Vec<String> {
     let mut report = Vec::new();
     let mut trees = asset_transport::NamespaceTrees::default();
     trees.adopt_zone(path);
-    match decode_material_color_maps(&trees, catalog, &stage, crate::session_load::load_pool()) {
-        Ok(stats) => {
-            report.push(format!(
+    if let Some(keys) = region_keys {
+        let keep: std::collections::HashSet<_> = keys
+            .iter()
+            .chain(&fx_material_keys)
+            .map(|key| asset_core::AssetRef::bare_name(&key.name).to_owned())
+            .chain(glass_names.iter().cloned())
+            .collect();
+        let mut dropped = 0;
+        for material in &mut catalog.materials {
+            if !keep.contains(material.name.as_str()) {
+                dropped += usize::from(!material.textures.is_empty());
+                material.textures.clear();
+            }
+        }
+        // The merged-image pass runs later. Remove unwanted texture edges now
+        // so it cannot re-request the rest of this map after atlas absorption.
+        report.push(format!(
+            "world region: removed {dropped} unselected material texture sets before merged decode"
+        ));
+        match asset_material::material_images::decode_images_for_keys(&trees, catalog, keys, &stage, crate::session_load::load_pool()) {
+            Ok(count) => report.push(format!("world region: selected material images decoded={count}; unselected material images not requested")),
+            Err(error) => report.push(format!("world region image gap: {error}")),
+        }
+    } else {
+        match decode_material_color_maps(&trees, catalog, &stage, crate::session_load::load_pool())
+        {
+            Ok(stats) => {
+                report.push(format!(
                 "IWD color/normal maps: {}/{} decoded, {} missing, {} unsupported from {} archives",
                 stats.decoded, stats.requested, stats.missing, stats.unsupported, stats.archives
             ));
-            if let Some(gap) = stats.first_gap {
-                report.push(format!("IWD material-map gap: {gap}"));
+                if let Some(gap) = stats.first_gap {
+                    report.push(format!("IWD material-map gap: {gap}"));
+                }
+                if let Some(gap) = stats.first_unsupported {
+                    report.push(format!("IWD material-map unsupported: {gap}"));
+                }
             }
-            if let Some(gap) = stats.first_unsupported {
-                report.push(format!("IWD material-map unsupported: {gap}"));
-            }
+            Err(error) => report.push(format!("IWD material-map gap: {error}")),
         }
-        Err(error) => report.push(format!("IWD material-map gap: {error}")),
     }
     let mut keys = fx_material_keys;
     keys.extend(glass_names.iter().map(|name| asset_core::MaterialKey {
-        namespace: asset_core::AssetNamespace::Iw4,
+        namespace: asset_core::FamilyId::IW4,
         name: name.clone(),
     }));
     match asset_material::material_images::decode_images_for_keys(
@@ -1299,8 +1550,8 @@ fn decode_map_material_images(
 
 fn select_film_vision(
     name: Option<&str>,
-    map: &super::FilmVisionCatalog,
-    common: &super::FilmVisionCatalog,
+    map: &crate::FilmVisionCatalog,
+    common: &crate::FilmVisionCatalog,
 ) -> Result<Option<(asset_world::FilmVision, &'static str)>, String> {
     let name = name.ok_or_else(|| "map path has no UTF-8 stem".to_owned())?;
     let candidate = map

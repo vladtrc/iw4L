@@ -21,6 +21,9 @@ pub(crate) fn follow_movers(
             evaluate_trajectory(&pos_from_entity_state(&mover.state), time_ms),
             evaluate_trajectory(&apos_from_entity_state(&mover.state), time_ms),
         );
+        if let Some(body) = &mut row.body {
+            body.origin = pose.0;
+        }
         match row.followed_pose {
             None => row.followed_pose = Some(pose),
             Some(followed) if followed == pose => {}

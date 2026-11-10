@@ -340,14 +340,14 @@ fn read_phys_preset(
 ) -> Option<OwnedPhysPreset> {
     let header = geometry.header;
     Some(OwnedPhysPreset {
-        name: string_at(stream, geometry.name).unwrap_or_default(),
+        name: string_at(stream, geometry.name).unwrap_or(String::new()),
         preset_type: stream.i32_at(header, stream.layout(4, 8)).ok()?,
         mass: stream.f32_at(header, stream.layout(8, 12)).ok()?,
         bounce: stream.f32_at(header, stream.layout(12, 16)).ok()?,
         friction: stream.f32_at(header, stream.layout(16, 20)).ok()?,
         bullet_force_scale: stream.f32_at(header, stream.layout(20, 24)).ok()?,
         explosive_force_scale: stream.f32_at(header, stream.layout(24, 28)).ok()?,
-        snd_alias_prefix: string_at(stream, geometry.snd_alias_prefix).unwrap_or_default(),
+        snd_alias_prefix: string_at(stream, geometry.snd_alias_prefix).unwrap_or(String::new()),
         pieces_spread_fraction: stream.f32_at(header, stream.layout(32, 40)).ok()?,
         pieces_upward_velocity: stream.f32_at(header, stream.layout(36, 44)).ok()?,
         temp_default_to_cylinder: stream.u8_at(header, stream.layout(40, 48)).ok()? != 0,

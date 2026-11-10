@@ -23,7 +23,7 @@ pub(crate) struct FrontendState {
     password_joining: bool,
     lobby_password: String,
     rules_seeded: bool,
-    family_inventory: Option<u8>,
+    family_inventory: Option<master_protocol::ContentFamilies>,
 }
 
 #[derive(SystemParam)]
@@ -97,6 +97,10 @@ fn change_page(page: &mut usize, command: &ConsoleCommand, len: usize) {
         .min(len.saturating_sub(1) / PAGE_SIZE);
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 pub(crate) fn route(
     mut events: MessageReader<ConsoleCommand>,
     (mut returned, scope, match_scope): (
@@ -176,12 +180,12 @@ pub(crate) fn route(
     if dvars.get("ui_mapname").is_none()
         && let Some(map) = maps.maps().find(|map| map.starts_with("iw4:"))
     {
-        dvars.set("ui_mapname", map.clone());
+        dvars.set("ui_mapname", map.to_owned());
     }
     if dvars.get("ui_gametype").is_none() {
         dvars.set(
             "ui_gametype",
-            sim::HostGameModeSelection::from_env().token(),
+            sim::HostGameModeSelection::launch_default().token(),
         );
     }
     if !state.rules_seeded
@@ -190,28 +194,36 @@ pub(crate) fn route(
         seed_rules(&mut dvars, config);
         state.rules_seeded = true;
     }
-    let have = *state.family_inventory.get_or_insert_with(|| {
-        let trees = asset_transport::NamespaceTrees::discover(&asset_transport::GamesRoot(
-            identity.games_root.clone(),
-        ));
-        net::content_inventory(
-            trees.get(asset_core::AssetNamespace::Iw4).is_some(),
-            trees.get(asset_core::AssetNamespace::Iw5).is_some(),
-            trees.get(asset_core::AssetNamespace::T5).is_some(),
-            trees.get(asset_core::AssetNamespace::T6).is_some(),
-        )
-        .0
-    });
-    for (family, setting, bit) in frame::AssetFamilies::SETTINGS {
+    let have = state
+        .family_inventory
+        .get_or_insert_with(|| {
+            let trees = asset_transport::NamespaceTrees::discover(&asset_transport::GamesRoot(
+                identity.games_root.clone(),
+            ));
+            net::content_inventory(trees.present().map(|(id, _)| id.as_str()))
+        })
+        .clone();
+    let family_settings: Vec<_> = frame::AssetFamilies::settings()
+        .into_iter()
+        .map(|(id, setting)| (id.as_str(), setting))
+        .collect();
+    for (family, setting) in &family_settings {
         if dvars.get(setting).is_none() {
             let env = std::env::var(format!("IW4L_ASSETS_{}", family.to_ascii_uppercase())).ok();
             dvars.set(
                 setting,
-                env.unwrap_or_else(|| if have & bit != 0 { "1" } else { "0" }.into()),
+                env.unwrap_or_else(|| {
+                    if have.contains_family(family) {
+                        "1"
+                    } else {
+                        "0"
+                    }
+                    .into()
+                }),
             );
         }
     }
-    for (family, setting, bit) in frame::AssetFamilies::SETTINGS {
+    for (family, setting) in &family_settings {
         let selection = services
             .bridge
             .as_ref()
@@ -220,7 +232,7 @@ pub(crate) fn route(
             || dvars.get(setting) == Some("1"),
             |families| families.enabled(family),
         );
-        let status = if have & bit == 0 {
+        let status = if !have.contains_family(family) {
             "NOT INSTALLED"
         } else if enabled {
             "ENABLED"
@@ -233,7 +245,7 @@ pub(crate) fn route(
         );
         dvars.set(
             &format!("ui_assets_{family}_blocked"),
-            if have & bit == 0 || state.public || !party.is_host {
+            if !have.contains_family(family) || state.public || !party.is_host {
                 "1"
             } else {
                 "0"
@@ -250,11 +262,11 @@ pub(crate) fn route(
                 "set" | "seta" => {
                     if let [name, values @ ..] = command.args.as_slice() {
                         if values.is_empty() {
-                            echo.write(format!("{name} = {}", dvars.get(name).unwrap_or_default()));
+                            echo.write(format!("{name} = {}", dvars.get(name).unwrap_or("")));
                         } else {
-                            if let Some((family, _, bit)) = frame::AssetFamilies::SETTINGS
+                            if let Some((family, _)) = family_settings
                                 .iter()
-                                .find(|(_, setting, _)| setting.eq_ignore_ascii_case(name))
+                                .find(|(_, setting)| setting.eq_ignore_ascii_case(name))
                             {
                                 if state.public
                                     || (party.in_lobby && !party.is_host)
@@ -265,7 +277,7 @@ pub(crate) fn route(
                                 if values.len() != 1 || !matches!(values[0].as_str(), "0" | "1") {
                                     return Err(format!("{name} must be 0 or 1"));
                                 }
-                                if values[0] == "1" && have & bit == 0 {
+                                if values[0] == "1" && !have.contains_family(family) {
                                     return Err(format!(
                                         "Cannot enable {family}: game content is not installed"
                                     ));
@@ -277,9 +289,9 @@ pub(crate) fn route(
                 }
                 "setfromdvar" => {
                     if command.args.first().is_some_and(|name| {
-                        frame::AssetFamilies::SETTINGS
+                        family_settings
                             .iter()
-                            .any(|(_, setting, _)| setting.eq_ignore_ascii_case(name))
+                            .any(|(_, setting)| setting.eq_ignore_ascii_case(name))
                     }) {
                         return Err("Use set <asset setting> 0|1 to change asset families".into());
                     }
@@ -315,7 +327,7 @@ pub(crate) fn route(
                         services.submit(net::MasterMenuAction::LeaveLobby)?;
                     } else {
                         let (map, mode) = selected_game(&dvars, &maps)?;
-                        frame::AssetFamilies::from_inventory(have, &dvars)?.require_map(&map)?;
+                        frame::AssetFamilies::from_inventory(&have, &dvars)?.require_map(&map)?;
                         services.submit(net::MasterMenuAction::Host {
                             map,
                             mode: mode.token().into(),
@@ -335,12 +347,12 @@ pub(crate) fn route(
                                 .into(),
                         );
                     }
-                    let family = command.args.first().ok_or("ui_asset_family <iw5|t5|t6>")?;
-                    let (_, setting, bit) = frame::AssetFamilies::SETTINGS
+                    let family = command.args.first().ok_or("ui_asset_family <family>")?;
+                    let (_, setting) = family_settings
                         .iter()
-                        .find(|(name, _, _)| name == family)
+                        .find(|(name, _)| *name == family.as_str())
                         .ok_or("Unknown optional asset family")?;
-                    if have & bit == 0 {
+                    if !have.contains_family(family) {
                         return Err(format!(
                             "Cannot enable {family}: game content is not installed"
                         ));
@@ -364,12 +376,13 @@ pub(crate) fn route(
                         return Err("Only the lobby host can start a match".into());
                     }
                     let (map, mode) = selected_game(&dvars, &maps)?;
+                    let map = assets::MergedMap::select_name(&identity.artifacts, &map)?;
                     let families = services
                         .bridge
                         .as_ref()
                         .and_then(|bridge| bridge.state().families())
                         .map(Ok)
-                        .unwrap_or_else(|| frame::AssetFamilies::from_inventory(have, &dvars))?;
+                        .unwrap_or_else(|| frame::AssetFamilies::from_inventory(&have, &dvars))?;
                     families.require_map(&map)?;
                     commands.insert_resource(host_rules(&dvars));
                     if state.public {
@@ -378,19 +391,16 @@ pub(crate) fn route(
                             mode: mode.token().into(),
                         })?;
                     } else {
-                        let id = transition
+                        transition
                             .request_zone(map.clone())
                             .map_err(|error| error.to_string())?;
                         commands.insert_resource(mode);
-                        echo.write(format!(
-                            "menu: starting {map} {} (swap #{id})",
-                            mode.token()
-                        ));
+                        echo.write(format!("menu: starting {map} {}", mode.token()));
                     }
                 }
                 "ui_vote_skip" => services.submit(net::MasterMenuAction::VoteToSkip)?,
                 "ui_maps" => {
-                    let map = dvars.get("ui_mapname").unwrap_or_default();
+                    let map = dvars.get("ui_mapname").unwrap_or("");
                     state.map_pack = maps.pack_of(map).unwrap_or(0);
                     let index = pack_maps(&maps, state.map_pack)
                         .iter()
@@ -450,7 +460,7 @@ pub(crate) fn route(
                         .as_ref()
                         .and_then(|bridge| bridge.state().families())
                         .map(Ok)
-                        .unwrap_or_else(|| frame::AssetFamilies::from_inventory(have, &dvars))?;
+                        .unwrap_or_else(|| frame::AssetFamilies::from_inventory(&have, &dvars))?;
                     families.require_map(&map)?;
                     if state.public {
                         services.submit(net::MasterMenuAction::UpdateLobby {
@@ -485,10 +495,7 @@ pub(crate) fn route(
                     if !party.in_lobby || !party.is_host {
                         return Err("Only the host can change the password".into());
                     }
-                    let password = dvars
-                        .get("ui_password_input")
-                        .unwrap_or_default()
-                        .to_owned();
+                    let password = dvars.get("ui_password_input").unwrap_or("").to_owned();
                     if password.len() > master_protocol::MAX_PASSWORD_BYTES {
                         return Err("Password must be at most 64 bytes".into());
                     }
@@ -506,10 +513,7 @@ pub(crate) fn route(
                         .password_advert
                         .clone()
                         .ok_or("Lobby is no longer available")?;
-                    let password = dvars
-                        .get("ui_password_input")
-                        .unwrap_or_default()
-                        .to_owned();
+                    let password = dvars.get("ui_password_input").unwrap_or("").to_owned();
                     if password.len() > master_protocol::MAX_PASSWORD_BYTES {
                         return Err("Password must be at most 64 bytes".into());
                     }
@@ -554,7 +558,7 @@ pub(crate) fn route(
                         let id = if command.name == "ui_join_lobby_selected" {
                             dvars
                                 .get("ui_browser_join_id")
-                                .unwrap_or_default()
+                                .unwrap_or("")
                                 .parse()
                                 .map_err(|_| "Lobby is no longer available")?
                         } else {
@@ -580,8 +584,8 @@ pub(crate) fn route(
                                     .find(|advert| advert.id == id)
                             })
                             .ok_or("Lobby is no longer available")?;
-                        if let Some(message) =
-                            frame::AssetFamilies(advert.missing.0).missing_notice(0)
+                        if let Some(message) = frame::AssetFamilies(advert.missing.clone())
+                            .missing_notice(&master_protocol::ContentFamilies::default())
                         {
                             dvars.set("partyend_reason", message);
                             dvars.set("ui_connection_error", "1");
@@ -823,7 +827,7 @@ pub(crate) fn route(
             &format!("ui_map_{row}"),
             pack.get(state.map_page * PAGE_SIZE + row)
                 .map(|map| label(map))
-                .unwrap_or_default(),
+                .unwrap_or(String::new()),
         );
     }
     let pages = map_pages(&maps);
@@ -950,7 +954,7 @@ pub(crate) fn route(
             &format!("ui_browser_{row}_id"),
             advert
                 .map(|advert| advert.id.to_string())
-                .unwrap_or_default(),
+                .unwrap_or(String::new()),
         );
         let cells = advert
             .map(|advert| {
@@ -959,7 +963,7 @@ pub(crate) fn route(
                 } else if !advert.missing.is_empty() {
                     format!(
                         "NEEDS {}",
-                        net::content_names(advert.missing).to_uppercase()
+                        net::content_names(&advert.missing).to_uppercase()
                     )
                 } else if advert.players >= advert.max_players {
                     "FULL".into()
@@ -987,10 +991,13 @@ pub(crate) fn route(
                     .as_ref()
                     .and_then(|key| localize.as_ref()?.text(key))
                     .unwrap_or(&fallback_map);
-                let assets = net::content_names(master_protocol::ContentFlags(
-                    advert.available.0 & !net::CONTENT_IW4,
-                ))
-                .to_uppercase();
+                let assets = advert
+                    .available
+                    .iter()
+                    .filter(|token| *token != "iw4")
+                    .collect::<Vec<_>>()
+                    .join(",")
+                    .to_uppercase();
                 [
                     browser_cell(&advert.name, 22),
                     browser_cell(map, 18),
@@ -999,12 +1006,12 @@ pub(crate) fn route(
                     if assets.is_empty() {
                         "—".into()
                     } else {
-                        assets
+                        browser_cell(&assets, 10)
                     },
-                    status,
+                    browser_cell(&status, 16),
                 ]
             })
-            .unwrap_or_default();
+            .unwrap_or_else(|| std::array::from_fn(|_| String::new()));
         for (key, value) in ["host", "map", "mode", "players", "assets", "state"]
             .into_iter()
             .zip(cells)

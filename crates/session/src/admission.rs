@@ -1,117 +1,131 @@
 use assets::LoadingScreen;
 use bevy::prelude::*;
+use frame::ScopeApp;
 use frame::{AppScreen, ClientSet, RuntimeRole};
 use net::{AuthorityLoadHold, ClientAdmission, SignonPhase, SignonState};
 use render_frontend::prepare::scene::world::WorldScene;
 
 use crate::LiveWorldIdentity;
 
-pub fn update_admission(
-    mut signon: ResMut<SignonState>,
-    mut admission: ResMut<ClientAdmission>,
-    role: Res<RuntimeRole>,
-    mut hold: Option<ResMut<AuthorityLoadHold>>,
-    has_world: Option<Res<State<frame::MatchScope>>>,
-    scene: Option<Res<WorldScene>>,
-    audio: Option<Res<audio::AudioReady>>,
-    mut live: Option<ResMut<LiveWorldIdentity>>,
-    mut authority: Option<ResMut<net::AuthorityWorld>>,
-    mut weapons: Option<ResMut<assets::PreparedWeapons>>,
-    headless: Option<Res<frame::Headless>>,
-    generation: Res<frame::WorldGeneration>,
-    navigation: Option<Res<frame::BotNavigationReady>>,
-    mut policy: ResMut<crate::SessionReadinessPolicy>,
-) {
-    if let (Some(live), Some(installed), Some(weapons)) =
-        (live.as_mut(), admission.core.installed(), weapons.as_mut())
-        && live.load_key.local_load_request_id == installed.local_load_request_id
-        && generation.0 == Some(installed.local_load_request_id)
-        && live.load_key.match_key.is_none()
-        && !installed.match_key.is_none()
-    {
-        **weapons = assets::PreparedWeapons::for_match(
-            std::sync::Arc::clone(weapons.registry()),
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct PresentationReadinessSources<'w> {
+    scene: Option<Res<'w, WorldScene>>,
+    audio: Option<Res<'w, audio::AudioReady>>,
+    headless: Option<Res<'w, frame::Headless>>,
+    navigation: Option<Res<'w, frame::BotNavigationReady>>,
+}
+
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct AdmissionPublisher<'w> {
+    signon: ResMut<'w, SignonState>,
+    admission: ResMut<'w, ClientAdmission>,
+    hold: Option<ResMut<'w, AuthorityLoadHold>>,
+    live: Option<ResMut<'w, LiveWorldIdentity>>,
+    authority: Option<ResMut<'w, net::AuthorityWorld>>,
+    policy: ResMut<'w, crate::SessionReadinessPolicy>,
+}
+
+impl PresentationReadinessSources<'_> {
+    fn decide(&self, role: RuntimeRole, installed: bool) -> crate::readiness::ReadinessDecision {
+        crate::readiness::decide_readiness(
+            role,
+            self.headless.is_some(),
             installed,
-        );
-        if let Some(authority) = authority.as_mut() {
-            authority
-                .0
-                .world_objects_mut()
-                .set_map_round_epoch(installed.match_key.match_epoch);
-        }
-        live.load_key = installed;
+            self.navigation.as_ref().map(|report| report.0),
+            self.scene.as_ref().map(|scene| scene.readiness),
+            self.audio.as_ref().map(|report| report.0),
+        )
     }
-    let installed = has_world.is_some_and(|world| *world.get() == frame::MatchScope::Live)
-        && live.as_ref().is_some_and(|live| {
-            generation.0 == Some(live.load_key.local_load_request_id)
-                && admission.core.installed() == Some(live.load_key)
-        });
-    let decision = crate::readiness::decide_readiness(
-        *role,
-        headless.is_some(),
-        generation.stamp(),
-        installed,
-        navigation.as_ref().map(|report| report.0),
-        scene.as_ref().map(|scene| scene.readiness),
-        audio.as_ref().map(|report| report.0),
-    );
-    if let Some(hold) = hold.as_mut() {
-        hold.0 = !decision.advancement;
-    }
-    if let Some(live) = live.as_ref() {
-        admission
-            .core
-            .apply_presentation(live.load_key, decision.presentation);
-        admission
-            .core
-            .apply_local_authority_ready(live.load_key, decision.advancement);
-        if let Some(failure) = decision.failure {
-            let failure = net::SessionFail {
-                stage: net::FailStage::Load,
-                source: failure.source().to_owned(),
-                match_key: live.load_key.match_key,
-            };
-            admission.core.apply_fail(failure.clone());
-            signon.phase = SignonPhase::Failed(net::SignonFailReason::Transport {
-                source: failure.source,
-                stage: failure.stage,
-                match_key: failure.match_key,
-            });
-        }
-    }
-    let admitted = installed
-        && decision.presentation
-        && !signon.phase.is_failed()
-        && match *role {
-            RuntimeRole::Client => admission.core.class_select_allowed(),
-            RuntimeRole::Listen | RuntimeRole::Dedicated => {
-                admission.core.local_class_select_allowed()
+}
+
+impl AdmissionPublisher<'_> {
+    fn publish(
+        mut self,
+        role: Res<RuntimeRole>,
+        has_world: Option<Res<State<frame::MatchScope>>>,
+        sources: PresentationReadinessSources,
+    ) {
+        if let (Some(live), Some(installed)) = (self.live.as_mut(), self.admission.core.installed())
+            && live.match_key.is_none()
+            && !installed.is_none()
+        {
+            if let Some(authority) = self.authority.as_mut() {
+                authority
+                    .0
+                    .world_objects_mut()
+                    .set_map_round_epoch(installed.match_epoch);
             }
-            RuntimeRole::Replay => !signon.phase.is_failed(),
+            live.match_key = installed;
+        }
+        let installed = has_world.is_some_and(|world| *world.get() == frame::MatchScope::Live)
+            && self
+                .live
+                .as_ref()
+                .is_some_and(|live| self.admission.core.installed() == Some(live.match_key));
+        let decision = sources.decide(*role, installed);
+        if let Some(hold) = self.hold.as_mut() {
+            hold.0 = !decision.advancement;
+        }
+        if let Some(live) = self.live.as_ref() {
+            self.admission
+                .core
+                .apply_presentation(live.match_key, decision.presentation);
+            self.admission
+                .core
+                .apply_local_authority_ready(live.match_key, decision.advancement);
+            if let Some(failure) = decision.failure {
+                let failure = net::SessionFail {
+                    stage: net::FailStage::Load,
+                    source: failure.source().to_owned(),
+                    match_key: live.match_key,
+                };
+                self.admission.core.apply_fail(failure.clone());
+                self.signon.phase = SignonPhase::Failed(net::SignonFailReason::Transport {
+                    source: failure.source,
+                    stage: failure.stage,
+                    match_key: failure.match_key,
+                });
+            }
+        }
+        let admitted = installed
+            && decision.presentation
+            && !self.signon.phase.is_failed()
+            && match *role {
+                RuntimeRole::Client => self.admission.core.class_select_allowed(),
+                RuntimeRole::Listen | RuntimeRole::Dedicated => {
+                    self.admission.core.local_class_select_allowed()
+                }
+                RuntimeRole::Replay => !self.signon.phase.is_failed(),
+            };
+        *self.policy = crate::SessionReadinessPolicy {
+            advancement_allowed: decision.advancement,
+            presentation_allowed: decision.presentation,
+            admission_allowed: admitted,
+            input_allowed: admitted && matches!(*role, RuntimeRole::Listen | RuntimeRole::Client),
         };
-    *policy = crate::SessionReadinessPolicy {
-        load_key: live
+        let presentation_ready = decision.presentation;
+        let audio_ready = sources
+            .audio
             .as_ref()
-            .filter(|_| installed)
-            .map(|live| live.load_key),
-        generation: generation.stamp(),
-        advancement_allowed: decision.advancement,
-        presentation_allowed: decision.presentation,
-        admission_allowed: admitted,
-        input_allowed: admitted && matches!(*role, RuntimeRole::Listen | RuntimeRole::Client),
-    };
-    let presentation_ready = decision.presentation;
-    let audio_ready = audio
-        .as_ref()
-        .is_some_and(|report| report.0.ready_for(generation.stamp()));
-    if signon.admitted != admitted {
-        signon.admitted = admitted;
-        diag::info!(
-            Sim,
-            "admission admitted={admitted} role={role:?} phase={:?} presentation={presentation_ready} audio={audio_ready}",
-            signon.phase
-        );
+            .is_some_and(|report| report.0.is_ready());
+        if self.signon.admitted != admitted {
+            self.signon.admitted = admitted;
+            diag::info!(
+                Sim,
+                "admission admitted={admitted} role={role:?} phase={:?} presentation={presentation_ready} audio={audio_ready}",
+                self.signon.phase
+            );
+        }
     }
+}
+
+pub fn update_admission(
+    publisher: AdmissionPublisher,
+    role: Res<RuntimeRole>,
+    has_world: Option<Res<State<frame::MatchScope>>>,
+    sources: PresentationReadinessSources,
+) {
+    publisher.publish(role, has_world, sources);
 }
 
 pub fn drive_class_select_screen(
@@ -126,10 +140,9 @@ pub fn drive_class_select_screen(
     if signon.phase.is_failed() {
         if let Some(loading) = loading.as_deref_mut()
             && let SignonPhase::Failed(reason) = &signon.phase
+            && loading.failure().is_none()
         {
-            if loading.failure().is_none() {
-                loading.fail(reason.to_string());
-            }
+            loading.fail(reason.to_string());
         }
         if let Some(load) = load.as_deref_mut() {
             load.fail();
@@ -166,7 +179,7 @@ pub fn drive_class_select_screen(
 }
 
 pub fn register_admission(app: &mut App) {
-    app.init_resource::<crate::SessionReadinessPolicy>()
+    app.scoped::<crate::SessionReadinessPolicy>(frame::MatchScope::Live)
         .add_systems(
             Update,
             update_admission

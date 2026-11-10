@@ -53,12 +53,7 @@ pub fn effect_orient_arc(last_axis: [[f32; 3]; 3], now_axis: [[f32; 3]; 3]) -> f
     let last = crate::quat::axis_to_quat(last_axis);
     let now = crate::quat::axis_to_quat(now_axis);
     let mut dot = last[0] * now[0] + last[1] * now[1] + last[2] * now[2] + last[3] * now[3];
-    if dot > 1.0 {
-        dot = 1.0;
-    }
-    if dot < -1.0 {
-        dot = -1.0;
-    }
+    dot = dot.clamp(-1.0, 1.0);
     let a = 2.0 * libm::acosf(dot);
     let wrap = crate::origin::FX_TWO_PI as f32 - a;
     if a <= wrap { a } else { wrap }

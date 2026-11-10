@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 use frame::FxSoundPublished;
-use fx::{FxGapCause, FxMsec, set_presentation_clock};
+use fx::{FxMsec, set_presentation_clock};
 use net::{
     ClientSet, FrameClock, GameActive, LastAdoptedSnapshot, advance_cg_frame_clock,
     reconcile_prediction,
@@ -26,7 +26,7 @@ pub fn register_fx_orchestration(app: &mut App) {
         ),
     )
     .add_systems(
-        Update,
+        PreUpdate,
         clear_presented_vehicle_fx
             .in_set(frame::InMatch)
             .in_set(ClientSet::Receive),
@@ -96,9 +96,11 @@ fn play_pending_fx_sounds(
             .map(|elem| elem.sound_in_bank(req.random_seed, &bank.0))
         {
             None | Some(asset_game::FxBankSound::Gap) => {
-                host.0.gaps.raise(FxGapCause::ElemSoundSpawnSkipped {
-                    def_index: req.def_index,
-                });
+                diag::warn_once!(
+                    World,
+                    "elem {def_index} is Sound and its Bound alias could not play",
+                    def_index = req.def_index
+                );
             }
             Some(asset_game::FxBankSound::Silent) => {}
             Some(asset_game::FxBankSound::Play { namespace, alias }) => {

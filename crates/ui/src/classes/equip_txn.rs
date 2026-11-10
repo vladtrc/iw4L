@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use frame::ScopeApp;
 use net::{ClientActionInbox, ClientSet, LocalPresentClient, PresentedSnapshot};
-use sim::{ClassId, ClientAction, ClientLifecycle, SimEvent};
+use sim::{ClassId, ClientAction, ClientLifecycle};
 
 use crate::classes::select::{
     ClassChangeAllowed, ClassChangeBlockReason, ClassSelectOverlayOpen, ClassSelectPhase,
@@ -9,44 +9,47 @@ use crate::classes::select::{
 };
 use crate::classes::store::SessionClassStore;
 
-#[derive(Resource, Debug, Default)]
-pub struct EquipTxnWatch {
-    request_id: Option<u32>,
-    next_revision: u32,
-    correlation: Option<EquipCorrelation>,
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct PersonalClassSource<'w> {
+    store: Res<'w, SessionClassStore>,
+    catalog: Res<'w, crate::ClassLoadoutCatalog>,
+    player_data: Res<'w, sim::LocalPlayerData>,
+    weapons: Option<Res<'w, assets::PreparedWeapons>>,
 }
 
-#[derive(Clone, Debug)]
-struct EquipCorrelation {
-    class_id: ClassId,
-    revision: u32,
-    load_key: frame::LocalLoadKey,
-    class: frame::HostClassSlot,
-    catalog_revision: u64,
-    families: Option<frame::AssetFamilies>,
-    capability_version: Option<(u32, frame::WorldProducts)>,
-    policy: Vec<(String, String)>,
+impl PersonalClassSource<'_> {
+    fn resolve(&self, index: usize) -> Result<sim::PersonalClass, String> {
+        if let Some(slot) = self.store.slots.get(index) {
+            self.store
+                .lock_reason(index)
+                .map_or_else(
+                    || self.catalog.validate_progression(slot, &self.player_data),
+                    Err,
+                )
+                .and_then(|()| {
+                    let weapons = self
+                        .weapons
+                        .as_ref()
+                        .ok_or_else(|| "Weapon catalog is not ready".to_owned())?;
+                    let row = session::ClassRow::from(&frame::HostClassSlot::from(slot));
+                    session::loadout::resolve_personal_class(&row, weapons.registry())
+                })
+        } else {
+            Ok(sim::PersonalClass::default())
+        }
+    }
 }
 
 pub fn apply_pending_class_equip(
     mut pending: ResMut<PendingClassEquip>,
-    store: Res<SessionClassStore>,
-    catalog: Res<crate::ClassLoadoutCatalog>,
-    player_data: Res<sim::LocalPlayerData>,
-    weapons: Option<Res<assets::PreparedWeapons>>,
+    source: PersonalClassSource,
     mut actions: ResMut<ClientActionInbox>,
-    mut watch: ResMut<EquipTxnWatch>,
     mut phase: ResMut<ClassSelectPhase>,
     mut status: ResMut<ClassSelectStatus>,
     local: Res<LocalPresentClient>,
     signon: Option<Res<net::SignonState>>,
-    context: (
-        Res<frame::InstalledMatch>,
-        Option<Res<frame::HostMatchRules>>,
-        Option<Res<assets::prepared::PreparedCapabilities>>,
-    ),
 ) {
-    let Some(req) = pending.0.take() else {
+    let Some(index) = pending.0.take() else {
         return;
     };
     if let Some(signon) = signon.as_deref()
@@ -56,110 +59,34 @@ pub fn apply_pending_class_equip(
             .phase
             .status_line()
             .unwrap_or_else(|| "signon not Active".to_owned());
-        diag::info!(
-            Ui,
-            "class equip: dropped request_id={} — {reason}",
-            req.request_id
-        );
-        reject_class_equip(&mut phase, &mut status, req.request_id, reason);
+        diag::info!(Ui, "class equip: dropped class={} — {reason}", index);
+        reject_class_equip(&mut phase, &mut status, reason);
         return;
     }
-    let index = req.class_index;
-    let Some(slot) = store.slots.get(index) else {
-        reject_class_equip(
-            &mut phase,
-            &mut status,
-            req.request_id,
-            "Class is unavailable".to_owned(),
-        );
-        return;
-    };
-    if let Err(reason) = store
-        .lock_reason(index)
-        .map_or_else(|| catalog.validate_progression(slot, &player_data), Err)
-    {
-        diag::info!(
-            Ui,
-            "class equip: refused request_id={} — {reason}",
-            req.request_id
-        );
-        reject_class_equip(&mut phase, &mut status, req.request_id, reason);
-        return;
-    }
-    let resolved = weapons
-        .as_ref()
-        .ok_or_else(|| "Weapon catalog is not ready".to_owned())
-        .and_then(|weapons| {
-            let row = session::ClassRow::from(&frame::HostClassSlot::from(slot));
-            session::loadout::resolve_personal_class(&row, weapons.registry())
-        });
+    let resolved = source.resolve(index);
     let loadout = match resolved {
         Ok(loadout) => loadout,
         Err(reason) => {
-            diag::info!(
-                Ui,
-                "class equip: refused request_id={} — {reason}",
-                req.request_id
-            );
-            reject_class_equip(&mut phase, &mut status, req.request_id, reason);
+            reject_class_equip(&mut phase, &mut status, reason);
             return;
         }
     };
 
-    let Some(revision) = watch.next_revision.checked_add(1) else {
-        reject_class_equip(
-            &mut phase,
-            &mut status,
-            req.request_id,
-            "Class revision capacity exhausted",
-        );
-        return;
-    };
-    watch.next_revision = revision;
-    let correlation = EquipCorrelation {
-        class_id: ClassId(index as u32),
-        revision,
-        load_key: context.0.load_key,
-        class: frame::HostClassSlot::from(slot),
-        catalog_revision: catalog.revision,
-        families: store.server_families(),
-        capability_version: context
-            .2
-            .as_ref()
-            .map(|facts| (facts.version, facts.products)),
-        policy: context
-            .1
-            .as_ref()
-            .map_or_else(Vec::new, |policy| policy.0.clone()),
-    };
     if let Err(error) = actions.push(
         local.0,
         ClientAction::SelectClass {
-            request_id: req.request_id,
             class_id: ClassId(index as u32),
-            revision,
             loadout,
         },
     ) {
-        diag::info!(
-            Ui,
-            "class equip: request_id={} not queued — {error}",
-            req.request_id
-        );
-        let _ = reject_class_equip(
-            &mut phase,
-            &mut status,
-            req.request_id,
-            format!("not queued — {error}"),
-        );
+        diag::info!(Ui, "class equip: class={} not queued — {error}", index);
+        reject_class_equip(&mut phase, &mut status, format!("not queued — {error}"));
         return;
     }
-    watch.request_id = Some(req.request_id);
-    watch.correlation = Some(correlation);
     diag::info!(
         Ui,
-        "class select: queued SelectClass request_id={} id={} rev={revision} (queued→gather→step→codec→present)",
-        req.request_id,
+        "class select: queued SelectClass class={} id={} (queued→gather→step→codec→present)",
+        index,
         index
     );
 }
@@ -216,100 +143,39 @@ pub fn sync_class_change_allowed(
     }
 }
 
-pub fn resolve_class_equip_transaction(
+pub fn sync_class_equip_state(
     mut equipped: ResMut<crate::classes::store::EquippedClass>,
     mut phase: ResMut<ClassSelectPhase>,
     mut overlay: ResMut<ClassSelectOverlayOpen>,
     mut status: ResMut<ClassSelectStatus>,
-    mut watch: ResMut<EquipTxnWatch>,
-    mut reliable: MessageReader<net::ReliableControlEvent>,
-    context: (
-        Res<SessionClassStore>,
-        Res<crate::ClassLoadoutCatalog>,
-        Res<frame::InstalledMatch>,
-        Option<Res<frame::HostMatchRules>>,
-        Option<Res<assets::prepared::PreparedCapabilities>>,
-    ),
+    presented: Res<PresentedSnapshot>,
+    local: Res<LocalPresentClient>,
+    actions: Res<ClientActionInbox>,
 ) {
-    let Some(request_id) = watch.request_id else {
-        reliable.clear();
+    let ClassSelectPhase::Pending { class_index } = *phase else {
         return;
     };
-
-    let (store, catalog, installed, policy, capabilities) = context;
-    let current_policy = policy
-        .as_ref()
-        .map_or_else(Vec::new, |policy| policy.0.clone());
-    let Some(correlation) = watch.correlation.clone() else {
-        reliable.clear();
-        return;
-    };
-    let unchanged = correlation.load_key == installed.load_key
-        && correlation.catalog_revision == catalog.revision
-        && correlation.policy == current_policy
-        && correlation.families == store.server_families()
-        && correlation.capability_version
-            == capabilities
-                .as_ref()
-                .map(|facts| (facts.version, facts.products))
-        && store
-            .slots
-            .get(correlation.class_id.0 as usize)
-            .is_some_and(|slot| frame::HostClassSlot::from(slot) == correlation.class);
-    if !unchanged {
-        reject_class_equip(
-            &mut phase,
-            &mut status,
-            request_id,
-            "Class or session policy changed while awaiting admission",
-        );
-        watch.request_id = None;
-        watch.correlation = None;
-        reliable.clear();
+    if actions.is_pending() {
         return;
     }
-    for event in reliable.read() {
-        match event.0 {
-            SimEvent::ClassRejected {
-                request_id: rid,
-                reason,
-                class_id,
-                revision,
-            } if rid == request_id
-                && class_id == correlation.class_id
-                && revision == correlation.revision =>
-            {
-                let reason = reason.as_str();
-                if reject_class_equip(&mut phase, &mut status, request_id, reason) {
-                    diag::info!(
-                        Ui,
-                        "class select: reliable Reject request_id={request_id} reason={reason}"
-                    );
-                }
-                watch.request_id = None;
-                watch.correlation = None;
-                return;
-            }
-            SimEvent::ClassAccepted {
-                request_id: rid,
-                class_id,
-                revision,
-            } if rid == request_id
-                && class_id == correlation.class_id
-                && revision == correlation.revision =>
-            {
-                if accept_class_equip(&mut equipped, &mut phase, &mut overlay, request_id) {
-                    diag::info!(
-                        Ui,
-                        "class select: reliable Accept request_id={request_id} (overlay closed)"
-                    );
-                }
-                watch.request_id = None;
-                watch.correlation = None;
-                return;
-            }
-            _ => {}
-        }
+    let Some(meta) = presented
+        .snapshot()
+        .and_then(|snapshot| snapshot.meta.for_client(local.0))
+    else {
+        return;
+    };
+    let class_id = ClassId(class_index as u32);
+    if let Some((refused, reason)) = meta.class_refusal.filter(|(id, _)| *id == class_id) {
+        reject_class_equip(&mut phase, &mut status, reason.as_str());
+        diag::info!(
+            Ui,
+            "class select: state refused id={} reason={}",
+            refused.0,
+            reason.as_str()
+        );
+    } else if meta.equipped_class == Some(class_id) {
+        accept_class_equip(&mut equipped, &mut phase, &mut overlay);
+        diag::info!(Ui, "class select: state equipped id={}", class_id.0);
     }
 }
 
@@ -319,7 +185,6 @@ pub(crate) fn register_equip_systems(app: &mut App) {
         release_equip.in_set(frame::ScopeSet::Release),
     )
     .scoped::<crate::classes::store::EquippedClass>(frame::MatchScope::Live)
-    .scoped::<EquipTxnWatch>(frame::MatchScope::Live)
     .init_resource::<frame::ClassSelectHandoff>()
     .add_systems(
         Update,
@@ -336,7 +201,7 @@ pub(crate) fn register_equip_systems(app: &mut App) {
     )
     .add_systems(
         Update,
-        resolve_class_equip_transaction
+        sync_class_equip_state
             .in_set(frame::InMatch)
             .after(apply_pending_class_equip)
             .in_set(frame::ClassEquipResolved),
@@ -354,7 +219,7 @@ fn sync_server_class_families(
         .and_then(|bridge| bridge.state().families())
         .or_else(|| {
             (*scope.get() == frame::MatchScope::Live)
-                .then(|| families.as_deref().copied())
+                .then(|| families.as_deref().cloned())
                 .flatten()
         });
     if store.server_families() != selected {
@@ -378,7 +243,7 @@ fn publish_class_availability(
     let feature_lock = catalog.progression_lock("cac", &player_data);
     dvars.set(
         "ui_class_feature_lock",
-        feature_lock.clone().unwrap_or_default(),
+        feature_lock.clone().unwrap_or(String::new()),
     );
     for index in 0..sim::match_state::PERSONAL_CLASS_SLOTS {
         let reason = feature_lock
@@ -402,7 +267,7 @@ fn publish_class_availability(
             });
         dvars.set(
             &format!("ui_class_unavailable_{index}"),
-            reason.unwrap_or_default(),
+            reason.unwrap_or(String::new()),
         );
     }
 }

@@ -1,7 +1,7 @@
+use super::StaticGeometryIdentity;
 use super::publication::PublishedRenderFrame;
 use super::residency;
 use super::{CameraWorldPretess, ExactTessBind, NEUTRAL_VERTEX_LIGHTING};
-use crate::colour_world_smodel_static;
 use crate::drawsurf::smodel_cache_gpu::SmodelCacheGpu;
 use bevy::prelude::Resource;
 use bevy::render::render_resource::{Buffer, BufferDescriptor, BufferInitDescriptor, BufferUsages};
@@ -12,24 +12,18 @@ use render_material::MaterialGenerationId;
 #[derive(Resource, Default)]
 pub(super) struct ExactColourGeometry {
     pub(super) generation: MaterialGenerationId,
-    pub(super) world_generation: frame::WorldStamp,
-    pub(super) world_products: frame::WorldProducts,
+    pub(super) static_identity: StaticGeometryIdentity,
     pub(super) world_vertex: Option<Buffer>,
     pub(super) world_layer: Option<Buffer>,
     pub(super) world_effect: Option<Buffer>,
     pub(super) world_index: Option<Buffer>,
     pub(super) world_surface_ranges: Vec<(u32, u32)>,
-    pub(super) world_vertex_count: usize,
-    pub(super) world_layer_count: usize,
-    pub(super) world_index_count: usize,
 
     pub(super) world_cpu_indices: Vec<u32>,
     pub(super) smodel_vertex: Option<Buffer>,
     pub(super) smodel_vertex_lighting: Option<Buffer>,
     pub(super) smodel_index: Option<Buffer>,
     pub(super) smodel_surface_ranges: Vec<(u32, u32)>,
-    pub(super) smodel_vertex_count: usize,
-    pub(super) smodel_index_count: usize,
     pub(super) smodel_cached_vertex: Option<Buffer>,
     pub(super) smodel_cached_index: Option<Buffer>,
     pub(super) smodel_cached_vertex_count: usize,
@@ -120,44 +114,34 @@ pub(super) fn upload_exact_geometry(
     }
     let empty_source = source.world().static_geometry.world_vertices.is_empty()
         && source.world().static_geometry.smodel_vertices.is_empty();
-    if empty_source && geometry.world_products.0.is_some() {
+    if empty_source && geometry.static_identity.world_products.0.is_some() {
         return GeometryUploadResult::default();
     }
-    let static_matches = colour_world_smodel_static(
-        (geometry.world_generation, geometry.world_products),
-        geometry.world_vertex_count,
-        geometry.world_index_count,
-        geometry.world_layer_count,
-        geometry.smodel_vertex_count,
-        geometry.smodel_index_count,
-        (
-            source.world().world_generation,
-            source.world().world_products,
-        ),
-        source.world().static_geometry.world_vertices.len(),
-        source.world().static_geometry.world_indices.len(),
-        source.world().static_geometry.world_layer.len(),
-        source.world().static_geometry.smodel_vertices.len(),
-        source.world().static_geometry.smodel_indices.len(),
-    );
-    geometry.world_generation = source.world().world_generation;
+    let static_matches = geometry
+        .static_identity
+        .matches(source.world().static_geometry_identity());
     if !static_matches {
-        geometry.world_products = source.world().world_products;
+        geometry.static_identity.world_products = source.world().world_products;
         geometry.world_vertex = None;
         geometry.world_layer = None;
         geometry.world_effect = None;
         geometry.world_index = None;
         geometry.world_cpu_indices.clear();
         geometry.world_surface_ranges.clear();
-        geometry.world_vertex_count = source.world().static_geometry.world_vertices.len();
-        geometry.world_layer_count = source.world().static_geometry.world_layer.len();
-        geometry.world_index_count = source.world().static_geometry.world_indices.len();
+        geometry.static_identity.world_vertex_count =
+            source.world().static_geometry.world_vertices.len();
+        geometry.static_identity.world_layer_count =
+            source.world().static_geometry.world_layer.len();
+        geometry.static_identity.world_index_count =
+            source.world().static_geometry.world_indices.len();
         geometry.smodel_vertex = None;
         geometry.smodel_vertex_lighting = None;
         geometry.smodel_index = None;
         geometry.smodel_surface_ranges.clear();
-        geometry.smodel_vertex_count = source.world().static_geometry.smodel_vertices.len();
-        geometry.smodel_index_count = source.world().static_geometry.smodel_indices.len();
+        geometry.static_identity.smodel_vertex_count =
+            source.world().static_geometry.smodel_vertices.len();
+        geometry.static_identity.smodel_index_count =
+            source.world().static_geometry.smodel_indices.len();
         geometry.smodel_cached_vertex = None;
         geometry.smodel_cached_index = None;
         geometry.smodel_cached_vertex_count =
@@ -167,8 +151,7 @@ pub(super) fn upload_exact_geometry(
         {
             diag::info!(
                 World,
-                "exact geometry: upload static buffers for install {:?} — world {} + smodel {} vertices, products {:?}",
-                source.world().world_generation.0,
+                "exact geometry: upload static buffers — world {} + smodel {} vertices, products {:?}",
                 source.world().static_geometry.world_vertices.len(),
                 source.world().static_geometry.smodel_vertices.len(),
                 source.world().world_products.0,
@@ -183,7 +166,10 @@ pub(super) fn upload_exact_geometry(
             // Dynamic impact updates can patch this independently of static vertices.
             geometry.world_effect = Some(device.create_buffer_with_data(&BufferInitDescriptor {
                 label: Some("world_surface_effect_vb"),
-                contents: bytemuck::cast_slice(&vec![0u32; geometry.world_vertex_count]),
+                contents: bytemuck::cast_slice(&vec![
+                    0u32;
+                    geometry.static_identity.world_vertex_count
+                ]),
                 usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
             }));
             geometry.world_index = Some(device.create_buffer_with_data(&BufferInitDescriptor {
@@ -332,15 +318,15 @@ pub(super) fn upload_exact_geometry(
         geometry.fx_revision = source.fx_revision;
         geometry.fx_vertex_count = source.fx_vertices.len();
         geometry.fx_index_count = source.fx_indices.len();
-        if !source.fx_vertices.is_empty() && !source.fx_indices.is_empty() {
-            if let (Some(vb), Some(ib)) = (geometry.fx_vertex.as_ref(), geometry.fx_index.as_ref())
-            {
-                queue.write_buffer(vb, 0, bytemuck::cast_slice(source.fx_vertices.as_slice()));
-                queue.write_buffer(ib, 0, bytemuck::cast_slice(source.fx_indices.as_slice()));
-                geometry
-                    .fx_surface_ranges
-                    .clone_from(&*source.fx_surface_ranges);
-            }
+        if !source.fx_vertices.is_empty()
+            && !source.fx_indices.is_empty()
+            && let (Some(vb), Some(ib)) = (geometry.fx_vertex.as_ref(), geometry.fx_index.as_ref())
+        {
+            queue.write_buffer(vb, 0, bytemuck::cast_slice(source.fx_vertices.as_slice()));
+            queue.write_buffer(ib, 0, bytemuck::cast_slice(source.fx_indices.as_slice()));
+            geometry
+                .fx_surface_ranges
+                .clone_from(&*source.fx_surface_ranges);
         }
     }
     ensure_neutral_vertex_lighting(geometry, device);

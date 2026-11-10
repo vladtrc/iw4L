@@ -15,7 +15,7 @@ pub const G_CLONE_PLAYER_MAX_VELOCITY: f32 = 80.0;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PlayerCorpseSlot {
     pub occupied: bool,
-    pub spawn_sequence: u64,
+
     pub weapon_model: u8,
     pub client_state_team: i32,
     pub ffa_team: Option<u8>,
@@ -50,7 +50,7 @@ impl Default for PlayerCorpseSlot {
     fn default() -> Self {
         Self {
             occupied: false,
-            spawn_sequence: 0,
+
             weapon_model: 0,
             client_state_team: 0,
             ffa_team: None,
@@ -92,7 +92,6 @@ pub struct PlayerCorpsePool {
     pub slots: [PlayerCorpseSlot; MAX_CLIENT_CORPSES as usize],
 
     pub spawn_ring: u8,
-    pub next_spawn_sequence: u64,
 }
 
 impl Default for PlayerCorpsePool {
@@ -100,7 +99,6 @@ impl Default for PlayerCorpsePool {
         Self {
             slots: [PlayerCorpseSlot::default(); MAX_CLIENT_CORPSES as usize],
             spawn_ring: 0,
-            next_spawn_sequence: 0,
         }
     }
 }
@@ -154,11 +152,6 @@ impl PlayerCorpsePool {
 
     pub fn occupy(&mut self, slot: u8, entnum: i32, mut body: PlayerCorpseSlot) -> u8 {
         let i = (slot as usize) % MAX_CLIENT_CORPSES as usize;
-        self.next_spawn_sequence = self
-            .next_spawn_sequence
-            .checked_add(1)
-            .expect("corpse spawn sequence exhausted");
-        body.spawn_sequence = self.next_spawn_sequence;
         body.occupied = true;
         body.entnum = entnum;
         self.slots[i] = body;
@@ -186,8 +179,9 @@ pub(crate) fn occupy_player_clone(
         .client_meta(victim)
         .map_or((0, None), |meta| (meta.client_state_team, meta.ffa_team));
     let weapon_model = weapon_iw4::weapon_model_for_held(&ps.weapons, &ps.weapon_data, ps.weapon);
+    let entnum = world.corpses_mut().alloc_clone_entity();
+    world.entity_kernel_mut().occupy_reserved(entnum);
     let pool = world.corpses_mut();
-    let entnum = pool.alloc_clone_entity();
     let slot = pool.get_free(ps.origin);
     let slot = pool.occupy(
         slot,
@@ -283,12 +277,48 @@ pub(crate) fn phase_run_corpse_move(world: &mut FrameWorld, time_ms: i32) {
         let anim_delta = world.corpse_dobj_tree_delta(slot.entnum, crate::MATCH_TICK_MS as i32);
         let frame = &*world;
         let stepped = step_corpse(slot, anim_delta, time_ms, |start, end, mask| {
-            frame.trace_clip(start, end, PLAYER_MINS, PLAYER_MAXS, mask)
+            let content = frame.content();
+            let map = crate::world_graph::world_at(start);
+            let beyond = content
+                .atlas()
+                .and_then(|atlas| atlas.worlds.get(map).filter(|_| map != 0));
+            match beyond {
+                None => frame.trace_clip(start, end, PLAYER_MINS, PLAYER_MAXS, mask),
+                Some(clip) => trace_atlas_corpse(clip, map, start, end, mask),
+            }
         });
         world.corpses_mut().slots[i] = stepped;
     }
     let live = world.corpses().entnums();
     world.corpse_dobj_tree_retain(&live);
+}
+
+fn trace_atlas_corpse(
+    clip: &crate::world_graph::AtlasWorld,
+    map: usize,
+    start: [f32; 3],
+    end: [f32; 3],
+    mask: u32,
+) -> trace_iw4::Trace {
+    // A corpse keeps moving in the map where the player died, just as
+    // the living player's capsule does. Base-map clip is in another slab.
+    let backend = crate::bg::player_collision::PlayerCollision::world(
+        clip.clip(),
+        map,
+        Default::default(),
+        &[],
+        u16::MAX,
+    );
+    movement_iw4::CollisionBackend::trace(
+        &backend,
+        movement_iw4::GroundTraceInput {
+            start,
+            end,
+            mins: PLAYER_MINS,
+            maxs: PLAYER_MAXS,
+            tracemask: mask,
+        },
+    )
 }
 
 fn step_corpse(

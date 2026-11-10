@@ -6,6 +6,7 @@ license.workspace = true
 description = "Asset lane orchestration, linking and conversion into engine objects."
 
 [dependencies]
+dpvs_iw4.workspace = true
 structured_data_iw4.workspace = true
 render_material.workspace = true
 diag.workspace = true
@@ -20,9 +21,6 @@ asset_transport.workspace = true
 asset_world.workspace = true
 weapon_iw4.workspace = true
 fastfile_iw4.workspace = true
-fastfile_t5.workspace = true
-fastfile_t6.workspace = true
-fastfile_iw5.workspace = true
 asset_iw4.workspace = true
 clipmap_iw4.workspace = true
 # Light-grid CPU sample chain for authored smodel `$model_lighting` tiles.
@@ -32,6 +30,7 @@ frame.workspace = true
 serde_json.workspace = true
 async-lock.workspace = true
 png.workspace = true
+mwmatching = "=0.1.1"
 
 # `load_pool` puts its workers back on the process's CPUs (`session_load`).
 [target.'cfg(target_os = "linux")'.dependencies]

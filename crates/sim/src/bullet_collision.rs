@@ -1,5 +1,6 @@
 use crate::identities::{LifeSequence, ScriptModelId};
 use crate::world::{ClientId, SimBrush, SimClipBsp, SimClipCmodels, SimClipMesh, Tick};
+use crate::world_graph::AtlasClip;
 use trace_iw4::{Trace, surface_type_from_flags};
 use weapon_iw4::{
     ADVANCE_TRACE_FWD, ADVANCE_TRACE_REV, BulletPenFacts, CONTENTS_GLASS, MAX_EXTENDED_STEPS,
@@ -122,6 +123,9 @@ impl AuthorityModelOwner {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ColliderId {
+    EntityBody {
+        owner: AuthorityModelOwner,
+    },
     World {
         surface_flags: u32,
         contents: u32,
@@ -192,7 +196,7 @@ pub struct AuthorityDObjState {
 
     pub apos: Option<entity_iw4::Trajectory>,
 
-    pub(crate) t5_destructible: Option<crate::t5_destructible::State>,
+    pub extensions: crate::extensions::OwnedExtensions,
     /// Capabilities for the models this script model can swap to: husks and
     /// the intermediate stages of a destructible.
     pub swap_capabilities: Vec<(
@@ -201,7 +205,7 @@ pub struct AuthorityDObjState {
     )>,
 }
 
-fn iw_angles_to_mat4(origin: glam::Vec3, angles: [f32; 3]) -> glam::Mat4 {
+pub(crate) fn iw_angles_to_mat4(origin: glam::Vec3, angles: [f32; 3]) -> glam::Mat4 {
     let [pitch, yaw, roll] = angles.map(f32::to_radians);
     let rotation = glam::Quat::from_euler(glam::EulerRot::ZYX, yaw, pitch, roll);
     glam::Mat4::from_rotation_translation(rotation, origin)
@@ -332,7 +336,7 @@ impl AuthorityDObjState {
             materialize_error: None,
             play_anim: None,
             apos: None,
-            t5_destructible: None,
+            extensions: Default::default(),
             swap_capabilities: Vec::new(),
         }
     }
@@ -505,6 +509,40 @@ impl AuthorityDObjState {
             self.materialized_pose_revision = None;
         }
         true
+    }
+
+    pub(crate) fn set_script_animation_tree(&mut self, tree: &xmodel_runtime::XAnimTreeRuntime) {
+        let mut snapshot = xmodel_runtime::XAnimTreeSnapshot::active(tree, 1, 0);
+        if self.play_anim.is_none()
+            && self
+                .semantic_state
+                .tree
+                .as_ref()
+                .is_some_and(|old| old.nodes == snapshot.nodes)
+        {
+            return;
+        }
+        self.play_anim = None;
+        self.pose_revision = self.pose_revision.wrapping_add(1);
+        snapshot.state_revision = self.pose_revision;
+        self.semantic_state.tree = Some(snapshot);
+        self.semantic_state.pose_revision = self.pose_revision;
+        self.pose_request.tree = Some(tree.clone());
+        self.current_collision = None;
+        self.materialized_pose_revision = None;
+    }
+
+    pub(crate) fn clear_script_animation_tree(&mut self) {
+        if self.semantic_state.tree.is_none() {
+            return;
+        }
+        self.play_anim = None;
+        self.pose_revision = self.pose_revision.wrapping_add(1);
+        self.semantic_state.tree = None;
+        self.semantic_state.pose_revision = self.pose_revision;
+        self.pose_request.tree = None;
+        self.current_collision = None;
+        self.materialized_pose_revision = None;
     }
 
     pub fn clear_script_model_play_anim(&mut self) {
@@ -758,6 +796,7 @@ impl EntityCollisionEpoch {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct EntityCollisionTraceGeom {
+    pub(crate) body: Option<crate::entity_body::EntityBodyPose>,
     pub owner: AuthorityModelOwner,
     pub epoch: EntityCollisionEpoch,
     pub collision: Option<AuthorityDObjCollision>,
@@ -770,6 +809,7 @@ pub struct EntityCollisionTraceGeom {
 
 #[derive(Clone, Debug)]
 pub struct EntityCollisionCapabilities {
+    pub(crate) body: Option<crate::entity_body::EntityBodyPose>,
     pub owner: AuthorityModelOwner,
     epoch: EntityCollisionEpoch,
     pub dobj: Option<AuthorityDObjState>,
@@ -786,6 +826,7 @@ impl EntityCollisionCapabilities {
         linked_brushes: Vec<LinkedBrushCollisionBrush>,
     ) -> Self {
         Self {
+            body: None,
             owner,
             epoch: EntityCollisionEpoch::CurrentTick,
             dobj,
@@ -822,6 +863,12 @@ impl EntityCollisionCapabilities {
             .dobj
             .as_ref()
             .and_then(|state| state.current_collision.as_ref());
+        if let Some(body) = self.body {
+            let (mins, maxs) = body.bounds.abs_bounds(body.origin);
+            if !matches!(ray_aabb_box(start, end, mins, maxs), RayAabb::Miss) {
+                return true;
+            }
+        }
         entity_abs_aabb(&self.linked_brushes, collision, cmodels).is_some_and(|(mins, maxs)| {
             !matches!(ray_aabb_box(start, end, mins, maxs), RayAabb::Miss)
         })
@@ -830,6 +877,7 @@ impl EntityCollisionCapabilities {
     pub fn trace_geom(&self) -> EntityCollisionTraceGeom {
         if !self.solid {
             return EntityCollisionTraceGeom {
+                body: None,
                 owner: self.owner,
                 epoch: self.epoch,
                 collision: None,
@@ -839,17 +887,20 @@ impl EntityCollisionCapabilities {
             };
         }
         EntityCollisionTraceGeom {
+            body: self.body,
             owner: self.owner,
             epoch: self.epoch,
             collision: self
                 .dobj
                 .as_ref()
                 .and_then(|state| state.current_collision.clone()),
-            dobj_contents: self.dobj.as_ref().and_then(|state| {
-                state
-                    .capability
-                    .as_ref()
-                    .and_then(|capability| capability.contents)
+            dobj_contents: self.body.map(|body| body.bounds.contents).or_else(|| {
+                self.dobj.as_ref().and_then(|state| {
+                    state
+                        .capability
+                        .as_ref()
+                        .and_then(|capability| capability.contents)
+                })
             }),
             model_key: self.dobj.as_ref().map(|state| state.current_model.clone()),
             linked_brushes: self.linked_brushes.clone(),
@@ -902,6 +953,8 @@ pub enum BulletPath {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BulletTraceSegment {
+    /// Actual flight distance, excluding translations between atlas slabs.
+    pub travel_distance: Option<f32>,
     pub start: [f32; 3],
     pub end: [f32; 3],
     /// Impact surface normal; exit effects carry the forward bullet direction.
@@ -994,15 +1047,6 @@ pub enum HistoryClampReason {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HistoryRefusalReason {
-    MissingFrame,
-
-    SampleAfterShot,
-
-    SampleMalformed,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HistorySampleVerdict {
     CurrentAuthority {
         tick: Tick,
@@ -1022,7 +1066,7 @@ pub enum HistorySampleVerdict {
     },
     Refused {
         requested: Tick,
-        reason: HistoryRefusalReason,
+        reason: &'static str,
     },
 }
 
@@ -1172,10 +1216,12 @@ pub fn bullet_trace(
     glass_is_solid: &dyn Fn(u16) -> bool,
 ) -> TraceOutcome {
     bullet_trace_with_entity_models(
-        brushes,
-        &SimClipBsp::default(),
-        &SimClipCmodels::default(),
-        &SimClipMesh::default(),
+        crate::world_graph::AtlasClip {
+            brushes,
+            bsp: &SimClipBsp::default(),
+            cmodels: &SimClipCmodels::default(),
+            mesh: &SimClipMesh::default(),
+        },
         players,
         &[],
         query,
@@ -1184,25 +1230,13 @@ pub fn bullet_trace(
 }
 
 pub fn bullet_trace_with_entity_models(
-    brushes: &[SimBrush],
-    bsp: &SimClipBsp,
-    cmodels: &SimClipCmodels,
-    mesh: &SimClipMesh,
+    clip: AtlasClip<'_>,
     players: &[PlayerCollisionPose],
     script_models: &[EntityCollisionTraceGeom],
     query: &BulletTraceQuery,
     glass_is_solid: &dyn Fn(u16) -> bool,
 ) -> TraceOutcome {
-    bullet_trace_filtered(
-        brushes,
-        bsp,
-        cmodels,
-        mesh,
-        players,
-        script_models,
-        query,
-        glass_is_solid,
-    )
+    bullet_trace_filtered(clip, players, script_models, query, glass_is_solid, false)
 }
 
 enum DObjGeometryVerdict {
@@ -1277,15 +1311,19 @@ fn trace_dobj_coll_tris(
 }
 
 fn bullet_trace_filtered(
-    brushes: &[SimBrush],
-    bsp: &SimClipBsp,
-    cmodels: &SimClipCmodels,
-    mesh: &SimClipMesh,
+    clip: AtlasClip<'_>,
     players: &[PlayerCollisionPose],
     script_models: &[EntityCollisionTraceGeom],
     query: &BulletTraceQuery,
     glass_is_solid: &dyn Fn(u16) -> bool,
+    rifle_bullet: bool,
 ) -> TraceOutcome {
+    let AtlasClip {
+        brushes,
+        bsp,
+        cmodels,
+        mesh,
+    } = clip;
     if !is_finite_vec3(query.start) || !is_finite_vec3(query.end) {
         return TraceOutcome::Invalid {
             reason: TraceInvalidReason::NonFiniteInput,
@@ -1337,15 +1375,18 @@ fn bullet_trace_filtered(
             continue;
         }
         if !pose.bones.is_empty() {
-            if let Some((mins, maxs)) = pose_bones_aabb(pose) {
-                if matches!(
+            if let Some((mins, maxs)) = pose_bones_aabb(pose)
+                && matches!(
                     ray_aabb_box(query.start, entity_end, mins, maxs),
                     RayAabb::Miss
-                ) {
-                    continue;
-                }
+                )
+            {
+                continue;
             }
             for bone in &pose.bones {
+                if hit_location_priority(bone.part_classification, rifle_bullet) < 2 {
+                    continue;
+                }
                 let collider = ColliderId::Player {
                     client: pose.client,
                     life: pose.life_sequence,
@@ -1386,6 +1427,12 @@ fn bullet_trace_filtered(
     }
 
     for geom in script_models {
+        if geom
+            .body
+            .is_some_and(|body| body.bounds.contents & query.mask == 0)
+        {
+            continue;
+        }
         if query.ignore_model.is_some() && geom.owner.script_model() == query.ignore_model {
             continue;
         }
@@ -1399,6 +1446,34 @@ fn bullet_trace_filtered(
         } else {
             continue;
         }
+        if let Some(body) = geom.body
+            && body.bounds.contents & query.mask != 0
+            && geom.collision.is_none()
+        {
+            let collider = ColliderId::EntityBody { owner: geom.owner };
+            let hit = body.trace(movement_iw4::GroundTraceInput {
+                start: query.start,
+                end: query.end,
+                mins: [0.; 3],
+                maxs: [0.; 3],
+                tracemask: query.mask,
+            });
+            if hit.startsolid != 0 {
+                return TraceOutcome::StartSolid {
+                    collider: Some(collider),
+                    end: query.start,
+                };
+            }
+            if hit.fraction < 1. {
+                candidates.push(TraceCandidate {
+                    fraction: hit.fraction,
+                    endpos: hit.endpos,
+                    normal: hit.normal,
+                    collider,
+                    startsolid: false,
+                });
+            }
+        }
         for brush in &geom.linked_brushes {
             let Some(cmodel) =
                 clipmap_iw4::clip_handle_to_model(&cmodels.models, brush.cmodel_handle)
@@ -1409,13 +1484,15 @@ fn bullet_trace_filtered(
                 cmodel,
                 &bsp.leafbrushes,
                 brushes,
-                query.start,
-                query.end,
-                [0.0; 3],
-                [0.0; 3],
+                &clipmap_iw4::TraceExtents {
+                    start: query.start,
+                    end: query.end,
+                    mins: [0.0; 3],
+                    maxs: [0.0; 3],
+                    mask: query.mask,
+                },
                 brush.origin,
                 brush.angles,
-                query.mask,
             );
             let collider = ColliderId::EntityLinkedBrush {
                 owner: geom.owner,
@@ -1472,6 +1549,7 @@ fn bullet_trace_filtered(
         }
     }
 
+    select_player_parts(&mut candidates, rifle_bullet);
     select_first_hit(query, &mut candidates)
 }
 
@@ -1484,10 +1562,12 @@ pub fn bullet_trace_segments(
     glass_is_solid: &dyn Fn(u16) -> bool,
 ) -> (Vec<BulletTraceSegment>, Option<ColliderId>) {
     bullet_trace_segments_with_entity_models(
-        brushes,
-        &SimClipBsp::default(),
-        &SimClipCmodels::default(),
-        &SimClipMesh::default(),
+        crate::world_graph::AtlasClip {
+            brushes,
+            bsp: &SimClipBsp::default(),
+            cmodels: &SimClipCmodels::default(),
+            mesh: &SimClipMesh::default(),
+        },
         players,
         &[],
         query,
@@ -1498,10 +1578,7 @@ pub fn bullet_trace_segments(
 }
 
 pub fn bullet_trace_segments_with_entity_models(
-    brushes: &[SimBrush],
-    bsp: &SimClipBsp,
-    cmodels: &SimClipCmodels,
-    mesh: &SimClipMesh,
+    clip: AtlasClip<'_>,
     players: &[PlayerCollisionPose],
     script_models: &[EntityCollisionTraceGeom],
     query: &BulletTraceQuery,
@@ -1510,56 +1587,152 @@ pub fn bullet_trace_segments_with_entity_models(
     glass_is_solid: &dyn Fn(u16) -> bool,
 ) -> (Vec<BulletTraceSegment>, Option<ColliderId>) {
     bullet_trace_segments_filtered(
-        brushes,
-        bsp,
-        cmodels,
-        mesh,
+        clip,
         players,
         script_models,
         query,
         pen,
         table,
-        glass_is_solid,
-        None,
+        crate::bullet_collision::GlassTrace {
+            is_solid: glass_is_solid,
+            on_hit: None,
+        },
     )
 }
 
 pub(crate) fn bullet_trace_segments_filtered(
-    brushes: &[SimBrush],
-    bsp: &SimClipBsp,
-    cmodels: &SimClipCmodels,
-    mesh: &SimClipMesh,
+    clip: AtlasClip<'_>,
     players: &[PlayerCollisionPose],
     script_models: &[EntityCollisionTraceGeom],
     query: &BulletTraceQuery,
     pen: BulletPenFacts,
     table: &PenetrationDepthTable,
-    glass_is_solid: &dyn Fn(u16) -> bool,
-    on_glass_hit: Option<&dyn Fn(u16, [f32; 3])>,
+    glass: GlassTrace<'_>,
+) -> (Vec<BulletTraceSegment>, Option<ColliderId>) {
+    let trace = |q: &BulletTraceQuery| {
+        bullet_trace_filtered(
+            clip,
+            players,
+            script_models,
+            q,
+            glass.is_solid,
+            pen.rifle_bullet,
+        )
+    };
+    bullet_segments_with_trace(query, pen, table, glass, &trace)
+}
+
+pub(crate) struct SharedBulletTrace<'a> {
+    pub atlas: &'a crate::world_graph::Atlas,
+    pub base: AtlasClip<'a>,
+    pub players: &'a [PlayerCollisionPose],
+    pub models: &'a [EntityCollisionTraceGeom],
+    pub shooter_world: usize,
+    pub rifle: bool,
+}
+
+impl SharedBulletTrace<'_> {
+    pub fn trace(&self, query: &BulletTraceQuery, glass: &dyn Fn(u16) -> bool) -> TraceOutcome {
+        let asset_core::world_frame::SceneSpace::Shared(frames) = &self.atlas.space else {
+            panic!("shared trace requires placements")
+        };
+        let shooter = frames[self.shooter_world];
+        let offset = crate::world_graph::world_offset(self.shooter_world);
+        let to_scene =
+            |p: [f32; 3]| shooter.point_to_scene(std::array::from_fn(|i| p[i] - offset[i]));
+        let start = to_scene(query.start);
+        let end = to_scene(query.end);
+        let mut best = TraceOutcome::Miss { end: query.end };
+        let mut nearest = 1.0;
+        for (world, &frame) in frames.iter().enumerate() {
+            let clip = if world == 0 {
+                self.base
+            } else {
+                self.atlas.worlds[world].clip()
+            };
+            let players: Vec<_> = self
+                .players
+                .iter()
+                .filter(|p| crate::world_graph::world_at(p.origin) == world)
+                .map(|p| crate::world_graph::shifted(p, crate::world_graph::world_offset(world)))
+                .collect();
+            let q = BulletTraceQuery {
+                start: frame.point_to_local(start),
+                end: frame.point_to_local(end),
+                ..*query
+            };
+            let outcome = bullet_trace_filtered(
+                clip,
+                &players,
+                if world == 0 { self.models } else { &[] },
+                &q,
+                &|piece| world != 0 || glass(piece),
+                self.rifle,
+            );
+            let point = |p| {
+                let p = shooter.point_to_local(frame.point_to_scene(p));
+                std::array::from_fn(|i| p[i] + offset[i])
+            };
+            // Glass damage storage currently belongs to the root map. Other
+            // maps' panes remain solid until their damage gets world identity.
+            let map_collider = |c| match c {
+                ColliderId::World {
+                    surface_flags,
+                    contents,
+                    ..
+                } if world != 0 => ColliderId::World {
+                    surface_flags,
+                    contents,
+                    glass_encoded: 0,
+                },
+                other => other,
+            };
+            match outcome {
+                TraceOutcome::Hit {
+                    fraction,
+                    end,
+                    normal,
+                    collider,
+                } if fraction < nearest => {
+                    nearest = fraction;
+                    best = TraceOutcome::Hit {
+                        fraction,
+                        end: point(end),
+                        normal: shooter.vector_to_local(frame.vector_to_scene(normal)),
+                        collider: map_collider(collider),
+                    };
+                }
+                TraceOutcome::StartSolid { collider, end } => {
+                    return TraceOutcome::StartSolid {
+                        collider: collider.map(map_collider),
+                        end: point(end),
+                    };
+                }
+                invalid @ TraceOutcome::Invalid { .. } => return invalid,
+                _ => {}
+            }
+        }
+        best
+    }
+}
+
+pub(crate) fn bullet_segments_with_trace(
+    query: &BulletTraceQuery,
+    pen: BulletPenFacts,
+    table: &PenetrationDepthTable,
+    glass: GlassTrace<'_>,
+    trace: &dyn Fn(&BulletTraceQuery) -> TraceOutcome,
 ) -> (Vec<BulletTraceSegment>, Option<ColliderId>) {
     if !is_finite_vec3(query.start) || !is_finite_vec3(query.end) {
         return (Vec::new(), None);
     }
-    let dir = [
-        query.end[0] - query.start[0],
-        query.end[1] - query.start[1],
-        query.end[2] - query.start[2],
-    ];
-    let max_len = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
+    let dir = std::array::from_fn::<_, 3, _>(|i| query.end[i] - query.start[i]);
+    let max_len = dir.iter().map(|v| v * v).sum::<f32>().sqrt();
     if max_len <= 0.0 {
         return (Vec::new(), None);
     }
-    let ray_dir = [dir[0] / max_len, dir[1] / max_len, dir[2] / max_len];
-    let world = TraceWorld {
-        brushes,
-        bsp,
-        mesh,
-        cmodels,
-        players,
-        script_models,
-        glass_is_solid,
-        on_glass_hit,
-    };
+    let ray_dir = dir.map(|v| v / max_len);
+    let world = TraceWorld { trace, glass };
     if pen.pen_gate(true) {
         fire_penetrate(&world, query, ray_dir, pen, table)
     } else {
@@ -1567,16 +1740,15 @@ pub(crate) fn bullet_trace_segments_filtered(
     }
 }
 
-struct TraceWorld<'a> {
-    brushes: &'a [SimBrush],
-    bsp: &'a SimClipBsp,
-    mesh: &'a SimClipMesh,
-    cmodels: &'a SimClipCmodels,
-    players: &'a [PlayerCollisionPose],
-    script_models: &'a [EntityCollisionTraceGeom],
+#[derive(Clone, Copy)]
+pub(crate) struct GlassTrace<'a> {
+    pub is_solid: &'a dyn Fn(u16) -> bool,
+    pub on_hit: Option<&'a dyn Fn(u16, [f32; 3])>,
+}
 
-    glass_is_solid: &'a dyn Fn(u16) -> bool,
-    on_glass_hit: Option<&'a dyn Fn(u16, [f32; 3])>,
+struct TraceWorld<'a> {
+    trace: &'a dyn Fn(&BulletTraceQuery) -> TraceOutcome,
+    glass: GlassTrace<'a>,
 }
 
 struct HitGeom {
@@ -1603,28 +1775,32 @@ fn fire_extended(
             Decode::StopMiss { end } => {
                 segments.push(make_segment(
                     seg_start,
-                    end,
-                    [0.0; 3],
-                    None,
+                    SegmentContact {
+                        end,
+                        normal: [0.0; 3],
+                        collider: None,
+                        startsolid: false,
+                    },
                     false,
                     0.0,
                     multiplier,
                     BulletPath::Extended,
-                    false,
                 ));
                 break;
             }
             Decode::StopSolid { end, collider } => {
                 segments.push(make_segment(
                     seg_start,
-                    end,
-                    [0.0; 3],
-                    collider,
+                    SegmentContact {
+                        end,
+                        normal: [0.0; 3],
+                        collider,
+                        startsolid: true,
+                    },
                     false,
                     0.0,
                     multiplier,
                     BulletPath::Extended,
-                    true,
                 ));
                 if collider.is_some() {
                     terminal = collider;
@@ -1709,14 +1885,16 @@ fn fire_penetrate(
             Decode::StopMiss { end } => {
                 segments.push(make_segment(
                     seg_start,
-                    end,
-                    [0.0; 3],
-                    None,
+                    SegmentContact {
+                        end,
+                        normal: [0.0; 3],
+                        collider: None,
+                        startsolid: false,
+                    },
                     false,
                     0.0,
                     multiplier,
                     BulletPath::Penetrate,
-                    false,
                 ));
                 return (segments, None);
             }
@@ -1724,14 +1902,16 @@ fn fire_penetrate(
                 let Some(collider) = collider else {
                     segments.push(make_segment(
                         seg_start,
-                        query.start,
-                        [0.0; 3],
-                        None,
+                        SegmentContact {
+                            end: query.start,
+                            normal: [0.0; 3],
+                            collider: None,
+                            startsolid: true,
+                        },
                         false,
                         0.0,
                         multiplier,
                         BulletPath::Penetrate,
-                        true,
                     ));
                     return (segments, None);
                 };
@@ -1788,27 +1968,33 @@ fn fire_penetrate(
         start = next_start;
         seg_start = last_hit.end;
         let entry_pos = last_hit.end;
-        let fwd = decode_hit(trace_from(world, query, start, ignore_hit));
+        let forward_query = BulletTraceQuery {
+            ignore_model: script_model_id(last_hit.collider).or(query.ignore_model),
+            ..*query
+        };
+        let fwd = decode_hit(trace_from(world, &forward_query, start, ignore_hit));
         let (trace_hit, fwd_hit) = match fwd {
             Decode::Hit(hit) => (true, Some(hit)),
             Decode::StopMiss { end } => {
                 segments.push(make_segment(
                     seg_start,
-                    end,
-                    [0.0; 3],
-                    None,
+                    SegmentContact {
+                        end,
+                        normal: [0.0; 3],
+                        collider: None,
+                        startsolid: false,
+                    },
                     false,
                     0.0,
                     multiplier,
                     BulletPath::Penetrate,
-                    false,
                 ));
                 break;
             }
             Decode::StopSolid { collider, .. } => {
                 let Some(exit) = walk_out_of_solid(
                     world,
-                    query,
+                    &forward_query,
                     start,
                     dir,
                     ignore_hit,
@@ -1850,16 +2036,16 @@ fn fire_penetrate(
 
         let mut rev_start = fwd_hit.as_ref().map(|h| h.end).unwrap_or(query.end);
         let rev_end = vec3_mad(entry_pos, REV_END_EPS, rev_dir);
-        if let Some(hit) = &fwd_hit {
-            if let Some(nudged) = advance_trace(
+        if let Some(hit) = &fwd_hit
+            && let Some(nudged) = advance_trace(
                 hit.end,
                 scale3(hit.normal, -1.0),
                 rev_dir,
                 is_world(hit.collider),
                 ADVANCE_TRACE_REV,
-            ) {
-                rev_start = nudged;
-            }
+            )
+        {
+            rev_start = nudged;
         }
 
         let rev_ignore = fwd_hit.as_ref().and_then(|h| player_id(h.collider));
@@ -1869,18 +2055,12 @@ fn fire_penetrate(
             mask: query.mask,
             ignore: query.ignore,
             ignore_hit: rev_ignore,
-            ignore_model: query.ignore_model,
+            ignore_model: fwd_hit
+                .as_ref()
+                .and_then(|hit| script_model_id(hit.collider))
+                .or(query.ignore_model),
         };
-        let rev = bullet_trace_filtered(
-            world.brushes,
-            world.bsp,
-            world.cmodels,
-            world.mesh,
-            world.players,
-            world.script_models,
-            &rev_q,
-            world.glass_is_solid,
-        );
+        let rev = (world.trace)(&rev_q);
         let (rev_hit_pos, rev_surf, rev_hit) = match rev {
             TraceOutcome::Hit { end, collider, .. } => (Some(end), depth_surf(collider, 0), true),
             TraceOutcome::StartSolid { end, collider, .. } => {
@@ -1922,14 +2102,16 @@ fn fire_penetrate(
         if let Some(pos) = rev_hit_pos {
             let mut exit_seg = make_segment(
                 entry_pos,
-                pos,
-                dir,
-                Some(last_hit.collider),
+                SegmentContact {
+                    end: pos,
+                    normal: dir,
+                    collider: Some(last_hit.collider),
+                    startsolid: false,
+                },
                 true,
                 thickness,
                 multiplier,
                 BulletPath::Penetrate,
-                false,
             );
             exit_seg.surface_flags |= fx_iw4::FX_IMPACT_EXIT_SURFACE_FLAG;
             segments.push(exit_seg);
@@ -1991,40 +2173,40 @@ fn trace_from(
     start: [f32; 3],
     ignore_hit: Option<ClientId>,
 ) -> TraceOutcome {
-    bullet_trace_filtered(
-        world.brushes,
-        world.bsp,
-        world.cmodels,
-        world.mesh,
-        world.players,
-        world.script_models,
-        &BulletTraceQuery {
-            start,
-            end: query.end,
-            mask: query.mask,
-            ignore: query.ignore,
-            ignore_hit,
-            ignore_model: query.ignore_model,
-        },
-        world.glass_is_solid,
-    )
+    (world.trace)(&BulletTraceQuery {
+        start,
+        ignore_hit,
+        ..*query
+    })
 }
 
-fn make_segment(
+#[derive(Clone, Copy)]
+pub(crate) struct SegmentContact {
+    pub end: [f32; 3],
+    pub normal: [f32; 3],
+    pub collider: Option<ColliderId>,
+    pub startsolid: bool,
+}
+
+pub(crate) fn make_segment(
     start: [f32; 3],
-    end: [f32; 3],
-    normal: [f32; 3],
-    collider: Option<ColliderId>,
+    contact: SegmentContact,
     penetrated: bool,
     thickness: f32,
     damage_mult: f32,
     path: BulletPath,
-    startsolid: bool,
 ) -> BulletTraceSegment {
+    let SegmentContact {
+        end,
+        normal,
+        collider,
+        startsolid,
+    } = contact;
     let (hit_type, hit_id) = collider
         .map(|c| collider_hit_kind(c, startsolid))
         .unwrap_or((0, 0));
     BulletTraceSegment {
+        travel_distance: None,
         start,
         end,
         normal,
@@ -2053,14 +2235,16 @@ fn make_segment_from_hit(
 ) -> BulletTraceSegment {
     make_segment(
         start,
-        hit.end,
-        hit.normal,
-        Some(hit.collider),
+        SegmentContact {
+            end: hit.end,
+            normal: hit.normal,
+            collider: Some(hit.collider),
+            startsolid,
+        },
         penetrated,
         thickness,
         damage_mult,
         path,
-        startsolid,
     )
 }
 
@@ -2071,7 +2255,7 @@ fn surf_type_for(collider: ColliderId) -> u8 {
             hitloc: crate::shield::HITLOC,
             ..
         } => crate::shield::SURFACE,
-        ColliderId::Player { .. } => SURF_TYPE_FLESH as u8,
+        ColliderId::Player { .. } | ColliderId::EntityBody { .. } => SURF_TYPE_FLESH as u8,
         ColliderId::EntityDObjBone { surface_flags, .. }
         | ColliderId::EntityLinkedBrush { surface_flags, .. } => {
             surface_type_from_flags(surface_flags)
@@ -2094,7 +2278,7 @@ fn collider_surface_flags(collider: ColliderId) -> u32 {
             hitloc: crate::shield::HITLOC,
             ..
         } => (u32::from(crate::shield::SURFACE) << 20) | weapon_iw4::SURF_NOPENETRATE,
-        ColliderId::Player { .. } => SURF_TYPE_FLESH << 20,
+        ColliderId::Player { .. } | ColliderId::EntityBody { .. } => SURF_TYPE_FLESH << 20,
         ColliderId::EntityDObjBone { surface_flags, .. }
         | ColliderId::EntityLinkedBrush { surface_flags, .. } => surface_flags,
     }
@@ -2120,17 +2304,17 @@ fn pane_id(collider: ColliderId) -> Option<u16> {
 }
 
 fn is_open_pane(world: &TraceWorld<'_>, collider: ColliderId) -> bool {
-    pane_id(collider).is_some_and(|piece| !(world.glass_is_solid)(piece))
+    pane_id(collider).is_some_and(|piece| !(world.glass.is_solid)(piece))
 }
 
 fn note_glass_hit(world: &TraceWorld<'_>, collider: ColliderId, end: [f32; 3]) {
     let Some(piece) = pane_id(collider) else {
         return;
     };
-    if !(world.glass_is_solid)(piece) {
+    if !(world.glass.is_solid)(piece) {
         return;
     }
-    if let Some(cb) = world.on_glass_hit {
+    if let Some(cb) = world.glass.on_hit {
         cb(piece, end);
     }
 }
@@ -2143,7 +2327,8 @@ fn collider_hit_kind(collider: ColliderId, startsolid: bool) -> (i32, u16) {
         ColliderId::World { .. } => (trace_iw4::HITTYPE_ENTITY, trace_iw4::ENTITYNUM_WORLD),
         ColliderId::Player { .. }
         | ColliderId::EntityDObjBone { .. }
-        | ColliderId::EntityLinkedBrush { .. } => (trace_iw4::HITTYPE_ENTITY, 0),
+        | ColliderId::EntityLinkedBrush { .. }
+        | ColliderId::EntityBody { .. } => (trace_iw4::HITTYPE_ENTITY, 0),
     }
 }
 
@@ -2171,7 +2356,17 @@ fn is_damage_collider(collider: ColliderId) -> bool {
         ColliderId::Player { .. }
             | ColliderId::EntityDObjBone { .. }
             | ColliderId::EntityLinkedBrush { .. }
+            | ColliderId::EntityBody { .. }
     )
+}
+
+fn script_model_id(collider: ColliderId) -> Option<ScriptModelId> {
+    match collider {
+        ColliderId::EntityBody { owner }
+        | ColliderId::EntityDObjBone { owner, .. }
+        | ColliderId::EntityLinkedBrush { owner, .. } => owner.script_model(),
+        _ => None,
+    }
 }
 
 fn player_id(collider: ColliderId) -> Option<ClientId> {
@@ -2242,6 +2437,52 @@ fn flush_with_world(query: &BulletTraceQuery, a: &TraceCandidate, b: &TraceCandi
     (a.fraction * len - b.fraction * len).abs() <= SURFACE_CLIP_EPSILON
 }
 
+fn hit_location_priority(part: u8, rifle_bullet: bool) -> u8 {
+    const BULLET: [u8; 20] = [1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 0, 101];
+    const RIFLE: [u8; 20] = [1, 9, 9, 9, 8, 7, 6, 6, 6, 6, 5, 5, 4, 4, 4, 4, 3, 3, 0, 101];
+    (if rifle_bullet { &RIFLE } else { &BULLET })
+        .get(usize::from(part))
+        .copied()
+        .unwrap_or(0)
+}
+
+fn select_player_parts(candidates: &mut Vec<TraceCandidate>, rifle_bullet: bool) {
+    // Priority is local to a character; solid world/entity geometry and shields
+    // still bound the ray. A head behind a wall cannot supersede that wall.
+    let solid_fraction = candidates
+        .iter()
+        .filter(|hit| !matches!(hit.collider, ColliderId::Player { .. }) || is_shield(hit.collider))
+        .map(|hit| hit.fraction)
+        .fold(1.0f32, f32::min);
+    let mut best = std::collections::BTreeMap::<ClientId, (usize, u8)>::new();
+    for (index, hit) in candidates.iter().enumerate() {
+        let ColliderId::Player { client, hitloc, .. } = hit.collider else {
+            continue;
+        };
+        if is_shield(hit.collider) || hit.fraction > solid_fraction {
+            continue;
+        }
+        let priority = hit_location_priority(hitloc, rifle_bullet);
+        let replace = best.get(&client).is_none_or(|&(old, rank)| {
+            priority > rank || (priority == rank && hit.fraction < candidates[old].fraction)
+        });
+        if replace {
+            best.insert(client, (index, priority));
+        }
+    }
+    let mut index = 0;
+    candidates.retain(|hit| {
+        let keep = match hit.collider {
+            ColliderId::Player { client, .. } if !is_shield(hit.collider) => best
+                .get(&client)
+                .is_some_and(|&(winner, _)| winner == index),
+            _ => true,
+        };
+        index += 1;
+        keep
+    });
+}
+
 fn select_first_hit(query: &BulletTraceQuery, candidates: &mut [TraceCandidate]) -> TraceOutcome {
     if candidates.is_empty() {
         return TraceOutcome::Miss { end: query.end };
@@ -2285,7 +2526,9 @@ fn hit_order_key(hit: &TraceCandidate) -> (u8, u32, u8) {
         ColliderId::EntityDObjBone { owner, bone, .. } => {
             (1, owner_order_key(owner).wrapping_add(u32::from(bone)), 0)
         }
-        ColliderId::EntityLinkedBrush { owner, .. } => (2, owner_order_key(owner), 0),
+        ColliderId::EntityLinkedBrush { owner, .. } | ColliderId::EntityBody { owner } => {
+            (2, owner_order_key(owner), 0)
+        }
         ColliderId::World { .. } => (3, 0, 0),
     }
 }
@@ -2318,11 +2561,13 @@ fn trace_world(
         brushes,
         bsp,
         mesh,
-        start,
-        end,
-        [0.0; 3],
-        [0.0; 3],
-        mask,
+        &clipmap_iw4::TraceExtents {
+            start,
+            end,
+            mins: [0.0; 3],
+            maxs: [0.0; 3],
+            mask,
+        },
         glass_is_solid,
     );
     if hit.fraction != 0.0 && !mesh.static_models.is_empty() {
@@ -2344,8 +2589,7 @@ fn trace_world(
                     &mut hit,
                 );
             } else {
-                let mut ignored_stats = clipmap_iw4::StaticModelWalkStats::default();
-                clipmap_iw4::point_trace_static_models_stats_keyed(
+                clipmap_iw4::point_trace_static_models_keyed(
                     scratch.candidates.iter().filter_map(|&i| {
                         mesh.static_models
                             .get(i as usize)
@@ -2355,7 +2599,6 @@ fn trace_world(
                     end,
                     mask,
                     &mut hit,
-                    &mut ignored_stats,
                 );
             }
         });
@@ -2477,8 +2720,8 @@ fn pad_aabb(mins: [f32; 3], maxs: [f32; 3]) -> ([f32; 3], [f32; 3]) {
 
 fn obb_world_aabb(bone: &AuthorityDObjCollisionBone) -> ([f32; 3], [f32; 3]) {
     let mut extent = [0.0_f32; 3];
-    for world_axis in 0..3 {
-        extent[world_axis] = bone.axes[0][world_axis].abs() * bone.half_size[0]
+    for (world_axis, extent_entry) in extent[..3].iter_mut().enumerate() {
+        (*extent_entry) = bone.axes[0][world_axis].abs() * bone.half_size[0]
             + bone.axes[1][world_axis].abs() * bone.half_size[1]
             + bone.axes[2][world_axis].abs() * bone.half_size[2];
     }
@@ -2545,7 +2788,17 @@ fn geom_abs_aabb(
     geom: &EntityCollisionTraceGeom,
     cmodels: &SimClipCmodels,
 ) -> Option<([f32; 3], [f32; 3])> {
-    entity_abs_aabb(&geom.linked_brushes, geom.collision.as_ref(), cmodels)
+    let model = entity_abs_aabb(&geom.linked_brushes, geom.collision.as_ref(), cmodels);
+    let Some(body) = geom.body else {
+        return model;
+    };
+    let (mins, maxs) = body.bounds.abs_bounds(body.origin);
+    Some(model.map_or((mins, maxs), |(a, b)| {
+        (
+            std::array::from_fn(|i| a[i].min(mins[i])),
+            std::array::from_fn(|i| b[i].max(maxs[i])),
+        )
+    }))
 }
 
 fn entity_abs_aabb(

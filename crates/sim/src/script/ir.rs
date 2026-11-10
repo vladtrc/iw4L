@@ -1,7 +1,7 @@
 use crate::script::error::Location;
 use crate::script::value::Value;
 
-pub const IR_VERSION: u32 = 5;
+pub const IR_VERSION: u32 = 6;
 
 #[derive(Clone, Debug)]
 pub(crate) struct Function {
@@ -53,6 +53,12 @@ pub(crate) enum Binary {
     Case,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ThreadMode {
+    Detached,
+    Child,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum Op {
     Constant(Value),
@@ -67,8 +73,8 @@ pub(crate) enum Op {
     Jump(usize),
     JumpFalse(usize),
     Call(Callee, usize, bool),
-    Spawn(Callee, usize, bool),
-    Indirect(usize, bool, bool),
+    Spawn(Callee, usize, bool, ThreadMode),
+    Indirect(usize, bool, Option<ThreadMode>),
     Array,
     ArrayKeys,
     EnsureLocalArray(u32),

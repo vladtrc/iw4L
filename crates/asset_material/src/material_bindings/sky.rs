@@ -1,37 +1,25 @@
 use super::{BindingWriter, FrameStep, float4_bits};
-use crate::t5_code_remap::{
-    LEFTOVER_T5_CODE_BASE, T5_CODE_SKY_COLOR_MULTIPLIER, T5_CODE_SKY_TRANSITION,
-};
-
-pub(super) fn prepare(steps: &mut Vec<FrameStep>, requested: &[u16]) {
-    let candidates = [
-        18,
-        19,
-        20,
-        LEFTOVER_T5_CODE_BASE + T5_CODE_SKY_TRANSITION,
-        crate::t6_techset::CODE_T6_SKY_COLOR_MULTIPLIER,
-        LEFTOVER_T5_CODE_BASE + T5_CODE_SKY_COLOR_MULTIPLIER,
-    ];
-    if super::demands_any(requested, &candidates) {
-        let fixed = vec![
-            (18, float4_bits([1.0, 0.0, 0.0, 0.0])),
-            (19, float4_bits([0.0, 1.0, 0.0, 0.0])),
-            (20, float4_bits([0.0, 0.0, 1.0, 0.0])),
-            (LEFTOVER_T5_CODE_BASE + T5_CODE_SKY_TRANSITION, [0; 4]),
-        ]
-        .into_iter()
-        .filter(|(i, _)| requested.contains(i))
+pub fn prepare(
+    steps: &mut Vec<FrameStep>,
+    requested: &[u16],
+    fixed: &[(u16, [u32; 4])],
+    targets: &[u16],
+) {
+    let fixed: Vec<_> = fixed
+        .iter()
+        .copied()
+        .filter(|(index, _)| requested.contains(index))
         .collect();
-        let targets = candidates[4..]
-            .iter()
-            .copied()
-            .filter(|i| requested.contains(i))
-            .collect();
+    let targets: Vec<_> = targets
+        .iter()
+        .copied()
+        .filter(|index| requested.contains(index))
+        .collect();
+    if !fixed.is_empty() || !targets.is_empty() {
         steps.push(FrameStep::Sky { fixed, targets });
     }
 }
-
-pub(super) fn produce(
+pub fn produce(
     sources: &mut BindingWriter<'_>,
     fixed: &[(u16, [u32; 4])],
     targets: &[u16],

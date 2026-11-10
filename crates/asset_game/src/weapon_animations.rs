@@ -8,31 +8,7 @@ use crate::weapon_catalog::WeaponRegistry;
 use asset_anim::XAnimCatalog;
 use asset_anim::xanim_clip::AnimClip;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum AdsOverlayConvention {
-    #[default]
-    WeightIsFrac,
-
-    PlayAdsAnim,
-}
-
-impl AdsOverlayConvention {
-    pub const fn dump_token(self) -> &'static str {
-        match self {
-            Self::WeightIsFrac => "weight_is_frac",
-            Self::PlayAdsAnim => "play_ads_anim",
-        }
-    }
-
-    pub(crate) const fn from_namespace(ns: crate::AssetNamespace) -> Self {
-        match ns {
-            crate::AssetNamespace::T5 => Self::PlayAdsAnim,
-            crate::AssetNamespace::Iw4 | crate::AssetNamespace::Iw5 | crate::AssetNamespace::T6 => {
-                Self::WeightIsFrac
-            }
-        }
-    }
-}
+use crate::AdsOverlayConvention;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -319,7 +295,7 @@ impl WeaponAnimations {
         let (reload_time_ms, reload_empty_time_ms, reload_start_time_ms, reload_end_time_ms) =
             registry.reload_timers_of(index);
         (self.reload_quick_time_ms, self.reload_quick_empty_time_ms) =
-            registry.quick_reload_timers_of(index).unwrap_or_default();
+            registry.quick_reload_timers_of(index).unwrap_or((0, 0));
         self.with_fire_raise(fire_time_ms, raise_time_ms)
             .with_switch_timers(drop_time_ms, quick_drop_time_ms, quick_raise_time_ms)
             .with_sprint_timers(
@@ -337,7 +313,7 @@ impl WeaponAnimations {
                 registry
                     .fpv_facts_of(index)
                     .map(|facts| facts.ads_overlay_convention())
-                    .unwrap_or_default(),
+                    .unwrap_or(crate::AdsOverlayConvention::WeightIsFrac),
             )
             .with_inherits_perks(
                 registry

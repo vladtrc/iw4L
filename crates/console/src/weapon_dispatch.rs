@@ -6,10 +6,7 @@ use bevy::prelude::*;
 use net::{ClientActionInbox, LocalPresentClient, PresentedSnapshot};
 use sim::{ClientAction, ClientLifecycle};
 
-use crate::{
-    ArgCompleter, ConsoleCommand, ConsoleLine, ConsoleRegistry, ConsoleSettings, ConsoleState,
-    StaticCompleter,
-};
+use crate::{ArgCompleter, ConsoleCommand, ConsoleRegistry, StaticCompleter};
 
 #[derive(Clone, Default)]
 pub struct WeaponArgCompletions {
@@ -77,14 +74,16 @@ pub(crate) fn register_weapon_commands(
     }
 }
 
+#[derive(Resource, Default)]
+pub(crate) struct WeaponCompletionState(Option<(u32, Vec<String>)>);
+
 pub(crate) fn refresh_weapon_arg_completions(
     weapons: Res<PreparedWeapons>,
     killstreaks: Option<Res<assets::prepared::PreparedKillstreaks>>,
     presented: Res<PresentedSnapshot>,
     local: Res<LocalPresentClient>,
     completions: Res<CompletionSlot>,
-    generation: Res<frame::WorldGeneration>,
-    mut previous: Local<Option<(u64, u32, Vec<String>)>>,
+    mut previous: ResMut<WeaponCompletionState>,
 ) {
     let held = presented.held_weapon_id(local.0).unwrap_or(0);
     let bots = presented.snapshot().map_or_else(Vec::new, |snapshot| {
@@ -100,18 +99,16 @@ pub(crate) fn refresh_weapon_arg_completions(
             .map(|(id, _)| id.0.to_string())
             .collect()
     });
-    let epoch = generation.0.expect("live match generation");
     if previous
+        .0
         .as_ref()
-        .is_some_and(|(old_epoch, old_held, old_bots)| {
-            *old_epoch == epoch && *old_held == held && *old_bots == bots
-        })
+        .is_some_and(|(old_held, old_bots)| *old_held == held && *old_bots == bots)
         && !weapons.is_changed()
         && killstreaks.as_ref().is_none_or(|value| !value.is_changed())
     {
         return;
     }
-    *previous = Some((epoch, held, bots.clone()));
+    previous.0 = Some((held, bots.clone()));
     let camos = if held == 0 {
         Vec::new()
     } else {
@@ -140,33 +137,21 @@ pub(crate) fn refresh_weapon_arg_completions(
 
 pub(crate) fn route_weapon_commands(
     mut events: MessageReader<ConsoleCommand>,
-    mut console: ResMut<ConsoleState>,
-    settings: Res<ConsoleSettings>,
-    mut line: ResMut<ConsoleLine>,
+    mut output: crate::feature_dispatch::ConsoleEcho,
     weapons: Option<Res<PreparedWeapons>>,
-    presented: Res<PresentedSnapshot>,
-    local: Res<LocalPresentClient>,
+    player: net::LocalPresentation,
     mut inbox: ResMut<ClientActionInbox>,
-    mut seq: ResMut<net::ActionRequestIds>,
     completions: Res<CompletionSlot>,
     authority: Option<Res<net::AuthorityWorld>>,
 ) {
-    let capacity = settings.log_capacity;
-    let echo = |msg: String, console: &mut ConsoleState, line: &mut ConsoleLine| {
-        diag::info!(Console, "{msg}");
-        line.0 = msg.clone();
-        console.echo(msg, capacity);
-    };
+    let net::LocalPresentation { presented, local } = player;
+    let mut echo = |msg: String| output.write(msg);
 
     for cmd in events.read() {
         if matches!(cmd.name.as_str(), "give" | "attach")
             && authority.as_ref().is_some_and(|a| !a.0.cheats_enabled())
         {
-            echo(
-                format!("{}: cheats are off", cmd.name),
-                &mut console,
-                &mut line,
-            );
+            echo(format!("{}: cheats are off", cmd.name));
             continue;
         }
         match cmd.name.as_str() {
@@ -174,15 +159,13 @@ pub(crate) fn route_weapon_commands(
                 let target = match parse_give_target(&cmd.args) {
                     Ok(target) => target,
                     Err(reason) => {
-                        echo(reason.into(), &mut console, &mut line);
+                        echo(reason.into());
                         continue;
                     }
                 };
                 let arg = match target {
                     GiveTarget::Ammo => {
-                        resupply_ammo(&presented, &local, &mut inbox, &mut seq, |msg| {
-                            echo(msg, &mut console, &mut line)
-                        });
+                        resupply_ammo(&presented, &local, &mut inbox, &mut echo);
                         continue;
                     }
                     GiveTarget::Killstreak(name) => {
@@ -192,8 +175,7 @@ pub(crate) fn route_weapon_commands(
                             &presented,
                             &local,
                             &mut inbox,
-                            &mut seq,
-                            |msg| echo(msg, &mut console, &mut line),
+                            &mut echo,
                         );
                         continue;
                     }
@@ -204,27 +186,18 @@ pub(crate) fn route_weapon_commands(
                             &presented,
                             &local,
                             &mut inbox,
-                            &mut seq,
-                            |msg| echo(msg, &mut console, &mut line),
+                            &mut echo,
                         );
                         continue;
                     }
                     GiveTarget::Weapon(name) => name,
                 };
                 let Some(weapons) = weapons.as_ref() else {
-                    echo(
-                        "give: weapon catalog not loaded".into(),
-                        &mut console,
-                        &mut line,
-                    );
+                    echo("give: weapon catalog not loaded".into());
                     continue;
                 };
                 if !alive(&presented, local.0) {
-                    echo(
-                        "give: not Alive — spawn a class first".into(),
-                        &mut console,
-                        &mut line,
-                    );
+                    echo("give: not Alive — spawn a class first".into());
                     continue;
                 }
                 let (camo, attachments) = split_camo(&cmd.args[1..]);
@@ -234,57 +207,39 @@ pub(crate) fn route_weapon_commands(
                     Ok((weapon, model))
                 }) {
                     Ok((weapon, model)) => {
-                        let request_id = seq.allocate();
-                        if let Err(error) = inbox.push(
-                            local.0,
-                            ClientAction::GiveWeapon {
-                                request_id,
-                                weapon,
-                                model,
-                            },
-                        ) {
-                            echo(format!("give: {error}"), &mut console, &mut line);
+                        if let Err(error) =
+                            inbox.push(local.0, ClientAction::GiveWeapon { weapon, model })
+                        {
+                            echo(format!("give: {error}"));
                             continue;
                         }
 
-                        echo(
-                            format!(
-                                "give: queued {} id={weapon} request_id={request_id}",
-                                weapons.registry().configuration_label(weapon)
-                            ),
-                            &mut console,
-                            &mut line,
-                        );
+                        echo(format!(
+                            "give: queued {} id={weapon}",
+                            weapons.registry().configuration_label(weapon)
+                        ));
                     }
-                    Err(msg) => echo(format!("give: {msg}"), &mut console, &mut line),
+                    Err(msg) => echo(format!("give: {msg}")),
                 }
             }
             "attach" => {
                 let Some(weapons) = weapons.as_ref() else {
-                    echo(
-                        "attach: weapon catalog not loaded".into(),
-                        &mut console,
-                        &mut line,
-                    );
+                    echo("attach: weapon catalog not loaded".into());
                     continue;
                 };
                 let Some(ps) = presented.alive_player(local.0) else {
-                    echo(
-                        "attach: not Alive — spawn a class first".into(),
-                        &mut console,
-                        &mut line,
-                    );
+                    echo("attach: not Alive — spawn a class first".into());
                     continue;
                 };
                 let current = ps.weapon;
                 if current == 0 {
-                    echo("attach: no weapon in hands".into(), &mut console, &mut line);
+                    echo("attach: no weapon in hands".into());
                     continue;
                 }
                 let Some(name) = cmd.args.first() else {
                     match attachment_hints(weapons.registry(), current) {
-                        Ok(hints) => echo(format!("attach: {hints}"), &mut console, &mut line),
-                        Err(reason) => echo(format!("attach: {reason}"), &mut console, &mut line),
+                        Ok(hints) => echo(format!("attach: {hints}")),
+                        Err(reason) => echo(format!("attach: {reason}")),
                     }
                     continue;
                 };
@@ -292,42 +247,32 @@ pub(crate) fn route_weapon_commands(
                 let next = match next {
                     Ok(id) => id,
                     Err(msg) => {
-                        echo(format!("attach: {msg}"), &mut console, &mut line);
+                        echo(format!("attach: {msg}"));
                         continue;
                     }
                 };
                 if next == current {
-                    echo(
-                        format!(
-                            "attach: `{}` is already the selected configuration — refused \
+                    echo(format!(
+                        "attach: `{}` is already the selected configuration — refused \
                              (an unchanged id is not a successful attach)",
-                            weapons.registry().configuration_label(current)
-                        ),
-                        &mut console,
-                        &mut line,
-                    );
+                        weapons.registry().configuration_label(current)
+                    ));
                     continue;
                 }
-                let request_id = seq.allocate();
                 if let Err(error) = inbox.push(
                     local.0,
                     ClientAction::ChangeWeaponConfiguration {
-                        request_id,
                         from: current,
                         to: next,
                     },
                 ) {
-                    echo(format!("attach: {error}"), &mut console, &mut line);
+                    echo(format!("attach: {error}"));
                     continue;
                 }
-                echo(
-                    format!(
-                        "attach: queued {} id={next} request_id={request_id}",
-                        weapons.registry().configuration_label(next)
-                    ),
-                    &mut console,
-                    &mut line,
-                );
+                echo(format!(
+                    "attach: queued {} id={next}",
+                    weapons.registry().configuration_label(next)
+                ));
             }
             _ => {}
         }
@@ -411,7 +356,6 @@ fn change_camo(
     presented: &PresentedSnapshot,
     local: &LocalPresentClient,
     inbox: &mut ClientActionInbox,
-    seq: &mut net::ActionRequestIds,
     mut echo: impl FnMut(String),
 ) {
     let Some(weapons) = weapons else {
@@ -434,17 +378,9 @@ fn change_camo(
             return;
         }
     };
-    let request_id = seq.allocate();
-    match inbox.push(
-        local.0,
-        ClientAction::ChangeWeaponCamo {
-            request_id,
-            weapon,
-            model,
-        },
-    ) {
+    match inbox.push(local.0, ClientAction::ChangeWeaponCamo { weapon, model }) {
         Ok(()) => echo(format!(
-            "give camo: queued {name} for {} request_id={request_id}",
+            "give camo: queued {name} for {}",
             weapons.registry().configuration_label(weapon)
         )),
         Err(error) => echo(format!("give camo: {error}")),
@@ -457,7 +393,6 @@ fn grant_killstreak(
     presented: &PresentedSnapshot,
     local: &LocalPresentClient,
     inbox: &mut ClientActionInbox,
-    seq: &mut net::ActionRequestIds,
     mut echo: impl FnMut(String),
 ) {
     let names =
@@ -480,14 +415,7 @@ fn grant_killstreak(
     let Some(field) = sim::menu_response_field(name) else {
         return;
     };
-    let request_id = seq.allocate();
-    match inbox.push(
-        local.0,
-        ClientAction::GiveKillstreak {
-            request_id,
-            name: field,
-        },
-    ) {
+    match inbox.push(local.0, ClientAction::GiveKillstreak { name: field }) {
         Ok(()) => echo(format!(
             "give: acquisition queued for killstreak/{name}; use its action slot when ready"
         )),
@@ -499,15 +427,13 @@ fn resupply_ammo(
     presented: &PresentedSnapshot,
     local: &LocalPresentClient,
     inbox: &mut ClientActionInbox,
-    seq: &mut net::ActionRequestIds,
     mut echo: impl FnMut(String),
 ) {
     if !alive(presented, local.0) {
         echo("give: spawn a class first".into());
         return;
     }
-    let request_id = seq.allocate();
-    match inbox.push(local.0, ClientAction::ResupplyAmmo { request_id }) {
+    match inbox.push(local.0, ClientAction::ResupplyAmmo) {
         Ok(()) => echo("give: ammo resupply queued; reload magazines normally".into()),
         Err(error) => echo(format!("give: {error}")),
     }
@@ -601,83 +527,6 @@ impl ArgCompleter for BotCompleter {
             _ => Vec::new(),
         }
     }
-}
-
-pub(crate) fn echo_give_results(
-    give: Option<Res<net::DumpGiveLog>>,
-    weapons: Option<Res<PreparedWeapons>>,
-    mut console: ResMut<ConsoleState>,
-    settings: Res<ConsoleSettings>,
-    mut line: ResMut<ConsoleLine>,
-    mut echoed: Local<Option<(u32, u8)>>,
-) {
-    let Some(give) = give.as_ref() else {
-        return;
-    };
-    let (Some(request_id), Some(weapon), Some(accepted)) =
-        (give.request_id, give.weapon, give.accepted)
-    else {
-        return;
-    };
-    if *echoed == Some((request_id, accepted)) {
-        return;
-    }
-    *echoed = Some((request_id, accepted));
-    let key = weapons
-        .as_ref()
-        .map(|w| w.registry().configuration_label(weapon))
-        .filter(|label| !label.is_empty())
-        .unwrap_or_else(|| format!("#{weapon}"));
-    let capacity = settings.log_capacity;
-    let msg = if accepted == 1 {
-        format!("give: ok {key} id={weapon} request_id={request_id}")
-    } else {
-        format!(
-            "give: rejected {key} id={weapon} request_id={request_id} ({})",
-            give.reject_reason.unwrap_or("unknown")
-        )
-    };
-    diag::info!(Console, "{msg}");
-    line.0 = msg.clone();
-    console.echo(msg, capacity);
-}
-
-pub(crate) fn echo_configuration_change_results(
-    changes: Option<Res<net::DumpConfigurationChangeLog>>,
-    weapons: Option<Res<PreparedWeapons>>,
-    mut console: ResMut<ConsoleState>,
-    settings: Res<ConsoleSettings>,
-    mut line: ResMut<ConsoleLine>,
-    mut echoed: Local<Option<u32>>,
-) {
-    let Some(changes) = changes.as_ref() else {
-        return;
-    };
-    let (Some(request_id), Some(to), Some(accepted)) =
-        (changes.request_id, changes.to, changes.accepted)
-    else {
-        return;
-    };
-    if *echoed == Some(request_id) {
-        return;
-    }
-    *echoed = Some(request_id);
-    let key = weapons
-        .as_ref()
-        .map(|w| w.registry().configuration_label(to))
-        .filter(|label| !label.is_empty())
-        .unwrap_or_else(|| format!("#{to}"));
-    let msg = if accepted {
-        format!("attach: ok {key} id={to} request_id={request_id}")
-    } else {
-        format!(
-            "attach: rejected {key} id={to} request_id={request_id} ({})",
-            changes.reject_reason.unwrap_or("unknown")
-        )
-    };
-    diag::info!(Console, "{msg}");
-    line.0 = msg.clone();
-    console.echo(msg, settings.log_capacity);
 }
 
 fn alive(presented: &PresentedSnapshot, id: sim::ClientId) -> bool {
@@ -822,5 +671,5 @@ pub fn attach_completions(weapons: &PreparedWeapons, current_weapon: u32) -> Vec
                 .map(|option| option.choice.name)
                 .collect()
         })
-        .unwrap_or_default()
+        .unwrap_or(Vec::new())
 }

@@ -23,7 +23,7 @@ pub struct PreparedModelMaterials {
     by_authored: HashMap<assets::MaterialIndex, SmodelPassMaterial>,
     scene_dobjs: HashMap<String, Arc<xmodel_runtime::DObj>>,
     projectile_materials: HashMap<assets::MaterialIndex, SmodelPassMaterial>,
-    projectile_dobjs: HashMap<(asset_core::AssetNamespace, String), Arc<xmodel_runtime::DObj>>,
+    projectile_dobjs: HashMap<(asset_core::FamilyId, String), Arc<xmodel_runtime::DObj>>,
 }
 
 impl PreparedModelMaterials {
@@ -72,7 +72,7 @@ impl PreparedModelMaterials {
 
     pub fn projectile_dobj(
         &self,
-        namespace: asset_core::AssetNamespace,
+        namespace: asset_core::FamilyId,
         model: &str,
     ) -> Option<&Arc<xmodel_runtime::DObj>> {
         self.projectile_dobjs.get(&(namespace, model.to_owned()))
@@ -121,7 +121,7 @@ pub fn scene_lit_pass_material(
         .ordinal_for_asset_id(authored.order())?;
     let maps = render_scene::runtime_maps(
         Some(authored),
-        &tess.catalog(),
+        tess.catalog(),
         tess.material_images.as_ref(),
     );
     let inv_h = lighting_iw4::model_lighting_inv_image_height(atlas.dims.image_height)?;
@@ -158,213 +158,228 @@ fn present_keys<'a>(
         .filter_map(|(key, _)| key.as_ref())
 }
 
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct ModelMaterialAdmission<'w> {
+    tess: Res<'w, TessMaterials>,
+    atlas: Option<Res<'w, WorldModelLightingAtlas>>,
+    prepared: ResMut<'w, PreparedModelMaterials>,
+}
+
+impl ModelMaterialAdmission<'_> {
+    fn prepare(
+        mut self,
+        bodies: Option<Res<assets::PreparedBodies>>,
+        world_weapons: Option<Res<assets::PreparedWorldWeapons>>,
+        weapons: Option<Res<assets::PreparedWeapons>>,
+        scene_models: Option<Res<asset_world::MapXModelSceneCatalog>>,
+        projectiles: Option<Res<assets::PreparedProjectileMeshes>>,
+    ) {
+        if self.tess.material_images.is_empty() {
+            return;
+        }
+        let atlas_id = self.atlas.as_ref().map(|atlas| atlas.image.id());
+        let world_id = world_weapons.as_ref().map(|world| world.0.identity());
+        let weapons_revision = weapons
+            .as_ref()
+            .map(|weapons| weapons.registry().revision());
+        let bodies_catalog = bodies.as_ref().map(|bodies| &bodies.0);
+        if self.prepared.owner.as_ref().is_some_and(|owner| {
+            Arc::ptr_eq(&owner.catalog, self.tess.catalog())
+                && Arc::ptr_eq(&owner.images, &self.tess.material_images)
+                && owner.atlas == atlas_id
+                && owner.world == world_id
+                && owner.weapons == weapons_revision
+                && owner.scene_models == scene_models.is_some()
+                && owner.projectiles == projectiles.is_some()
+                && match (&owner.bodies, bodies_catalog) {
+                    (Some(previous), Some(current)) => Arc::ptr_eq(previous, current),
+                    (None, None) => true,
+                    _ => false,
+                }
+        }) && !scene_models
+            .as_ref()
+            .is_some_and(|models| models.is_changed())
+            && !projectiles
+                .as_ref()
+                .is_some_and(|meshes| meshes.is_changed())
+        {
+            return;
+        }
+        let owner = ModelMaterialsOwner {
+            catalog: Arc::clone(self.tess.catalog()),
+            images: Arc::clone(&self.tess.material_images),
+            atlas: atlas_id,
+            bodies: bodies_catalog.cloned(),
+            world: world_id,
+            weapons: weapons_revision,
+            scene_models: scene_models.is_some(),
+            projectiles: projectiles.is_some(),
+        };
+        let (Some(atlas), Some(bodies), Some(world)) = (self.atlas, bodies, world_weapons) else {
+            diag::info!(
+                World,
+                "model materials: nothing to admit (lighting atlas or model catalogs missing)"
+            );
+            *self.prepared = PreparedModelMaterials {
+                owner: Some(owner),
+                ..Default::default()
+            };
+            return;
+        };
+        let started = std::time::Instant::now();
+        let mut by_key = HashMap::new();
+        let mut refused = HashSet::new();
+        for name in bodies.0.names() {
+            if let Some(entry) = bodies.0.get(name) {
+                admit_keys(
+                    present_keys(&entry.material_keys, &entry.material_edges),
+                    &atlas,
+                    self.tess.catalog(),
+                    &mut by_key,
+                    &mut refused,
+                );
+            }
+        }
+        for index in 0..world.0.len() {
+            if let Some(entry) = world.0.get_at(index) {
+                admit_keys(
+                    present_keys(&entry.material_keys, &entry.material_edges),
+                    &atlas,
+                    self.tess.catalog(),
+                    &mut by_key,
+                    &mut refused,
+                );
+            }
+        }
+        if let Some(weapons) = weapons.as_deref() {
+            for id in 1..=weapons.registry().len() as u32 {
+                for appearance in weapons.registry().appearances_of(id) {
+                    let Some(camo) = appearance.material_camouflage() else {
+                        continue;
+                    };
+                    for (_, key) in &camo.materials {
+                        if by_key.contains_key(key) {
+                            continue;
+                        }
+                        let Some(authored) = self.tess.catalog().material_for_key(key) else {
+                            continue;
+                        };
+                        if let Some(material) = scene_lit_pass_material(
+                            &atlas,
+                            &self.tess,
+                            assets::MaterialIndex::from_order(usize::from(authored.asset_id.0)),
+                        ) {
+                            by_key.insert(key.clone(), material);
+                        }
+                    }
+                }
+            }
+        }
+        let mut by_authored = HashMap::new();
+        let mut scene_dobjs = HashMap::new();
+        if let Some(scene_models) = scene_models.as_deref() {
+            for (key, asset) in scene_models.iter() {
+                let skel = match asset {
+                    asset_world::MapXModelSceneAsset::Captured { skel, .. } => skel,
+                    asset_world::MapXModelSceneAsset::Unavailable { .. } => continue,
+                };
+                for surface in 0..skel.surface_materials.len() {
+                    let Some(authored) = scene_models.surface_material(key, surface) else {
+                        continue;
+                    };
+                    if by_authored.contains_key(&authored) {
+                        continue;
+                    }
+                    if let Some(material) = scene_lit_pass_material(&atlas, &self.tess, authored) {
+                        by_authored.insert(authored, material);
+                    }
+                }
+                if let Some(pose) = skel.pose.as_ref()
+                    && let Ok(dobj) = xmodel_runtime::DObj::build(&[(pose, None)])
+                {
+                    scene_dobjs.insert(key.0.clone(), Arc::new(dobj));
+                }
+            }
+        }
+        let mut projectile_materials = HashMap::new();
+        let mut projectile_dobjs = HashMap::new();
+        if let Some(projectiles) = projectiles.as_deref() {
+            for index in 0..projectiles.0.len() {
+                let Some(entry) = projectiles.0.get_at(index) else {
+                    continue;
+                };
+                let key = projectiles.0.key_at(index).cloned().unwrap_or(
+                    asset_model::ProjectileMeshKey::new(entry.namespace, &entry.skel.name),
+                );
+                for surface in 0..entry.material_edges.len() {
+                    let Some(authored) = entry.material_index(surface) else {
+                        continue;
+                    };
+                    if projectile_materials.contains_key(&authored) {
+                        continue;
+                    }
+                    if let Some(material) = crate::authored_lit_xmodel_pass_material(
+                        &atlas,
+                        self.tess.catalog(),
+                        self.tess.material_images.as_ref(),
+                        authored,
+                    ) {
+                        projectile_materials.insert(authored, material);
+                    }
+                }
+                if let Some(pose) = entry.skel.pose.as_ref()
+                    && let Ok(dobj) = xmodel_runtime::DObj::build(&[(pose, None)])
+                {
+                    projectile_dobjs.insert((key.namespace, key.name), Arc::new(dobj));
+                }
+            }
+        }
+        let mut refused: Vec<_> = refused.into_iter().collect();
+        refused.sort_by(|left, right| {
+            (left.namespace.as_str(), &left.name).cmp(&(right.namespace.as_str(), &right.name))
+        });
+        diag::info!(
+            World,
+            "model materials prepared before Ready: admitted={} map_model_materials={} map_model_dobjs={} projectile_materials={} projectile_dobjs={} refused={} elapsed={:.1}ms{}",
+            by_key.len(),
+            by_authored.len(),
+            scene_dobjs.len(),
+            projectile_materials.len(),
+            projectile_dobjs.len(),
+            refused.len(),
+            started.elapsed().as_secs_f64() * 1000.0,
+            if refused.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " first_refused=[{}]",
+                    refused
+                        .iter()
+                        .take(8)
+                        .map(|key| format!("{}:{}", key.namespace.as_str(), key.name))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            }
+        );
+        *self.prepared = PreparedModelMaterials {
+            owner: Some(owner),
+            by_key,
+            by_authored,
+            scene_dobjs,
+            projectile_materials,
+            projectile_dobjs,
+        };
+    }
+}
+
 pub fn prepare_model_materials(
-    tess: Res<TessMaterials>,
-    atlas: Option<Res<WorldModelLightingAtlas>>,
     bodies: Option<Res<assets::PreparedBodies>>,
     world_weapons: Option<Res<assets::PreparedWorldWeapons>>,
     weapons: Option<Res<assets::PreparedWeapons>>,
     scene_models: Option<Res<asset_world::MapXModelSceneCatalog>>,
     projectiles: Option<Res<assets::PreparedProjectileMeshes>>,
-    mut prepared: ResMut<PreparedModelMaterials>,
+    admission: ModelMaterialAdmission,
 ) {
-    if tess.material_images.is_empty() {
-        return;
-    }
-    let atlas_id = atlas.as_ref().map(|atlas| atlas.image.id());
-    let world_id = world_weapons.as_ref().map(|world| world.0.identity());
-    let weapons_revision = weapons
-        .as_ref()
-        .map(|weapons| weapons.registry().revision());
-    let bodies_catalog = bodies.as_ref().map(|bodies| &bodies.0);
-    if prepared.owner.as_ref().is_some_and(|owner| {
-        Arc::ptr_eq(&owner.catalog, tess.catalog())
-            && Arc::ptr_eq(&owner.images, &tess.material_images)
-            && owner.atlas == atlas_id
-            && owner.world == world_id
-            && owner.weapons == weapons_revision
-            && owner.scene_models == scene_models.is_some()
-            && owner.projectiles == projectiles.is_some()
-            && match (&owner.bodies, bodies_catalog) {
-                (Some(previous), Some(current)) => Arc::ptr_eq(previous, current),
-                (None, None) => true,
-                _ => false,
-            }
-    }) && !scene_models
-        .as_ref()
-        .is_some_and(|models| models.is_changed())
-        && !projectiles
-            .as_ref()
-            .is_some_and(|meshes| meshes.is_changed())
-    {
-        return;
-    }
-    let owner = ModelMaterialsOwner {
-        catalog: Arc::clone(tess.catalog()),
-        images: Arc::clone(&tess.material_images),
-        atlas: atlas_id,
-        bodies: bodies_catalog.cloned(),
-        world: world_id,
-        weapons: weapons_revision,
-        scene_models: scene_models.is_some(),
-        projectiles: projectiles.is_some(),
-    };
-    let (Some(atlas), Some(bodies), Some(world)) = (atlas, bodies, world_weapons) else {
-        diag::info!(
-            World,
-            "model materials: nothing to admit (lighting atlas or model catalogs missing)"
-        );
-        *prepared = PreparedModelMaterials {
-            owner: Some(owner),
-            ..Default::default()
-        };
-        return;
-    };
-    let started = std::time::Instant::now();
-    let mut by_key = HashMap::new();
-    let mut refused = HashSet::new();
-    for name in bodies.0.names() {
-        if let Some(entry) = bodies.0.get(name) {
-            admit_keys(
-                present_keys(&entry.material_keys, &entry.material_edges),
-                &atlas,
-                &tess.catalog(),
-                &mut by_key,
-                &mut refused,
-            );
-        }
-    }
-    for index in 0..world.0.len() {
-        if let Some(entry) = world.0.get_at(index) {
-            admit_keys(
-                present_keys(&entry.material_keys, &entry.material_edges),
-                &atlas,
-                &tess.catalog(),
-                &mut by_key,
-                &mut refused,
-            );
-        }
-    }
-    if let Some(weapons) = weapons.as_deref() {
-        for id in 1..=weapons.registry().len() as u32 {
-            for appearance in weapons.registry().appearances_of(id) {
-                let Some(camo) = appearance.material_camouflage() else {
-                    continue;
-                };
-                for (_, key) in &camo.materials {
-                    if by_key.contains_key(key) {
-                        continue;
-                    }
-                    let Some(authored) = tess.catalog().material_for_key(key) else {
-                        continue;
-                    };
-                    if let Some(material) = scene_lit_pass_material(
-                        &atlas,
-                        &tess,
-                        assets::MaterialIndex::from_order(usize::from(authored.asset_id.0)),
-                    ) {
-                        by_key.insert(key.clone(), material);
-                    }
-                }
-            }
-        }
-    }
-    let mut by_authored = HashMap::new();
-    let mut scene_dobjs = HashMap::new();
-    if let Some(scene_models) = scene_models.as_deref() {
-        for (key, asset) in scene_models.iter() {
-            let skel = match asset {
-                asset_world::MapXModelSceneAsset::Iw4(skel)
-                | asset_world::MapXModelSceneAsset::Iw5(skel)
-                | asset_world::MapXModelSceneAsset::T6(skel)
-                | asset_world::MapXModelSceneAsset::T5(skel) => skel,
-                asset_world::MapXModelSceneAsset::Unavailable { .. } => continue,
-            };
-            for surface in 0..skel.surface_materials.len() {
-                let Some(authored) = scene_models.surface_material(key, surface) else {
-                    continue;
-                };
-                if by_authored.contains_key(&authored) {
-                    continue;
-                }
-                if let Some(material) = scene_lit_pass_material(&atlas, &tess, authored) {
-                    by_authored.insert(authored, material);
-                }
-            }
-            if let Some(pose) = skel.pose.as_ref()
-                && let Ok(dobj) = xmodel_runtime::DObj::build(&[(pose, None)])
-            {
-                scene_dobjs.insert(key.0.clone(), Arc::new(dobj));
-            }
-        }
-    }
-    let mut projectile_materials = HashMap::new();
-    let mut projectile_dobjs = HashMap::new();
-    if let Some(projectiles) = projectiles.as_deref() {
-        for index in 0..projectiles.0.len() {
-            let Some(entry) = projectiles.0.get_at(index) else {
-                continue;
-            };
-            let key = projectiles.0.key_at(index).cloned().unwrap_or(
-                asset_model::ProjectileMeshKey::new(entry.namespace, &entry.skel.name),
-            );
-            for surface in 0..entry.material_edges.len() {
-                let Some(authored) = entry.material_index(surface) else {
-                    continue;
-                };
-                if projectile_materials.contains_key(&authored) {
-                    continue;
-                }
-                if let Some(material) = crate::authored_lit_xmodel_pass_material(
-                    &atlas,
-                    &tess.catalog(),
-                    tess.material_images.as_ref(),
-                    authored,
-                ) {
-                    projectile_materials.insert(authored, material);
-                }
-            }
-            if let Some(pose) = entry.skel.pose.as_ref()
-                && let Ok(dobj) = xmodel_runtime::DObj::build(&[(pose, None)])
-            {
-                projectile_dobjs.insert((key.namespace, key.name), Arc::new(dobj));
-            }
-        }
-    }
-    let mut refused: Vec<_> = refused.into_iter().collect();
-    refused.sort_by(|left, right| {
-        (left.namespace.as_str(), &left.name).cmp(&(right.namespace.as_str(), &right.name))
-    });
-    diag::info!(
-        World,
-        "model materials prepared before Ready: admitted={} map_model_materials={} map_model_dobjs={} projectile_materials={} projectile_dobjs={} refused={} elapsed={:.1}ms{}",
-        by_key.len(),
-        by_authored.len(),
-        scene_dobjs.len(),
-        projectile_materials.len(),
-        projectile_dobjs.len(),
-        refused.len(),
-        started.elapsed().as_secs_f64() * 1000.0,
-        if refused.is_empty() {
-            String::new()
-        } else {
-            format!(
-                " first_refused=[{}]",
-                refused
-                    .iter()
-                    .take(8)
-                    .map(|key| format!("{}:{}", key.namespace.as_str(), key.name))
-                    .collect::<Vec<_>>()
-                    .join(",")
-            )
-        }
-    );
-    *prepared = PreparedModelMaterials {
-        owner: Some(owner),
-        by_key,
-        by_authored,
-        scene_dobjs,
-        projectile_materials,
-        projectile_dobjs,
-    };
+    admission.prepare(bodies, world_weapons, weapons, scene_models, projectiles);
 }

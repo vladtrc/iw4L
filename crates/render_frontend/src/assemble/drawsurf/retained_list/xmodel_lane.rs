@@ -1,6 +1,6 @@
 use super::common::{retained_draw_order_tie, with_catalog};
 use crate::assemble::drawsurf::tess::xmodel::{
-    XMODEL_OBJECT_ID_VIEWMODEL, XModelDrawPlan, merge_xmodel_draw_plan,
+    XMODEL_OBJECT_ID_VIEWMODEL, XModelDrawPlan, XModelProducers,
 };
 use crate::prepare::scene::view_parms::PreparedSceneView;
 use bevy::prelude::*;
@@ -159,6 +159,11 @@ fn sort_xmodel_lane(items: &mut [RetainedDrawItem], sources: &mut [u32], order: 
     }
 }
 
+#[expect(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 pub(crate) fn rebuild_xmodel_draw_lane(
     plans: (
         Option<Res<crate::assemble::drawsurf::tess::xmodel::FpvDrawPlan>>,
@@ -172,14 +177,11 @@ pub(crate) fn rebuild_xmodel_draw_lane(
     ),
     mut xmodel: ResMut<XModelDrawPlan>,
     sky: Option<Res<crate::assemble::drawsurf::tess::sky::SkyModelDrawPlan>>,
+    world: Option<Res<crate::prepare::scene::world::WorldScene>>,
     prepared: Option<Res<PreparedSceneView>>,
     runtime: Res<crate::assemble::drawsurf::MaterialGeneration>,
     mut lane: ResMut<XModelDrawLane>,
-    presentation: (
-        Res<net::PresentedSnapshot>,
-        Res<frame::ScreenEffectsView>,
-        Res<render_anim::gaps::RenderPresentationGaps>,
-    ),
+    presentation: (Res<net::PresentedSnapshot>, Res<frame::ScreenEffectsView>),
 ) {
     let (fpv, bodies, scripts, missiles, items, fx_models, dynents, gfx_scene) = plans;
     let empty_fpv = crate::assemble::drawsurf::tess::xmodel::FpvDrawPlan::default();
@@ -189,21 +191,32 @@ pub(crate) fn rebuild_xmodel_draw_lane(
     let empty_items = crate::assemble::drawsurf::tess::xmodel::ItemDrawPlan::default();
     let empty_fx_models = crate::assemble::drawsurf::tess::xmodel::FxModelDrawPlan::default();
     let empty_dynents = crate::assemble::drawsurf::tess::xmodel::DynEntDrawPlan::default();
-    merge_xmodel_draw_plan(
+    XModelProducers {
+        fpv: fpv.as_deref().unwrap_or(&empty_fpv),
+        bodies: bodies.as_deref().unwrap_or(&empty_body),
+        scripts: scripts.as_deref().unwrap_or(&empty_scripts),
+        missiles: missiles.as_deref().unwrap_or(&empty_missiles),
+        items: items.as_deref().unwrap_or(&empty_items),
+        fx_models: fx_models.as_deref().unwrap_or(&empty_fx_models),
+        dynents: dynents.as_deref().unwrap_or(&empty_dynents),
+    }
+    .merge_into(
         &mut xmodel,
-        fpv.as_deref().unwrap_or(&empty_fpv),
-        bodies.as_deref().unwrap_or(&empty_body),
-        scripts.as_deref().unwrap_or(&empty_scripts),
-        missiles.as_deref().unwrap_or(&empty_missiles),
-        items.as_deref().unwrap_or(&empty_items),
-        fx_models.as_deref().unwrap_or(&empty_fx_models),
-        dynents.as_deref().unwrap_or(&empty_dynents),
         gfx_scene.as_ref().map(|g| &g.scene),
         sky.as_deref()
-            .zip(prepared.as_ref().filter(|v| v.ready).map(|v| v.eye)),
+            .zip(prepared.as_ref().filter(|v| v.ready).map(|v| v.eye))
+            .map(|(sky, eye)| {
+                (
+                    sky,
+                    eye,
+                    world
+                        .as_deref()
+                        .and_then(|world| world.portal_view.as_ref()),
+                )
+            }),
     );
 
-    let (presented, effects, gaps) = presentation;
+    let (presented, effects) = presentation;
     let thermal = crate::assemble::drawsurf::thermal_body::ThermalBodySelection::new(
         &presented,
         &effects,
@@ -217,21 +230,21 @@ pub(crate) fn rebuild_xmodel_draw_lane(
             _ => None,
         })
     {
-        gaps.raise(
-            render_anim::gaps::RenderGapCause::ThermalBodyMaterialMissing { name: name.clone() },
+        diag::warn_once!(
+            World,
+            "thermal body material missing: `{name}` not in global catalog",
+            name = name.clone()
         );
-    } else {
-        gaps.clear(render_anim::gaps::RenderGap::ThermalBodyMaterial);
     }
     let layout = xmodel_lane_layout_hash(&xmodel, &runtime.catalog, &thermal);
     lane.merge_packed_n = xmodel.packed_rows().map(|rows| rows.len() as u32);
     lane.fx_object_id_exhausted = xmodel.fx_object_id_exhausted;
     if layout == lane.membership_hash && overlay_xmodel_lane_payload(&xmodel, &mut lane) {
         lane.payload_revision = xmodel.revision;
-        perf::Counter::XmodelLayoutOverlay.emit(1.0);
+        perf::counter!("xmodel_layout_overlay", "iw4l.render", 1.0);
         return;
     }
-    perf::Counter::XmodelLayoutOverlay.emit(0.0);
+    perf::counter!("xmodel_layout_overlay", "iw4l.render", 0.0);
 
     lane.colour.clear();
     lane.emissive.clear();
@@ -287,6 +300,8 @@ pub(crate) fn rebuild_xmodel_draw_lane(
             key,
             material_sorted_index,
             RetainedDrawKind::XModel {
+                portal_slice: None,
+                portal_aperture: None,
                 surface: draw.surface,
                 material: draw.material,
                 object_id: draw.object_id,
@@ -340,6 +355,14 @@ pub(crate) fn rebuild_xmodel_draw_lane(
     lane.membership_hash = layout;
     lane.membership_revision = lane.membership_revision.wrapping_add(1);
     lane.payload_revision = xmodel.revision;
-    perf::Counter::XmodelColourCameraFrustum.emit(f64::from(lane.skipped_camera_frustum));
-    perf::Counter::XmodelColourNoLighting.emit(f64::from(lane.skipped_no_lighting));
+    perf::counter!(
+        "xmodel_colour_camera_frustum",
+        "iw4l.render",
+        f64::from(lane.skipped_camera_frustum)
+    );
+    perf::counter!(
+        "xmodel_colour_no_lighting",
+        "iw4l.render",
+        f64::from(lane.skipped_no_lighting)
+    );
 }

@@ -7,6 +7,8 @@ use std::sync::Arc;
 
 #[derive(Clone, Debug, Default)]
 pub struct ExtractedStaticGeometry {
+    pub world_bounds: Vec<Option<([f32; 3], f32)>>,
+    pub smodel_bounds: Vec<Option<([f32; 3], f32)>>,
     pub world_vertices: Arc<Vec<[u8; asset_iw4::size::GFX_WORLD_VERTEX]>>,
     pub world_layer: Arc<Vec<u8>>,
     pub world_indices: Arc<Vec<u32>>,
@@ -19,6 +21,45 @@ pub struct ExtractedStaticGeometry {
     pub smodel_cached_vertices: Arc<Vec<[u8; asset_iw4::size::GFX_PACKED_VERTEX]>>,
     pub smodel_surface_verts: Arc<Vec<(u32, u32)>>,
     pub smodel_vertex_lighting: Arc<Vec<[u8; 4]>>,
+}
+
+/// Packed world/model vertices both start with their float3 position.
+/// Compute once when geometry is published, rather than scan vertices per view.
+pub fn surface_bounds<const N: usize>(
+    vertices: &[[u8; N]],
+    indices: &[u32],
+    ranges: &[(u32, u32)],
+) -> Vec<Option<([f32; 3], f32)>> {
+    ranges
+        .iter()
+        .map(|&(start, count)| {
+            let mut lo = [f32::INFINITY; 3];
+            let mut hi = [f32::NEG_INFINITY; 3];
+            for &index in
+                indices.get(start as usize..(start as usize).checked_add(count as usize)?)?
+            {
+                let vertex = vertices.get(index as usize)?;
+                for axis in 0..3 {
+                    let at = axis * 4;
+                    let value = f32::from_le_bytes(vertex.get(at..at + 4)?.try_into().ok()?);
+                    if !value.is_finite() {
+                        return None;
+                    }
+                    lo[axis] = lo[axis].min(value);
+                    hi[axis] = hi[axis].max(value);
+                }
+            }
+            if count == 0 {
+                return None;
+            }
+            let center = std::array::from_fn(|i| (lo[i] + hi[i]) * 0.5);
+            let radius = (0..3)
+                .map(|i| (hi[i] - center[i]).powi(2))
+                .sum::<f32>()
+                .sqrt();
+            Some((center, radius))
+        })
+        .collect()
 }
 
 #[derive(Resource, Clone, Debug, Default)]
@@ -40,7 +81,6 @@ impl std::ops::Deref for InstalledRenderWorld {
 #[derive(Clone, Debug, Default)]
 pub struct RenderWorldData {
     pub generation: MaterialGenerationId,
-    pub world_generation: frame::WorldStamp,
     pub world_products: frame::WorldProducts,
     pub smc_revision: Option<u64>,
     pub ports: Arc<Vec<crate::drawsurf::AdmittedExactPort>>,
@@ -57,6 +97,40 @@ pub struct RenderWorldData {
     pub sun_effects: Option<render_frame::SunEffectsDef>,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct StaticGeometryIdentity {
+    pub world_products: frame::WorldProducts,
+    pub world_vertex_count: usize,
+    pub world_index_count: usize,
+    pub world_layer_count: usize,
+    pub smodel_vertex_count: usize,
+    pub smodel_index_count: usize,
+}
+
+impl StaticGeometryIdentity {
+    pub fn matches(self, other: Self) -> bool {
+        self.world_products.same_as(other.world_products)
+            && self.world_vertex_count == other.world_vertex_count
+            && self.world_index_count == other.world_index_count
+            && self.world_layer_count == other.world_layer_count
+            && self.smodel_vertex_count == other.smodel_vertex_count
+            && self.smodel_index_count == other.smodel_index_count
+    }
+}
+
+impl RenderWorldData {
+    pub fn static_geometry_identity(&self) -> StaticGeometryIdentity {
+        StaticGeometryIdentity {
+            world_products: self.world_products,
+            world_vertex_count: self.static_geometry.world_vertices.len(),
+            world_index_count: self.static_geometry.world_indices.len(),
+            world_layer_count: self.static_geometry.world_layer.len(),
+            smodel_vertex_count: self.static_geometry.smodel_vertices.len(),
+            smodel_index_count: self.static_geometry.smodel_indices.len(),
+        }
+    }
+}
+
 #[derive(Resource, Clone, Debug, Default)]
 pub struct PublishedRenderFrame {
     world: InstalledRenderWorld,
@@ -66,7 +140,6 @@ pub struct PublishedRenderFrame {
 impl PublishedRenderFrame {
     pub fn seal(world: InstalledRenderWorld, data: RenderFrameData) -> Self {
         assert_eq!(world.generation, data.generation);
-        assert_eq!(world.world_generation, data.world_generation);
         Self {
             world,
             data: Arc::new(data),
@@ -86,10 +159,10 @@ impl std::ops::Deref for PublishedRenderFrame {
 
 #[derive(Clone, Debug, Default)]
 pub struct RenderFrameData {
+    pub skin_refused: bool,
     pub skin_jobs: Vec<render_frame::skinning::PackedSkinJob>,
     pub frame_products: ExtractedRenderFrameProducts,
     pub generation: MaterialGenerationId,
-    pub world_generation: frame::WorldStamp,
     pub sun_shadow: Option<SunShadowForcedFrame>,
     pub sun_effects: Option<render_frame::SunEffectsFrame>,
     pub warm_pipelines: bool,
