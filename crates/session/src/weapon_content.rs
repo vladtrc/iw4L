@@ -25,6 +25,7 @@ pub(crate) fn compile(
     aliases: Vec<(String, u32)>,
     pen_table: weapon_iw4::PenetrationDepthTable,
     pen_table_loaded: bool,
+    profile: asset_core::RuntimeProfile,
 ) -> Result<PreparedSimWeapons, &'static str> {
     let rules = WeaponHostRules::default();
     let aliases: Vec<_> = weapons.native_script_aliases().chain(aliases).collect();
@@ -62,6 +63,11 @@ pub(crate) fn compile(
             })
             .unwrap_or(sim::WeaponScriptSounds::default());
         sim::SimWeaponRow {
+            thermal_scope: weapon.hud_facts().is_some_and(|facts| facts.thermal_scope),
+            item: weapon.item_ammo_facts().map(|ammo| sim::WeaponItemFacts {
+                ammo,
+                alternate: weapons.alternate_of(id),
+            }),
             unlock_requirement: weapons.weapon_unlock_requirement(id).map_err(str::to_owned),
             wire_id: id,
             scales: weapon.movement_scales(),
@@ -80,6 +86,7 @@ pub(crate) fn compile(
                 .unwrap_or(weapon_iw4::BulletPenFacts::default()),
             script_name: weapons.script_name_of(id),
             setup,
+            clip_model: weapons.clip_model_of(id).unwrap_or("").to_owned(),
             world_model: (
                 weapons.world_model_of(id).unwrap_or("").to_owned(),
                 weapons.hide_tags_of(id).to_vec(),
@@ -93,9 +100,14 @@ pub(crate) fn compile(
                 .unwrap_or(sim::EquipmentRuntimeFacts::default()),
         }
     });
-    let ranks = weapons
-        .rank_progression()
-        .map_err(|_| "invalid rank progression")?;
+    let ranks = match profile {
+        asset_core::RuntimeProfile::Multiplayer => Some(
+            weapons
+                .rank_progression()
+                .map_err(|_| "invalid rank progression")?,
+        ),
+        asset_core::RuntimeProfile::Campaign => None,
+    };
     let content =
         sim::SimWeaponContent::compile(rows, aliases, pen_table, pen_table_loaded, ranks)?;
     if !refused.is_empty() {

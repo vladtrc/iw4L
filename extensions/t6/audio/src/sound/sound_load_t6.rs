@@ -234,6 +234,7 @@ pub fn capture_t6_sounds<'n>(
             let curves = le32(row, SND_ALIAS_FLAGS0 + 4);
             let pan = globals.pans.get(usize::from(row[92]));
             aliases.push(CapturedAlias {
+                slave_percentage: None,
                 secondary,
                 loaded_name: Some(loaded_name.clone()),
                 loaded: AssetEdge::Unresolved(AssetEdgeReason::CatalogMiss),

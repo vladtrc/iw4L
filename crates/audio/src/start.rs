@@ -61,6 +61,7 @@ pub enum StartFailure {
     NoFalloffCurve,
     UnsupportedSpatialPolicy(asset_core::FamilyId),
     MissingChannelPolicy(asset_core::FamilyId),
+    InvalidMasterSlavePolicy,
     FalloffEval,
     DecodeFailed,
     UnsupportedCodec(asset_audio::ExternalAudioCodec),
@@ -126,6 +127,9 @@ impl fmt::Display for StartOutcome {
             }
             Self::Failed(StartFailure::MissingChannelPolicy(namespace)) => {
                 write!(f, "MissingChannelPolicy{namespace:?}")
+            }
+            Self::Failed(StartFailure::InvalidMasterSlavePolicy) => {
+                f.write_str("InvalidMasterSlavePolicy")
             }
             Self::Failed(StartFailure::FalloffEval) => f.write_str("FailedFalloffEval"),
             Self::Failed(StartFailure::MediaRequestLimit) => f.write_str("FailedMediaRequestLimit"),

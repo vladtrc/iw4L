@@ -24,6 +24,111 @@ pub(crate) fn fanout_script_audio(
 
 pub(crate) fn encode_script_audio(out: &mut WireWriter, command: &ScriptAudioCommand) {
     match command {
+        ScriptAudioCommand::EntitySound {
+            entity,
+            alias_index,
+            alias,
+            origin,
+            completion_client,
+            master,
+        } => {
+            out.put_u8(11);
+            out.put_u16(*entity);
+            out.put_u16(*alias_index);
+            out.put_u8(u8::from(*master));
+            out.put_u32(completion_client.0);
+            out.put_u16(alias.len() as u16);
+            out.put_bytes(alias.as_bytes());
+            for value in origin {
+                out.put_f32(*value);
+            }
+        }
+        ScriptAudioCommand::EqBands {
+            client,
+            channel,
+            track,
+            filters,
+        } => {
+            out.put_u8(10);
+            out.put_u32(client.0);
+            out.put_u8(*track);
+            out.put_u8(channel.len() as u8);
+            out.put_bytes(channel.as_bytes());
+            out.put_u8(filters.len() as u8);
+            for filter in filters {
+                out.put_u8(filter.kind);
+                out.put_f32(filter.gain_db);
+                out.put_f32(filter.frequency);
+                out.put_f32(filter.q);
+            }
+        }
+        ScriptAudioCommand::Eq {
+            client,
+            channel,
+            track,
+            band,
+            filter,
+        } => {
+            out.put_u8(7);
+            out.put_u32(client.0);
+            out.put_u8(*track);
+            out.put_u8(*band);
+            out.put_u8(channel.len() as u8);
+            out.put_bytes(channel.as_bytes());
+            out.put_u8(filter.kind);
+            out.put_f32(filter.gain_db);
+            out.put_f32(filter.frequency);
+            out.put_f32(filter.q);
+        }
+        ScriptAudioCommand::DeactivateEq {
+            client,
+            track,
+            channel,
+            band,
+        } => {
+            out.put_u8(8);
+            out.put_u32(client.0);
+            out.put_u8(*track);
+            out.put_u8(u8::from(channel.is_some()));
+            if let Some(channel) = channel {
+                out.put_u8(channel.len() as u8);
+                out.put_bytes(channel.as_bytes());
+            }
+            out.put_u8(band.unwrap_or(255));
+        }
+        ScriptAudioCommand::EqLerp { client, fraction } => {
+            out.put_u8(9);
+            out.put_u32(client.0);
+            out.put_f32(*fraction);
+        }
+
+        ScriptAudioCommand::Reverb {
+            client,
+            priority,
+            room,
+            dry,
+            wet,
+            fade_ms,
+        } => {
+            out.put_u8(5);
+            out.put_u32(client.0);
+            out.put_u8(*priority);
+            out.put_u16(room.len() as u16);
+            out.put_bytes(room.as_bytes());
+            out.put_f32(*dry);
+            out.put_f32(*wet);
+            out.put_i32(*fade_ms);
+        }
+        ScriptAudioCommand::DeactivateReverb {
+            client,
+            priority,
+            fade_ms,
+        } => {
+            out.put_u8(6);
+            out.put_u32(client.0);
+            out.put_u8(*priority);
+            out.put_i32(*fade_ms);
+        }
         ScriptAudioCommand::ChannelVolumes {
             client,
             priority,
@@ -76,7 +181,124 @@ pub(crate) fn encode_script_audio(out: &mut WireWriter, command: &ScriptAudioCom
 pub(crate) fn decode_script_audio(
     input: &mut WireReader<'_>,
 ) -> Result<ScriptAudioCommand, WireError> {
+    fn channel(input: &mut WireReader<'_>) -> Result<String, WireError> {
+        let len = input.get_u8()? as usize;
+        if len > 64 {
+            return Err(WireError::Malformed("EQ channel exceeds limit"));
+        }
+        let mut bytes = vec![0; len];
+        input.get_bytes(&mut bytes)?;
+        String::from_utf8(bytes).map_err(|_| WireError::Malformed("EQ channel is not UTF-8"))
+    }
     let command = match input.get_u8()? {
+        11 => {
+            let entity = input.get_u16()?;
+            let alias_index = input.get_u16()?;
+            let master = match input.get_u8()? {
+                0 => false,
+                1 => true,
+                _ => return Err(WireError::Malformed("invalid entity sound master flag")),
+            };
+            let completion_client = ClientId(input.get_u32()?);
+            let len = input.get_u16()? as usize;
+            if len > 1023 {
+                return Err(WireError::Malformed("entity sound alias exceeds limit"));
+            }
+            let mut bytes = vec![0; len];
+            input.get_bytes(&mut bytes)?;
+            let alias = String::from_utf8(bytes)
+                .map_err(|_| WireError::Malformed("entity sound alias is not UTF-8"))?;
+            let origin = [input.get_f32()?, input.get_f32()?, input.get_f32()?];
+            ScriptAudioCommand::EntitySound {
+                entity,
+                alias_index,
+                alias,
+                origin,
+                completion_client,
+                master,
+            }
+        }
+        10 => {
+            let client = ClientId(input.get_u32()?);
+            let track = input.get_u8()?;
+            let channel = channel(input)?;
+            let count = input.get_u8()?;
+            if !(1..=3).contains(&count) {
+                return Err(WireError::Malformed("invalid EQ band count"));
+            }
+            let mut filters = Vec::new();
+            for _ in 0..count {
+                filters.push(sim::ScriptEqBand {
+                    kind: input.get_u8()?,
+                    gain_db: input.get_f32()?,
+                    frequency: input.get_f32()?,
+                    q: input.get_f32()?,
+                });
+            }
+            ScriptAudioCommand::EqBands {
+                client,
+                channel,
+                track,
+                filters,
+            }
+        }
+        7 => ScriptAudioCommand::Eq {
+            client: ClientId(input.get_u32()?),
+            track: input.get_u8()?,
+            band: input.get_u8()?,
+            channel: channel(input)?,
+            filter: sim::ScriptEqBand {
+                kind: input.get_u8()?,
+                gain_db: input.get_f32()?,
+                frequency: input.get_f32()?,
+                q: input.get_f32()?,
+            },
+        },
+        8 => {
+            let client = ClientId(input.get_u32()?);
+            let track = input.get_u8()?;
+            let channel = match input.get_u8()? {
+                0 => None,
+                1 => Some(channel(input)?),
+                _ => return Err(WireError::Malformed("invalid EQ channel tag")),
+            };
+            let band = input.get_u8()?;
+            ScriptAudioCommand::DeactivateEq {
+                client,
+                track,
+                channel,
+                band: (band != 255).then_some(band),
+            }
+        }
+        9 => ScriptAudioCommand::EqLerp {
+            client: ClientId(input.get_u32()?),
+            fraction: input.get_f32()?,
+        },
+        5 => {
+            let client = ClientId(input.get_u32()?);
+            let priority = input.get_u8()?;
+            let len = input.get_u16()? as usize;
+            if len > 1023 {
+                return Err(WireError::Malformed("room name exceeds limit"));
+            }
+            let mut bytes = vec![0; len];
+            input.get_bytes(&mut bytes)?;
+            let room = String::from_utf8(bytes)
+                .map_err(|_| WireError::Malformed("room name is not UTF-8"))?;
+            ScriptAudioCommand::Reverb {
+                client,
+                priority,
+                room,
+                dry: input.get_f32()?,
+                wet: input.get_f32()?,
+                fade_ms: input.get_i32()?,
+            }
+        }
+        6 => ScriptAudioCommand::DeactivateReverb {
+            client: ClientId(input.get_u32()?),
+            priority: input.get_u8()?,
+            fade_ms: input.get_i32()?,
+        },
         3 => {
             let client = ClientId(input.get_u32()?);
             let priority = input.get_u8()?;

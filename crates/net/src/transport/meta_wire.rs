@@ -156,6 +156,8 @@ wire_enum!(ClientAction, "unknown ClientAction tag" {
     24 => Chat { team_only, text: Bytes },
     25 => ToggleProjectileFlight,
     26 => EndGracePeriod,
+    27 => InputCommand { command },
+    28 => SoundDone { entity, alias_index },
 });
 
 pub fn encode_actions(out: &mut WireWriter, actions: &[(ClientId, ClientAction)]) {
@@ -284,6 +286,7 @@ pub fn encode_snapshot_meta_body(
     meta.corpses.put(out);
     close(out, &mut sizes.corpses);
     meta.entities.put(out);
+    meta.eq_disabled_entities.put(out);
     close(out, &mut sizes.entities);
     meta.script_movers.put(out);
     close(out, &mut sizes.script_movers);
@@ -295,6 +298,7 @@ pub fn encode_snapshot_meta_body(
     meta.area_entities.put(out);
     close(out, &mut sizes.area_entities);
     meta.objectives.put(out);
+    meta.campaign_dvars.put(out);
     close(out, &mut sizes.objectives);
     sizes
 }
@@ -363,6 +367,15 @@ fn decode_body(
     let corpses = Wire::get(input)?;
     remaining_after[4] = input.remaining();
     let entities = Wire::get(input)?;
+    let eq_disabled_entities: Vec<u16> = Wire::get(input)?;
+    if eq_disabled_entities.len() > 2048
+        || eq_disabled_entities.iter().any(|number| *number >= 2048)
+        || eq_disabled_entities
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+    {
+        return Err(WireError::Malformed("invalid sound entity EQ bypass list"));
+    }
     remaining_after[5] = input.remaining();
     let script_movers = Wire::get(input)?;
     remaining_after[6] = input.remaining();
@@ -374,8 +387,10 @@ fn decode_body(
     let area_entities = Wire::get(input)?;
     remaining_after[9] = input.remaining();
     let objectives = Wire::get(input)?;
+    let campaign_dvars = Wire::get(input)?;
     remaining_after[10] = input.remaining();
     Ok(SnapshotMeta {
+        campaign_dvars,
         phase,
         round_serial,
         match_elapsed_ms,
@@ -397,6 +412,7 @@ fn decode_body(
         entity_dobjs,
         entities,
         script_movers,
+        eq_disabled_entities,
         generations,
         corpses,
         item_ammo,
@@ -682,6 +698,14 @@ impl Wire for ClientSnapshotMeta {
         put_hud_bank(out, &self.hud_current);
         self.ffa_team.put(out);
         self.client_state_team.put(out);
+        self.viewmodel.put(out);
+        self.actor_overlay.is_some().put(out);
+        if let Some(overlay) = &self.actor_overlay {
+            overlay.entity.put(out);
+            overlay.name.put(out);
+            overlay.description.put(out);
+            overlay.hostile.put(out);
+        }
         self.rank.put(out);
         self.prestige.put(out);
         self.player_card_icon.put(out);
@@ -747,6 +771,21 @@ impl Wire for ClientSnapshotMeta {
         let hud_current = get_hud_bank(input)?;
         let ffa_team = Wire::get(input)?;
         let client_state_team = Wire::get(input)?;
+        let viewmodel = Wire::get(input)?;
+        let actor_overlay = if bool::get(input)? {
+            let entity = u16::get(input)?;
+            if entity >= (playerstate_iw4::ENTITYNUM_NONE - 1) as u16 {
+                return Err(WireError::Malformed("invalid actor overlay entity"));
+            }
+            Some(sim::ActorOverlay {
+                entity,
+                name: Wire::get(input)?,
+                description: Wire::get(input)?,
+                hostile: Wire::get(input)?,
+            })
+        } else {
+            None
+        };
         let rank = Wire::get(input)?;
         let prestige = Wire::get(input)?;
         let player_card_icon = Wire::get(input)?;
@@ -808,6 +847,8 @@ impl Wire for ClientSnapshotMeta {
             hud_current,
             ffa_team,
             client_state_team,
+            viewmodel,
+            actor_overlay,
             rank,
             prestige,
             player_card_icon,
@@ -1124,6 +1165,7 @@ impl Wire for entity_iw4::EntityState {
         self.apos_tr_duration.put(out);
         self.apos_tr_delta.put(out);
         self.apos_tr_base.put(out);
+        self.solid.put(out);
         self.index.put(out);
         self.launch_time().put(out);
         self.client_num.put(out);
@@ -1150,6 +1192,7 @@ impl Wire for entity_iw4::EntityState {
             apos_tr_duration: Wire::get(input)?,
             apos_tr_delta: Wire::get(input)?,
             apos_tr_base: Wire::get(input)?,
+            solid: Wire::get(input)?,
             index: Wire::get(input)?,
             cull_dist: f32::from_bits(i32::get(input)? as u32),
             client_num: Wire::get(input)?,
@@ -1164,17 +1207,39 @@ impl Wire for entity_iw4::EntityState {
     }
 }
 
+impl Wire for sim::EntityBodyBounds {
+    fn put(&self, out: &mut WireWriter) {
+        self.midpoint.put(out);
+        self.half_size.put(out);
+        self.contents.put(out);
+    }
+    fn get(input: &mut WireReader<'_>) -> Result<Self, WireError> {
+        let value = Self {
+            midpoint: Wire::get(input)?,
+            half_size: Wire::get(input)?,
+            contents: Wire::get(input)?,
+        };
+        if !value.valid() {
+            return Err(WireError::Malformed("entity body bounds"));
+        }
+        Ok(value)
+    }
+}
+
 impl Wire for sim::ScriptMoverGentity {
     fn put(&self, out: &mut WireWriter) {
         self.id.put(out);
         self.nonsolid.put(out);
+        self.thermal_draw.put(out);
         out.put_u8(self.killcam_camera.map_or(0, |mode| mode.as_u8()));
         self.state.put(out);
+        self.body.put(out);
     }
 
     fn get(input: &mut WireReader<'_>) -> Result<Self, WireError> {
         let id = Wire::get(input)?;
         let nonsolid = Wire::get(input)?;
+        let thermal_draw = Wire::get(input)?;
         let killcam_camera = match input.get_u8()? {
             0 => None,
             1 => Some(playerstate_iw4::KillCamMode::Mode1Heli),
@@ -1184,7 +1249,9 @@ impl Wire for sim::ScriptMoverGentity {
         Ok(Self {
             id,
             state: Wire::get(input)?,
+            body: Wire::get(input)?,
             killcam_camera,
+            thermal_draw,
             nonsolid,
             ..Default::default()
         })
@@ -1197,8 +1264,14 @@ wire_struct!(DroppedItemAmmo {
     clip_l,
     stock,
     scavenger,
-    parented
+    parented,
+    authored,
+    dual_wield,
+    alternate,
 });
+
+wire_struct!(sim::ItemWeaponAmmo { weapon, clip_r, clip_l, stock, dual_wield }
+    check |ammo: &sim::ItemWeaponAmmo| ammo.weapon > 0 && ammo.clip_r >= 0 && ammo.clip_l >= 0 && ammo.stock >= 0 => "invalid alternate item ammo";);
 
 wire_struct!(ItemPickupRecord {
     seq,
@@ -1318,6 +1391,27 @@ wire_struct!(xmodel_runtime::DObjSemanticState {
     state.tag_rotations.len() <= anim_iw4::PartBits::CAPACITY
 } => "too many tag rotations";);
 
+wire_enum!(sim::ObjectiveState, "objective state" {
+    0 => Empty,
+    1 => Active,
+    2 => Invisible,
+    3 => Done,
+    4 => Current,
+    5 => Failed,
+});
+
+wire_struct!(sim::CampaignObjective {
+    index,
+    state,
+    text,
+    positions,
+    entity,
+    offset,
+    icon,
+    pointer_text,
+    ring
+});
+
 impl Wire for sim::CompassObjective {
     fn put(&self, out: &mut WireWriter) {
         self.index.put(out);
@@ -1383,7 +1477,7 @@ wire_struct!(sim::CompassVehicle {
 wire_struct!(sim::ScriptSlowMotion { from, to, start_ms, duration_ms }
     check |plan: &sim::ScriptSlowMotion| plan.valid() => "invalid slow-motion transition";);
 
-wire_struct!(sim::ScriptAmbient { alias, start_ms, end_ms }
+wire_struct!(sim::ScriptAmbient { alias, start_ms, end_ms, rate_percent }
     check |plan: &sim::ScriptAmbient| plan.valid() => "invalid ambient transition";);
 
 wire_struct!(sim::VehicleHudTarget {
@@ -1396,6 +1490,8 @@ wire_struct!(sim::VehicleHudTarget {
 wire_struct!(sim::ObjectiveMatch {
     scores,
     compass: Len8,
+    campaign: Len8,
+    campaign_mode,
     server_info,
     game_end_time,
     scripted_effects,
@@ -1419,7 +1515,24 @@ wire_struct!(sim::ObjectiveMatch {
 fn objective_tables_valid(state: &sim::ObjectiveMatch) -> bool {
     let rumbles = &state.rumble_aliases;
     let targets = &state.vehicle_targets;
-    state.earthquakes.len() <= sim::MAX_SCRIPT_EARTHQUAKES
+    state.campaign.len() <= 32
+        && state.campaign.iter().enumerate().all(|(at, row)| {
+            row.index < 32
+                && row.text.len() <= 1023
+                && row.pointer_text.len() <= 63
+                && row.icon.len() <= 63
+                && row.entity.is_none_or(|entity| entity < 2046)
+                && row
+                    .positions
+                    .iter()
+                    .flatten()
+                    .chain(&row.offset)
+                    .all(|v| v.is_finite())
+                && state.campaign[..at]
+                    .iter()
+                    .all(|old| old.index != row.index)
+        })
+        && state.earthquakes.len() <= sim::MAX_SCRIPT_EARTHQUAKES
         && rumbles.len() <= 255
         && rumbles.iter().enumerate().all(|(at, (index, name))| {
             (1..=255).contains(index)

@@ -272,6 +272,7 @@ impl ZoneLane for T5Lane {
             report.push("no GfxWorld retained — nothing to draw".into());
             let dm_spawns = dm_spawn_points_t5(&stream);
             let mut loaded = LoadedWorld {
+                weapon_assets: Default::default(),
                 scripts,
                 sound: map_sound,
                 world: PreparedWorld {
@@ -432,6 +433,7 @@ impl ZoneLane for T5Lane {
                 let max = draw.stats.max;
                 let world_bounds = draw.stats.bounds;
                 LoadedWorld {
+                    weapon_assets: Default::default(),
                     scripts,
                     sound: map_sound,
                     materials: map_materials,
@@ -489,6 +491,7 @@ impl ZoneLane for T5Lane {
                 report.push(format!("T5 world mesh: {e}"));
                 let dm_spawns = dm_spawn_points_t5(&stream);
                 let mut loaded = LoadedWorld {
+                    weapon_assets: Default::default(),
                     scripts,
                     sound: map_sound,
                     world: PreparedWorld {
@@ -519,10 +522,11 @@ impl ZoneLane for T5Lane {
         }
     }
 
-    fn load_common_mp(
+    fn load_common(
         &self,
         path: &Path,
         image: &ZoneImage,
+        _profile: asset_core::RuntimeProfile,
         progress: &LoadProgress,
         decode_color_maps: bool,
         material_seed: asset_material::MaterialCatalog,
@@ -741,13 +745,14 @@ impl ZoneLane for T5Lane {
         }
         let memory = sink.materials.image_memory();
         report.push(format!(
-            "startup material walk: zone={zone_name} assets={} materials={} images={} decoded={} fpv=0 weapons=0 (materials-only sink; not load_common_mp)",
+            "startup material walk: zone={zone_name} assets={} materials={} images={} decoded={} fpv=0 weapons=0 (materials-only sink; not load_common)",
             sink.walked,
             sink.materials.materials.len(),
             memory.images,
             memory.decoded_images,
         ));
         MaterialPopulation {
+            xanims: Default::default(),
             walked: sink.walked,
             light_defs: Vec::new(),
             materials: sink.materials,

@@ -151,6 +151,7 @@ pub(crate) struct Hit {
     pub weapon: u32,
     pub point: [f32; 3],
     pub dir: [f32; 3],
+    pub direction_present: bool,
     pub hitloc: u8,
     pub inflictor: Option<HitInflictor>,
     pub commit: Option<DeathCommit>,
@@ -231,6 +232,7 @@ pub(crate) fn damage(
         weapon: intent.weapon,
         point: intent.inflictor_origin.unwrap_or(victim_origin),
         dir: normalized([0, 1, 2].map(|i| victim_origin[i] - from[i])),
+        direction_present: true,
         hitloc: intent.hitloc,
         inflictor: match intent.source {
             DamageSource::Projectile(id) => Some(HitInflictor::Projectile(id)),
@@ -275,6 +277,7 @@ pub(crate) fn debug_damage(world: &mut FrameWorld, tick: Tick, id: ClientId, amo
         weapon: 0,
         point: origin,
         dir: [0.0; 3],
+        direction_present: false,
         hitloc: 0,
         inflictor: None,
         commit: None,

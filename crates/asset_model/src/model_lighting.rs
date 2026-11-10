@@ -5,9 +5,8 @@ use lighting_iw4::{
     LIGHT_GRID_COLORS_BYTE_COUNT, LIGHT_GRID_COMPRESS_DIRS, LIGHT_GRID_ROW_ABSENT,
     LIGHT_GRID_ROW_HEADER_SIZE, LightGridAtPointEmptyGate, LightGridAtPointPath,
     LightGridEntryQuad, LightGridLookupCorner, LightGridPickCorner, LightGridRowHeader,
-    MODEL_LIGHTING_TILE_BYTES, decode_model_lighting_sample, light_grid_accumulate_colors,
-    light_grid_at_row_last_column, light_grid_atapoint_return_primary,
-    light_grid_atapoint_select_path, light_grid_axis_lerps,
+    MODEL_LIGHTING_TILE_BYTES, decode_model_lighting_sample, light_grid_at_row_last_column,
+    light_grid_atapoint_return_primary, light_grid_atapoint_select_path, light_grid_axis_lerps,
     light_grid_column_before_row_start_quad, light_grid_compress_colors,
     light_grid_corner_needs_trace, light_grid_corner_weight_keeps_entry, light_grid_corner_weights,
     light_grid_default_colors_index, light_grid_empty_run_entry_quad,
@@ -72,6 +71,7 @@ pub struct OwnedLightGrid {
     pub entries: Vec<u8>,
     pub colors: Vec<u8>,
     pub codec: &'static LightGridCodec,
+    pub hero_lights: Vec<lighting_iw4::HeroOnlyLight>,
 }
 
 impl OwnedLightGrid {
@@ -120,7 +120,17 @@ impl OwnedLightGrid {
             .slice_at(colors, 0, grid.color_count * LIGHT_GRID_COLORS_BYTE_COUNT)
             .ok()?
             .to_vec();
+        let mut hero_lights = Vec::with_capacity(grid.hero_light_count);
+        if grid.hero_light_count != 0 {
+            let bytes = stream
+                .slice_at(grid.hero_lights?, 0, grid.hero_light_count.checked_mul(56)?)
+                .ok()?;
+            for bytes in bytes.as_chunks::<56>().0 {
+                hero_lights.push(lighting_iw4::HeroOnlyLight::from_le_bytes(bytes)?);
+            }
+        }
         Some(Self {
+            hero_lights,
             mins: grid.mins,
             maxs: grid.maxs,
             row_axis: grid.row_axis as usize,
@@ -370,7 +380,7 @@ pub fn sample_light_grid(
     grid: &GridView<'_>,
     pos: [f32; 3],
 ) -> Result<SampledLighting, BlockedReason> {
-    sample_light_grid_at(grid, pos, None, LIGHT_GRID_ATPOINT_EMPTY_PRIMARY)
+    sample_light_grid_at(grid, pos, None, LIGHT_GRID_ATPOINT_EMPTY_PRIMARY, None, &[])
 }
 
 pub fn sample_light_grid_with_sight(
@@ -378,7 +388,14 @@ pub fn sample_light_grid_with_sight(
     pos: [f32; 3],
     sight_clear: Option<&dyn Fn([f32; 3], [f32; 3]) -> bool>,
 ) -> Result<SampledLighting, BlockedReason> {
-    sample_light_grid_at(grid, pos, sight_clear, LIGHT_GRID_ATPOINT_EMPTY_PRIMARY)
+    sample_light_grid_at(
+        grid,
+        pos,
+        sight_clear,
+        LIGHT_GRID_ATPOINT_EMPTY_PRIMARY,
+        None,
+        &[],
+    )
 }
 
 pub fn sample_light_grid_with_lookup_fallback(
@@ -386,7 +403,26 @@ pub fn sample_light_grid_with_lookup_fallback(
     pos: [f32; 3],
     lookup_fallback: u8,
 ) -> Result<SampledLighting, BlockedReason> {
-    sample_light_grid_at(grid, pos, None, lookup_fallback)
+    sample_light_grid_at(grid, pos, None, lookup_fallback, None, &[])
+}
+
+pub fn sample_light_grid_with_tweaks(
+    grid: &GridView<'_>,
+    pos: [f32; 3],
+    lookup_fallback: u8,
+    tweaks: Option<lighting_iw4::LightGridTweaks>,
+) -> Result<SampledLighting, BlockedReason> {
+    sample_light_grid_at(grid, pos, None, lookup_fallback, tweaks, &[])
+}
+
+pub fn sample_light_grid_with_hero_lights(
+    grid: &GridView<'_>,
+    pos: [f32; 3],
+    lookup_fallback: u8,
+    tweaks: Option<lighting_iw4::LightGridTweaks>,
+    hero_lights: &[lighting_iw4::HeroOnlyLight],
+) -> Result<SampledLighting, BlockedReason> {
+    sample_light_grid_at(grid, pos, None, lookup_fallback, tweaks, hero_lights)
 }
 
 fn sample_light_grid_at(
@@ -394,6 +430,8 @@ fn sample_light_grid_at(
     pos: [f32; 3],
     sight_clear: Option<&dyn Fn([f32; 3], [f32; 3]) -> bool>,
     lookup_fallback: u8,
+    tweaks: Option<lighting_iw4::LightGridTweaks>,
+    hero_lights: &[lighting_iw4::HeroOnlyLight],
 ) -> Result<SampledLighting, BlockedReason> {
     let cell = light_grid_sample_cell(pos);
     let lerps = light_grid_axis_lerps(pos, cell, grid.row_axis as u32, grid.col_axis as u32);
@@ -597,7 +635,12 @@ fn sample_light_grid_at(
                 {
                     return Err(BlockedReason::NoLiveCorner);
                 }
-                if !light_grid_accumulate_colors(&rows, &fixed[..count], &mut colors) {
+                if !lighting_iw4::light_grid_accumulate_colors_with_tweaks(
+                    &rows,
+                    &fixed[..count],
+                    &mut colors,
+                    tweaks,
+                ) {
                     return Err(BlockedReason::TruncatedZoneData);
                 }
             }
@@ -618,6 +661,27 @@ fn sample_light_grid_at(
             }
         }
 
+        let single_index = match path {
+            LightGridAtPointPath::SetFromIndex => Some(u32::from(accum.indices[0])),
+            LightGridAtPointPath::MissingUseIndex => Some(default_grid_entry),
+            _ => None,
+        };
+        let character_row = single_index
+            .is_some_and(|index| Some(index) != light_grid_default_colors_index(grid.color_count));
+        if character_row {
+            lighting_iw4::add_hero_only_lights(&mut colors, pos, hero_lights);
+        }
+        if single_index.is_some()
+            && let Some(tweaks) = tweaks.filter(|tweaks| tweaks.valid())
+        {
+            let mut accum = [0u16; lighting_iw4::LIGHT_GRID_COLORS_ACCUM_COUNT];
+            lighting_iw4::light_grid_expand_colors(&colors, 256, &mut accum);
+            tweaks.apply(&mut accum);
+            lighting_iw4::light_grid_pack_colors(&accum, &mut colors);
+        }
+        if path == LightGridAtPointPath::BlendAndSet {
+            lighting_iw4::add_hero_only_lights(&mut colors, pos, hero_lights);
+        }
         let Some(compressed) = light_grid_compress_colors(&colors, 0xff) else {
             return Err(BlockedReason::TruncatedZoneData);
         };

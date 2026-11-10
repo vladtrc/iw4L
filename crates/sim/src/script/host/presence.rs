@@ -15,8 +15,12 @@ pub(crate) struct Shown {
     model: Option<Arc<str>>,
     attachments: Vec<(Arc<str>, Arc<str>)>,
     hidden: bool,
+    thermal_draw: bool,
+    hero_lighting: bool,
+    aim_assist: bool,
     shown_to: u64,
     solid: bool,
+    contents: i32,
     moving: bool,
 }
 
@@ -29,8 +33,12 @@ struct Wanted {
     model: Option<Arc<str>>,
     attachments: Vec<(Arc<str>, Arc<str>)>,
     hidden: bool,
+    thermal_draw: bool,
+    hero_lighting: bool,
+    aim_assist: bool,
     shown_to: u64,
     solid: bool,
+    contents: i32,
     part_ops: Vec<(Arc<str>, bool)>,
     anim_op: Option<Option<Arc<str>>>,
 }
@@ -110,21 +118,39 @@ pub fn settled(world: &mut World) -> FrameWorld<'_> {
     FrameWorld::from_world(world)
 }
 
+struct CollisionPlacement {
+    origin: [f32; 3],
+    angles: [f32; 3],
+    hidden: bool,
+    solid: bool,
+    contents: i32,
+}
+
 /// Collision rows only. Networked mover state is left to `present`: posing a
 /// mover mid-tick would break its tick-to-tick velocity.
 pub(crate) fn settle_collision(world: &mut World) {
+    super::animations::settle_actor_trees(world);
     let mut runtime = world.resource_mut::<RoundScript>();
-    let placed: Vec<(u64, ScriptModelId, bool, bool)> = runtime
+    let placed: Vec<(u64, ScriptModelId, bool, bool, i32)> = runtime
         .entities
         .iter()
-        .filter_map(|(id, e)| Some((*id, e.presence?, e.hidden, e.solid)))
+        .filter_map(|(id, e)| Some((*id, e.presence?, e.hidden, e.solid, e.contents)))
         .collect();
-    let wanted: BTreeMap<ScriptModelId, ([f32; 3], [f32; 3], bool, bool)> = placed
+    let wanted: BTreeMap<ScriptModelId, CollisionPlacement> = placed
         .into_iter()
-        .map(|(object, presence, hidden, solid)| {
+        .map(|(object, presence, hidden, solid, contents)| {
             let origin = vector(&mut runtime, object, "origin");
             let angles = vector(&mut runtime, object, "angles");
-            (presence, (origin, angles, hidden, solid))
+            (
+                presence,
+                CollisionPlacement {
+                    origin,
+                    angles,
+                    hidden,
+                    solid,
+                    contents,
+                },
+            )
         })
         .collect();
     let turrets: Vec<_> = runtime
@@ -148,13 +174,21 @@ pub(crate) fn settle_collision(world: &mut World) {
         .collect();
     let mut frame = FrameWorld::from_world(world);
     for row in frame.entity_collision_capabilities_mut() {
-        let Some(&(origin, angles, hidden, solid)) =
-            row.owner.script_model().and_then(|id| wanted.get(&id))
+        let Some(&CollisionPlacement {
+            origin,
+            angles,
+            hidden,
+            solid,
+            contents,
+        }) = row.owner.script_model().and_then(|id| wanted.get(&id))
         else {
             continue;
         };
         row.hidden = hidden;
         row.solid = solid;
+        if let Some(body) = &mut row.body {
+            body.bounds.contents = contents as u32;
+        }
         if let Some(rotations) = row.owner.script_model().and_then(|id| rotations.get(&id))
             && let Some(dobj) = row.dobj.as_mut()
         {
@@ -167,6 +201,9 @@ pub(crate) fn settle_collision(world: &mut World) {
             continue;
         }
         row.followed_pose = Some((origin, angles));
+        if let Some(body) = &mut row.body {
+            body.origin = origin;
+        }
         if let Some(dobj) = row.dobj.as_mut() {
             dobj.set_world_pose(origin, angles);
         }
@@ -183,11 +220,63 @@ pub(crate) fn sync_presence(world: &mut World) {
     let now = crate::level_time_ms(tick);
     settle_collision(world);
     super::entity_damage::apply_script_blasts(world, tick);
+    super::audio::waits::advance(world);
     publish_loop_sounds(world);
     super::objectives::publish(world);
     super::controls::sync_script_locks(world);
     super::triggers::dispatch_triggers(world);
+    super::actors::suppression::advance(world, now);
+    if let Err(message) = super::actors::scripted::think(world, now) {
+        world.resource_mut::<RoundScript>().fault = Some(crate::script::Fault::at(
+            &crate::script::Location {
+                module: "<engine>".into(),
+                function: "actor scripted animation".into(),
+                line: 0,
+                column: 0,
+            },
+            message,
+        ));
+        return;
+    }
+    if let Err(message) = super::actors::orientation::advance(world) {
+        world.resource_mut::<RoundScript>().fault = Some(crate::script::Fault::at(
+            &crate::script::Location {
+                module: "<engine>".into(),
+                function: "actor orientation".into(),
+                line: 0,
+                column: 0,
+            },
+            message,
+        ));
+        return;
+    }
+    if let Err(message) = super::actors::physics::advance(world) {
+        world.resource_mut::<RoundScript>().fault = Some(crate::script::Fault::at(
+            &crate::script::Location {
+                module: "<engine>".into(),
+                function: "actor physics".into(),
+                line: 0,
+                column: 0,
+            },
+            message,
+        ));
+        return;
+    }
+    settle_collision(world);
     present(world, now);
+    if let Err(message) = super::actors::goals::advance(world, now) {
+        world.resource_mut::<RoundScript>().fault = Some(crate::script::Fault::at(
+            &crate::script::Location {
+                module: "<engine>".into(),
+                function: "actor goal update".into(),
+                line: 0,
+                column: 0,
+            },
+            message,
+        ));
+        return;
+    }
+    super::animations::publish(world);
     publish_killcam_cameras(world);
     settle_collision(world);
     resolve_link_tags(world);
@@ -262,8 +351,12 @@ fn present(world: &mut World, now: i32) {
                 .map(|dobj| dobj.current_model.as_str().into()),
             attachments: Vec::new(),
             hidden: mover.state.e_flags & entity_iw4::CG_SCRIPT_MOVER_NODRAW != 0,
+            thermal_draw: mover.thermal_draw,
+            hero_lighting: mover.state.e_flags & entity_iw4::SP_HERO_ONLY_LIGHTING != 0,
+            aim_assist: mover.state.e_flags & entity_iw4::SP_SCRIPT_MODEL_AIM_ASSIST != 0,
             shown_to: mover.shown_to,
             solid: !mover.nonsolid,
+            contents: mover.body.map_or(0, |body| body.contents as i32),
             moving: false,
         });
         let posed = !near(shown.origin, want.origin) || !near_angles(shown.angles, want.angles);
@@ -274,7 +367,21 @@ fn present(world: &mut World, now: i32) {
                 mover.state.e_flags &= !entity_iw4::CG_SCRIPT_MOVER_NODRAW;
             }
             mover.nonsolid = !want.solid;
+            if let Some(body) = &mut mover.body {
+                body.contents = want.contents as u32;
+            }
             mover.shown_to = want.shown_to;
+            mover.thermal_draw = want.thermal_draw;
+            if want.aim_assist {
+                mover.state.e_flags |= entity_iw4::SP_SCRIPT_MODEL_AIM_ASSIST;
+            } else {
+                mover.state.e_flags &= !entity_iw4::SP_SCRIPT_MODEL_AIM_ASSIST;
+            }
+            if want.hero_lighting {
+                mover.state.e_flags |= entity_iw4::SP_HERO_ONLY_LIGHTING;
+            } else {
+                mover.state.e_flags &= !entity_iw4::SP_HERO_ONLY_LIGHTING;
+            }
         }
         if posed || shown.moving {
             frame.set_script_mover_pose(mover.state.number, now, want.origin, want.angles);
@@ -292,8 +399,12 @@ fn present(world: &mut World, now: i32) {
                 model: want.model,
                 attachments: want.attachments,
                 hidden: want.hidden,
+                thermal_draw: want.thermal_draw,
+                hero_lighting: want.hero_lighting,
+                aim_assist: want.aim_assist,
                 shown_to: want.shown_to,
                 solid: want.solid,
+                contents: want.contents,
                 moving: posed,
             },
         ));
@@ -423,13 +534,24 @@ fn collect_wanted(world: &mut World) -> Vec<Wanted> {
         let anim_op = entity.anim_op.take();
         let attachments = entity.attachments.clone();
         let collision_only = matches!(entity.kind, EntityKind::Missile(_));
+        let contents = entity.contents;
+        let aim_assist = entity.aim_assist;
+        let hero_lighting = entity.hero_only_lighting || runtime.actors.contains_key(&object);
+        let thermal_draw = runtime
+            .actors
+            .get(&object)
+            .is_some_and(|actor| actor.thermal_draw);
         let unchanged = part_ops.is_empty()
             && anim_op.is_none()
             && runtime.shown.get(&object).is_some_and(|shown| {
                 !shown.moving
                     && shown.hidden == hidden
+                    && shown.thermal_draw == thermal_draw
+                    && shown.hero_lighting == hero_lighting
+                    && shown.aim_assist == aim_assist
                     && shown.shown_to == shown_to
                     && shown.solid == solid
+                    && shown.contents == contents
                     && shown.model == model
                     && shown.attachments == attachments
                     && near(shown.origin, origin)
@@ -447,9 +569,13 @@ fn collect_wanted(world: &mut World) -> Vec<Wanted> {
             model,
             attachments,
             hidden,
+            thermal_draw,
+            hero_lighting,
+            aim_assist,
             shown_to,
             solid,
             part_ops,
+            contents,
             anim_op,
         });
     }

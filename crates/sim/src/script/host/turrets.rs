@@ -569,6 +569,7 @@ pub(crate) fn fire_bullet(
         | ColliderId::EntityDObjBone { surface_flags, .. }
         | ColliderId::EntityLinkedBrush { surface_flags, .. } => surface_flags,
         ColliderId::Player { .. } => 0,
+        ColliderId::EntityBody { .. } => weapon_iw4::SURF_TYPE_FLESH << 20,
     };
     let surf_type = if matches!(collider, ColliderId::Player { .. }) {
         weapon_iw4::SURF_TYPE_FLESH as u8

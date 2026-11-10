@@ -178,6 +178,7 @@ pub enum TessJob {
 
 #[derive(Resource, Default)]
 pub struct HudTessPass {
+    pub campaign_objectives: TessJob,
     pub overhead_names: TessJob,
     pub compass: TessJob,
     pub scorebar: TessJob,

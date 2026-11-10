@@ -8,7 +8,7 @@ use net::FrameClock;
 
 use crate::draw2d::{Draw2dCmd, Draw2dList, Draw2dOp, Draw2dProvenance, tessellate};
 use crate::gpu_list::{PackedList, pack_splatter_alt};
-use crate::images::{BLOOD_OVERLAY_COLOR, BLOOD_OVERLAY_MASK, HudImages, HudSampling};
+use crate::images::{HudImages, HudSampling};
 
 #[derive(Resource, Default, Clone, Debug)]
 pub(crate) struct HudRootVisible(pub Option<i32>);
@@ -114,7 +114,7 @@ impl BloodOverlay<'_, '_> {
 
         let Some(color) = self.hud_images.get_sampled_with_sampler(
             crate::images::HUD_CHROME_NAMESPACE,
-            BLOOD_OVERLAY_COLOR,
+            binding.assets.color,
             HudSampling::Data,
             Some(binding.color_sampler),
             &mut self.images,
@@ -122,7 +122,7 @@ impl BloodOverlay<'_, '_> {
             diag::warn_once!(
                 Ui,
                 "overlay image `{name}` is {miss}",
-                name = BLOOD_OVERLAY_COLOR.to_owned(),
+                name = binding.assets.color.to_owned(),
                 miss = self.hud_images.miss_reason()
             );
             self.hide();
@@ -130,7 +130,7 @@ impl BloodOverlay<'_, '_> {
         };
         let Some(mask) = self.hud_images.get_sampled_with_sampler(
             crate::images::HUD_CHROME_NAMESPACE,
-            BLOOD_OVERLAY_MASK,
+            binding.assets.mask,
             HudSampling::Data,
             Some(binding.mask_sampler),
             &mut self.images,
@@ -138,7 +138,7 @@ impl BloodOverlay<'_, '_> {
             diag::warn_once!(
                 Ui,
                 "overlay image `{name}` is {miss}",
-                name = BLOOD_OVERLAY_MASK.to_owned(),
+                name = binding.assets.mask.to_owned(),
                 miss = self.hud_images.miss_reason()
             );
             self.hide();
@@ -157,7 +157,7 @@ impl BloodOverlay<'_, '_> {
                 s1: 1.0,
                 t1: 1.0,
                 color: [1.0, 1.0, 1.0, self.latch.intensity],
-                material: BLOOD_OVERLAY_COLOR.into(),
+                material: binding.assets.color.into(),
                 op: Draw2dOp::StretchPic,
                 provenance: Draw2dProvenance::CgDraw {
                     site: "blood_overlay",

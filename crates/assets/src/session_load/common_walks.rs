@@ -11,9 +11,12 @@ pub fn load_match_material_seed(
     let root = games_root()?;
     let runtime = find_zone_file_version(&root, "common_mp", fastfile_iw4::ZONE_VERSION_PC)?;
 
-    let (catalog, mut report, _, _, _) = bevy::tasks::futures_lite::future::block_on(
-        walk_startup_material_zones(Some(&runtime.path), progress),
-    );
+    let (catalog, mut report, _, _, _, _) =
+        bevy::tasks::futures_lite::future::block_on(walk_startup_material_zones(
+            Some(&runtime.path),
+            progress,
+            asset_core::RuntimeProfile::Multiplayer,
+        ));
     let catalog = walk_supplemental_material_seed(
         Some(runtime.path.as_path()),
         progress,
@@ -246,7 +249,14 @@ pub(super) fn capture_common_zone(
             };
             Some((
                 image.game,
-                selected.load_common_mp(donor, &image, progress, true, MaterialCatalog::default()),
+                selected.load_common(
+                    donor,
+                    &image,
+                    asset_core::RuntimeProfile::Multiplayer,
+                    progress,
+                    true,
+                    MaterialCatalog::default(),
+                ),
             ))
         }
         Err(error) => {
@@ -459,6 +469,7 @@ pub(super) struct SeededSourcePrep {
     tables: Vec<CommonTables>,
 }
 
+#[derive(Default)]
 pub(super) struct SeededCommonPrep {
     sources: Vec<SeededSourcePrep>,
     report: Vec<String>,
@@ -571,7 +582,14 @@ pub(super) fn walk_seeded_common(
             report.push(format!("zone lane not installed: {}", image.game.as_str()));
             continue;
         };
-        let mut census = selected.load_common_mp(&donor, &image, progress, true, materials);
+        let mut census = selected.load_common(
+            &donor,
+            &image,
+            asset_core::RuntimeProfile::Multiplayer,
+            progress,
+            true,
+            materials,
+        );
         materials = std::mem::take(&mut census.material_population);
         for table in &tables[table_start..] {
             if table.owner() == Some(image.game) {
@@ -614,6 +632,7 @@ pub(super) struct SupplementalCommonSource {
     pub(super) tables: Vec<CommonTables>,
 }
 
+#[derive(Default)]
 pub(super) struct SupplementalCommonProducts {
     pub(super) sources: Vec<SupplementalCommonSource>,
     pub(super) images: Vec<(&'static str, HeldImagePlan)>,
@@ -729,14 +748,16 @@ pub(super) fn walk_supplemental_common(
 pub(super) async fn walk_startup_material_zones(
     map_path: Option<&PathBuf>,
     progress: &LoadProgress,
+    profile: asset_core::RuntimeProfile,
 ) -> (
     MaterialCatalog,
     Vec<String>,
     CommonTables,
     Vec<asset_world::CapturedLightDef>,
     crate::ScriptSources,
+    XAnimBuild,
 ) {
-    const STARTUP_ZONES: [&str; 3] = ["code_post_gfx_mp", "localized_code_post_gfx_mp", "patch_mp"];
+    let startup_zones = profile.startup_zones();
     let Some(map_path) = map_path else {
         return (
             MaterialCatalog::default(),
@@ -744,11 +765,14 @@ pub(super) async fn walk_startup_material_zones(
             CommonTables::default(),
             Vec::new(),
             crate::ScriptSources::default(),
+            XAnimBuild::default(),
         );
     };
     let games = games_root().ok();
 
-    let opened = STARTUP_ZONES
+    let opened = startup_zones
+        .iter()
+        .copied()
         .map(|zone| {
             let games = games.clone();
             let map_path = map_path.clone();
@@ -771,7 +795,7 @@ pub(super) async fn walk_startup_material_zones(
                 })
             })
         })
-        .into_iter();
+        .collect::<Vec<_>>();
     let mut seed = MaterialCatalog::default();
     let mut report = Vec::new();
     let mut reuse_mat = 0usize;
@@ -780,7 +804,8 @@ pub(super) async fn walk_startup_material_zones(
     let mut stats = CommonTables::default();
     let mut light_defs = Vec::new();
     let mut scripts = crate::ScriptSources::default();
-    for (zone, task) in STARTUP_ZONES.into_iter().zip(opened) {
+    let mut xanims = XAnimBuild::default();
+    for (zone, task) in startup_zones.iter().copied().zip(opened) {
         match task.await {
             Ok((path, image)) => {
                 let envelope = peek_zone_version(&path)
@@ -804,7 +829,8 @@ pub(super) async fn walk_startup_material_zones(
                 seed = pop.materials;
                 light_defs.extend(pop.light_defs);
                 scripts.overlay(pop.scripts);
-                if zone == "code_post_gfx_mp" {
+                xanims.absorb(pop.xanims);
+                if matches!(zone, "code_post_gfx_mp" | "code_post_gfx") {
                     stats = CommonTables::capture(Some(image.game), pop.cac_tables);
                 }
                 zones_ok += 1;
@@ -817,20 +843,21 @@ pub(super) async fn walk_startup_material_zones(
         "startup material decode: zones={zones_ok} decoded_images={startup_decoded} (0 is IWD deferred to absorb merge; not three parallel common_mp FPV decodes)",
     ));
     report.push(format!(
-        "startup material walk: zones={zones_ok} fpv=0 weapons=0 (materials-only sink; not load_common_mp)",
+        "startup material walk: zones={zones_ok} fpv=0 weapons=0 (startup population sink; no common census)",
     ));
     report.push(format!(
         "s2 startup walk: reuse_mat={reuse_mat} reuse_img={reuse_img} pool_mat={} pool_img={}",
         seed.materials.len(),
         seed.images.len(),
     ));
-    (seed, report, stats, light_defs, scripts)
+    (seed, report, stats, light_defs, scripts, xanims)
 }
 
 pub(super) fn load_localized_strings_beside(
     zone_ff: &std::path::Path,
     report: &mut Vec<String>,
     stage: &asset_transport::progress::StageHandle,
+    profile: asset_core::RuntimeProfile,
 ) -> LocalizeCatalog {
     let mut catalog = LocalizeCatalog::default();
     let root = match games_root() {
@@ -843,7 +870,23 @@ pub(super) fn load_localized_strings_beside(
     let runtime_language = find_runtime_common_mp(&root, zone_ff)
         .ok()
         .and_then(|zone| zone.path.parent()?.file_name()?.to_str().map(str::to_owned));
-    let planned = asset_game::plan_localization(&root, zone_ff, runtime_language.as_deref());
+    let planned = if profile == asset_core::RuntimeProfile::Campaign {
+        let mut plan = asset_game::LocalizationPlan::default();
+        for name in [
+            "code_post_gfx",
+            "localized_code_post_gfx",
+            "common",
+            "localized_common",
+            "patch",
+        ] {
+            if let Ok(found) = find_zone_for_tree(zone_ff, name) {
+                plan.sources.push((asset_core::FamilyId::IW4, found));
+            }
+        }
+        plan
+    } else {
+        asset_game::plan_localization(&root, zone_ff, runtime_language.as_deref())
+    };
     report.extend(planned.report);
     let plan = planned.sources;
     // The plan only closes once every lane has been searched: a zone that is

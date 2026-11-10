@@ -232,6 +232,7 @@ fn submit_presented_audio(
 }
 
 fn release_audio(runtime: Res<AudioRuntime>) {
+    runtime.reset_match_effects();
     runtime.stop_scope(AudioScope::MatchMusic);
     runtime.set_media_service(None);
     runtime.set_event_context(None);

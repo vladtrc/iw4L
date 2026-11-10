@@ -106,6 +106,8 @@ pub struct PreparedAtlasWorld {
 }
 
 pub struct PreparedMatch {
+    pub campaign_hud: Option<asset_game::CampaignHudCatalog>,
+    pub profile: asset_core::RuntimeProfile,
     pub ui_images: asset_material::UiImagePublication,
     pub scripts: crate::ScriptSources,
     pub world: PreparedWorld,

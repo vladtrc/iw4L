@@ -6,6 +6,7 @@ pub struct ScriptSources {
     tables: BTreeMap<String, ScriptTable>,
     schemas: BTreeMap<String, std::sync::Arc<structured_data_iw4::DefinitionSet>>,
     entities: Option<String>,
+    path_nodes: Option<std::sync::Arc<[asset_core::PathNode]>>,
     configs: BTreeMap<String, String>,
 }
 
@@ -33,6 +34,13 @@ fn normalize(name: &str) -> String {
 }
 
 impl ScriptSources {
+    pub(crate) fn set_path_nodes(&mut self, nodes: Vec<asset_core::PathNode>) {
+        self.path_nodes = Some(nodes.into());
+    }
+    pub fn path_nodes(&self) -> std::sync::Arc<[asset_core::PathNode]> {
+        self.path_nodes.clone().unwrap_or_default()
+    }
+
     pub fn text(&self, module: &str) -> Option<&str> {
         let bytes = self.sources.get(module)?.bytes.as_ref().ok()?;
         std::str::from_utf8(bytes).ok()
@@ -71,6 +79,16 @@ impl ScriptSources {
     }
 
     pub(crate) fn fx_references(&self) -> BTreeMap<String, String> {
+        self.call_string_references(b"loadfx")
+    }
+
+    pub(crate) fn script_viewmodels(&self) -> BTreeSet<String> {
+        self.call_string_references(b"setviewmodel")
+            .into_keys()
+            .collect()
+    }
+
+    fn call_string_references(&self, function: &[u8]) -> BTreeMap<String, String> {
         let mut references = BTreeMap::new();
         for (module, source) in &self.sources {
             let Ok(bytes) = &source.bytes else {
@@ -101,7 +119,7 @@ impl ScriptSources {
                     {
                         at += 1;
                     }
-                    if !bytes[start..at].eq_ignore_ascii_case(b"loadfx") {
+                    if !bytes[start..at].eq_ignore_ascii_case(function) {
                         continue;
                     }
                     let mut value = at;
@@ -164,7 +182,11 @@ impl ScriptSources {
 
     pub fn capture(&mut self, name: &str, data: &[u8], compressed: bool) {
         let name = normalize(name);
-        if name.ends_with(".cfg") || name.ends_with(".shock") || name == "radiant/keys.txt" {
+        if name.ends_with(".cfg")
+            || name.ends_with(".shock")
+            || (name.starts_with("animtrees/") && name.ends_with(".atr"))
+            || name == "radiant/keys.txt"
+        {
             if let Some(text) = asset_world::decode_rawfile_text(data, compressed) {
                 self.configs.insert(name, text);
             }
@@ -248,6 +270,9 @@ impl ScriptSources {
         self.tables.extend(other.tables);
         self.schemas.extend(other.schemas);
         self.configs.extend(other.configs);
+        if other.path_nodes.is_some() {
+            self.path_nodes = other.path_nodes;
+        }
         if other.entities.is_some() {
             self.entities = other.entities;
         }

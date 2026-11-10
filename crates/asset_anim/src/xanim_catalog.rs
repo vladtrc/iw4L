@@ -8,7 +8,7 @@ use fastfile_iw4::{
 };
 
 use crate::asset_graph::ZoneOwner;
-use crate::xanim_clip::{AnimClip, ClipNotify, RawDeltaTrans, RawXAnimParts};
+use crate::xanim_clip::{AnimClip, ClipNotify, RawDeltaQuat, RawDeltaTrans, RawXAnimParts};
 use asset_core::FamilyId;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -389,6 +389,8 @@ impl AssetLinkSink for XAnimBuild {
                 notifies,
                 indices,
                 delta_trans,
+                delta_quat2: copy_delta_quat(s, geometry.delta_quat2, 2),
+                delta_quat: copy_delta_quat(s, geometry.delta_quat, 4),
             }),
         });
         let _ = geometry.frequency;
@@ -484,5 +486,48 @@ fn copy_delta_trans(
         step,
         indices,
         packed,
+    })
+}
+
+fn copy_delta_quat(
+    s: &ZoneStream<'_>,
+    geo: fastfile_iw4::XAnimDeltaQuatGeometry,
+    components: usize,
+) -> Option<RawDeltaQuat> {
+    if geo.constant.is_none() && geo.frames.is_none() && geo.indices.is_none() {
+        return None;
+    }
+    let pointer = geo.constant.or(geo.frames);
+    let count = usize::from(geo.size) + 1;
+    let packed = copy_u16(s, pointer, count * components);
+    let values = packed
+        .chunks_exact(components)
+        .map(|chunk| {
+            if components == 2 {
+                [0, 0, chunk[0] as i16, chunk[1] as i16]
+            } else {
+                [
+                    chunk[0] as i16,
+                    chunk[1] as i16,
+                    chunk[2] as i16,
+                    chunk[3] as i16,
+                ]
+            }
+        })
+        .collect();
+    let indices = if geo.size == 0 {
+        Vec::new()
+    } else if geo.indices_are_bytes {
+        copy_u8(s, geo.indices, count)
+            .into_iter()
+            .map(u16::from)
+            .collect()
+    } else {
+        copy_u16(s, geo.indices, count)
+    };
+    Some(RawDeltaQuat {
+        size: geo.size,
+        indices,
+        values,
     })
 }

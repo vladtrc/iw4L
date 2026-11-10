@@ -18,7 +18,16 @@ pub struct LaneGap {
     pub addr: Option<&'static str>,
 }
 
+#[derive(Default)]
+pub struct MapWeaponAssets {
+    pub weapons: WeaponBuild,
+    pub world_models: WorldWeaponBuild,
+    pub projectiles: asset_model::ProjectileMeshBuild,
+    pub tracers: asset_game::TracerCatalog,
+}
+
 pub struct LoadedWorld {
+    pub weapon_assets: MapWeaponAssets,
     pub scripts: crate::ScriptSources,
     pub world: PreparedWorld,
     /// What the map zone itself captured. The local material indices in
@@ -142,6 +151,7 @@ pub trait CommonFamilyCompiler: Send {
 
 #[derive(Default)]
 pub struct MaterialPopulation {
+    pub xanims: asset_anim::XAnimBuild,
     pub materials: asset_material::MaterialCatalog,
     pub light_defs: Vec<asset_world::CapturedLightDef>,
     pub walked: usize,
@@ -191,10 +201,11 @@ pub trait ZoneLane: Send + Sync {
         )
     }
 
-    fn load_common_mp(
+    fn load_common(
         &self,
         path: &Path,
         image: &ZoneImage,
+        profile: asset_core::RuntimeProfile,
         progress: &LoadProgress,
         decode_color_maps: bool,
         material_seed: asset_material::MaterialCatalog,
@@ -213,6 +224,7 @@ impl LoadedWorld {
     pub fn empty(policy: WorldDrawPolicy) -> Self {
         Self {
             scripts: Default::default(),
+            weapon_assets: Default::default(),
             world: PreparedWorld::empty(policy),
             materials: Default::default(),
             collision: Default::default(),

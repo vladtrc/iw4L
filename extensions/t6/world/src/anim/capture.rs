@@ -92,6 +92,8 @@ pub fn capture(
         notifies,
         indices,
         delta_trans: None,
+        delta_quat2: None,
+        delta_quat: None,
     };
     catalog.insert_in(
         ns,

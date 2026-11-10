@@ -4042,6 +4042,7 @@ dependencies = [
  "bevy",
  "diag",
  "entity_iw4",
+ "fastfile_iw4",
  "frame",
  "gamemode_iw4",
  "hud_iw4",
@@ -6834,6 +6835,7 @@ dependencies = [
  "glam",
  "hud_iw4",
  "indexmap",
+ "input_iw4",
  "math_iw4",
  "movement_iw4",
  "perf",
@@ -8764,6 +8766,7 @@ version = "0.1.0"
 dependencies = [
  "anim_iw4",
  "glam",
+ "math_iw4",
 ]
 
 [[package]]

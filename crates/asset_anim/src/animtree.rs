@@ -379,6 +379,7 @@ pub enum AtrCompileError {
     BadToken { offset: usize, message: String },
     DuplicateAnimation { name: String },
     EmptyTree,
+    AnimationNotFound { name: String },
 }
 
 impl core::fmt::Display for AtrCompileError {
@@ -392,6 +393,9 @@ impl core::fmt::Display for AtrCompileError {
                 write!(f, "duplicate animation {name}")
             }
             Self::EmptyTree => write!(f, "anim tree is empty"),
+            Self::AnimationNotFound { name } => {
+                write!(f, "animation {name} is not in the authored tree")
+            }
         }
     }
 }

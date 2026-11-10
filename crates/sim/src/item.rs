@@ -45,6 +45,18 @@ pub struct DroppedItem {
     pub stock: i32,
     pub scavenger: bool,
     pub drop_seq: u32,
+    pub authored: bool,
+    pub dual_wield: bool,
+    pub alternate: Option<ItemWeaponAmmo>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ItemWeaponAmmo {
+    pub weapon: u32,
+    pub clip_r: i32,
+    pub clip_l: i32,
+    pub stock: i32,
+    pub dual_wield: bool,
 }
 
 pub fn random_unit(seed: &mut u32) -> f32 {
@@ -139,6 +151,22 @@ impl WeaponAmmo {
             stock: get_ammo_not_in_clip(&ps.ammo, ammo_key),
         }
     }
+    fn pickup_new_to_player(self, world: &FrameWorld, ps: &mut PlayerState, weapon: u32) {
+        let Some(facts) = world.combat_facts_for(weapon) else {
+            return;
+        };
+        let previous = Self::from_player(world, ps, weapon);
+        Self {
+            clip_r: self.clip_r.min(facts.clip_size),
+            clip_l: self.clip_l.min(facts.clip_size),
+            stock: previous
+                .stock
+                .saturating_add(self.stock)
+                .min(facts.max_ammo),
+        }
+        .apply_to_player(world, ps, weapon);
+    }
+
     fn apply_to_player(self, world: &FrameWorld, ps: &mut PlayerState, weapon: u32) {
         let Self {
             clip_r,
@@ -265,6 +293,7 @@ fn push_dropped_item(
         .filter_map(|number| {
             world
                 .dropped_item_by_number(number)
+                .filter(|item| !item.authored)
                 .map(|item| (number, item.drop_seq))
         })
         .collect();
@@ -273,7 +302,7 @@ fn push_dropped_item(
         .map(|&(_, seq)| seq)
         .max()
         .map_or(0, |seq| seq.wrapping_add(1));
-    if world.dropped_item_count() >= G_MAX_DROPPED_WEAPONS {
+    if live.len() >= G_MAX_DROPPED_WEAPONS {
         let evicted_number =
             oldest_dropped_number(&live).expect("cap eviction requires an occupied dropped item");
         world
@@ -303,6 +332,9 @@ fn push_dropped_item(
         stock,
         scavenger,
         drop_seq,
+        authored: false,
+        dual_wield: ammo.clip_l > 0 || gsc_give_weapon_is_akimbo(world.weapon_script_name(weapon)),
+        alternate: None,
     });
     entnum
 }
@@ -356,6 +388,7 @@ fn launch_dropped_from_ps(
 
 fn preserve_dropped_model(world: &mut FrameWorld, number: i32, ps: &PlayerState, weapon: u32) {
     if let Some(item) = world.dropped_item_mut_by_number(number) {
+        item.dual_wield = weapon_iw4::num_hands_for_held(&ps.weapons, &ps.weapon_data, weapon) > 1;
         item.state.weapon_model =
             weapon_iw4::weapon_model_for_held(&ps.weapons, &ps.weapon_data, weapon);
     }
@@ -586,7 +619,11 @@ fn try_touch_one(world: &mut FrameWorld, walker: ClientId) {
                 continue;
             };
             let WeaponAmmo { stock, .. } = WeaponAmmo::from_player(world, &ps, weapon);
-            if stock >= facts.max_ammo || item.stock + item.clip_r + item.clip_l <= 0 {
+            if stock >= facts.max_ammo
+                || [item.stock, item.clip_r, item.clip_l]
+                    .iter()
+                    .all(|ammo| *ammo <= 0)
+            {
                 continue;
             }
         }
@@ -680,9 +717,10 @@ fn grab_number(world: &mut FrameWorld, walker: ClientId, number: i32) {
         world.despawn_dropped_item(number);
     }
     let mut swapped_entnum = ENTITYNUM_NONE;
-    let akimbo = world
-        .combat_facts_for(weapon)
-        .is_some_and(|facts| facts.dual_wield)
+    let akimbo = item.dual_wield
+        || world
+            .combat_facts_for(weapon)
+            .is_some_and(|facts| facts.dual_wield)
         || gsc_give_weapon_is_akimbo(world.weapon_script_name(weapon));
     if already_has {
         let mut next = ps;
@@ -721,7 +759,15 @@ fn grab_number(world: &mut FrameWorld, walker: ClientId, number: i32) {
                 clip_l: item.clip_l,
                 stock: item.stock,
             }
-            .apply_to_player(world, &mut next, weapon);
+            .pickup_new_to_player(world, &mut next, weapon);
+            if let Some(alt) = item.alternate {
+                WeaponAmmo {
+                    clip_r: alt.clip_r,
+                    clip_l: alt.clip_l,
+                    stock: alt.stock,
+                }
+                .pickup_new_to_player(world, &mut next, alt.weapon);
+            }
             let empty_handed = next.weapon == 0;
             if let Some(slot) = world.player_mut(walker) {
                 *slot = next;
@@ -1152,8 +1198,11 @@ pub(crate) fn phase_use_items(
         );
         let dual = selected.is_some_and(|item| {
             world
-                .combat_facts_for(item.weapon)
-                .is_some_and(|facts| facts.dual_wield)
+                .dropped_item_by_number(item.number)
+                .is_some_and(|item| item.dual_wield)
+                || world
+                    .combat_facts_for(item.weapon)
+                    .is_some_and(|facts| facts.dual_wield)
                 || gsc_give_weapon_is_akimbo(world.weapon_script_name(item.weapon))
         });
         if let Some(ps) = world.player_mut(id) {

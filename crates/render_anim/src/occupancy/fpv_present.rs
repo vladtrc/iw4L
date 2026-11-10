@@ -76,6 +76,7 @@ pub struct SessionFpvMeshesHandles {
     pub parent_weapon: u32,
     pub catalog_id: u64,
     pub axis: bool,
+    pub script_viewmodel: Option<String>,
     pub view: Arc<FpvWeaponView>,
     pub(crate) table: Arc<FpvWeaponTable>,
     pub fpv: EquippedFpv,
@@ -277,7 +278,12 @@ pub fn spawn_pending_fpv(
     let ffa_team = meta.and_then(|m| m.ffa_team);
     let client_state_team = meta.map(|m| m.client_state_team).unwrap_or(0);
     let axis = asset_model::kit_assignment_is_axis(client_state_team, ffa_team);
-    let view = match bound_table.slot(request.weapon_handle, request.parent_handle, axis) {
+    let view = match bound_table.slot(
+        request.weapon_handle,
+        request.parent_handle,
+        axis,
+        meta.and_then(|m| m.viewmodel.as_deref()),
+    ) {
         Ok(FpvWeaponSlot::Ready(view)) => Arc::clone(view),
         Ok(FpvWeaponSlot::Refused(cause)) => {
             diag::warn_once!(World, "{}", cause.clone());
@@ -350,6 +356,7 @@ pub fn spawn_pending_fpv(
         catalog_id: request.catalog_id,
         table: Arc::clone(table),
         axis,
+        script_viewmodel: meta.and_then(|m| m.viewmodel.clone()),
         fpv: EquippedFpv::new(
             view.gun_name.clone(),
             view.gun_index,
@@ -560,7 +567,7 @@ pub fn tick_fpv_viewmodel(
             "fpv: material catalog changed; retiring stale rig and bindings"
         );
         session_vm.0 = None;
-        settled.0 = None;
+        settled.weapon = None;
         pending.0 = None;
         product.kind = FpvPoseKind::Hide;
         return;
@@ -570,7 +577,7 @@ pub fn tick_fpv_viewmodel(
         .is_none_or(|fpv| fpv.0.identity() != session.catalog_id)
     {
         session_vm.0 = None;
-        settled.0 = None;
+        settled.weapon = None;
         pending.0 = None;
         product.kind = FpvPoseKind::Hide;
         return;
@@ -593,11 +600,17 @@ pub fn tick_fpv_viewmodel(
     };
 
     if let Some(ps) = presented.viewweapon_player(local.0) {
+        let script_viewmodel = presented
+            .snapshot()
+            .and_then(|snap| snap.meta.for_client(local.0))
+            .and_then(|meta| meta.viewmodel.as_deref());
         let weapon = table.map_or(get_viewmodel_weapon_index(ps), |t| {
             fpv_viewmodel_weapon(ps, t)
         });
         if weapon != 0
-            && (weapon != session.weapon_id || ps.weapon_primary != session.parent_weapon)
+            && (weapon != session.weapon_id
+                || ps.weapon_primary != session.parent_weapon
+                || script_viewmodel != session.script_viewmodel.as_deref())
         {
             if let Some(table) = table {
                 match table.gun_index(weapon) {
@@ -605,7 +618,9 @@ pub fn tick_fpv_viewmodel(
                         let handles = owners.handles(weapon, ps.weapon_primary);
                         let next = owners.bind(table).and_then(|bound| {
                             handles.and_then(|(weapon, parent)| {
-                                bound.slot(weapon, parent, session.axis).ok()
+                                bound
+                                    .slot(weapon, parent, session.axis, script_viewmodel)
+                                    .ok()
                             })
                         });
                         let same = match next {
@@ -624,6 +639,7 @@ pub fn tick_fpv_viewmodel(
                             if let Some(FpvWeaponSlot::Ready(next)) = next {
                                 session.view = Arc::clone(next);
                             }
+                            session.script_viewmodel = script_viewmodel.map(str::to_owned);
                             session.weapon_id = weapon;
                             session.parent_weapon = ps.weapon_primary;
                         } else {

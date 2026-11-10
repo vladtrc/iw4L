@@ -89,6 +89,9 @@ pub(crate) fn resolve_directive(
     strings: &PreparedLocalizedStrings,
     input: &frame::HudInputView,
 ) -> Option<String> {
+    if let Some(label) = input.binding_keys.get(command) {
+        return Some(label.clone());
+    }
     if matches!(command, "+activate" | "+usereload")
         && let Some(letter) = input.use_key.as_deref()
     {

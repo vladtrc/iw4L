@@ -43,8 +43,12 @@ their scoped in-match equivalents.
 
 The single entry point; the composition root sees no `fastfile_*` and no
 `AssetSink`. Inside are parallel walks on `load_pool()`: the archive, startup
-materials, `common_mp`, installed-family weapon bundles, language zones. `common_mp`
-goes **before** the map — its techset tables are needed before
+materials, the profile's common zone, installed-family weapon bundles, language zones.
+The IW4 map's ClipMap/GameWorld asset types select the runtime profile before
+common preparation. Campaign uses `common` and SP startup/sound/localization
+sources, without multiplayer donor bundles; other maps keep the multiplayer
+profile. Mixed SP/MP world metadata is refused. The common cache key includes
+this profile. The common walk goes **before** the map — its techset tables are needed before
 `build_world_draw`. Output is `MatchLoadOutcome::Ready` with a `PreparedMatch`
 (world, one material population, clip, weapons, catalogs and `PreparedMap`).
 

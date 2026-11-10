@@ -124,6 +124,20 @@ pub(crate) fn launch(
 }
 
 pub(crate) fn register(registry: &mut NativeRegistry) {
+    registry.register(Function, "getweaponclipmodel", |world, _, args| {
+        let name = string(args, 0)?;
+        let frame = FrameWorld::from_world(world);
+        let model = match frame.weapon_index_by_script_name(&name) {
+            Some(weapon) => frame.weapon_clip_model(weapon),
+            None => {
+                if !name.is_empty() && !name.eq_ignore_ascii_case("none") {
+                    diag::warn!(Sim, "GetWeaponClipModel: unknown weapon {name}");
+                }
+                ""
+            }
+        };
+        Ok(Value::string(model))
+    });
     registry.register(Function, "getmissileowner", |world, _, args| {
         if args.len() != 1 {
             return Err("GetMissileOwner requires one missile argument".into());
@@ -524,3 +538,4 @@ fn settle_projectiles(world: &mut World, notes: &[WeaponNote]) {
         }
     }
 }
+pub(crate) mod items;

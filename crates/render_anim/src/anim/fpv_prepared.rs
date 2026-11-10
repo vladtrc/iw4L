@@ -59,7 +59,7 @@ struct FpvPreparationJob {
     layouts: FpvLayoutCache,
 
     next_weapon: u32,
-    alternate_queue: Vec<(u32, u32)>,
+    alternate_queue: Vec<(u32, u32, Option<String>)>,
     compositions: HashMap<usize, Result<Arc<PreparedFpvComposition>, String>>,
     tracks: HashMap<(usize, usize), Option<Arc<[u16]>>>,
     rigs: HashMap<RigKey, Arc<PreparedFpvRig>>,
@@ -69,6 +69,7 @@ struct FpvPreparationJob {
     guns: Vec<Option<FpvMeshIndex>>,
     slots: Vec<[FpvWeaponSlot; 2]>,
     alternate_slots: HashMap<(u32, u32), [FpvWeaponSlot; 2]>,
+    script_slots: HashMap<(u32, u32, String), [FpvWeaponSlot; 2]>,
     refused: Vec<String>,
 }
 
@@ -125,12 +126,23 @@ impl FpvPreparationJob {
         let mut layouts_queue: Vec<(usize, Option<[u32; 6]>)> = Vec::new();
         let mut seen_layouts: HashSet<(usize, Option<[u32; 6]>)> = HashSet::new();
         let mut seen_assemblies: HashSet<usize> = HashSet::new();
-        for (id, parent) in (1..=weapon_n)
-            .map(|id| (id, 0))
-            .chain(registry.alternate_fpv_pairs())
+        for (id, parent, viewmodel) in (1..=weapon_n)
+            .map(|id| (id, 0, None))
+            .chain(
+                registry
+                    .alternate_fpv_pairs()
+                    .map(|(id, parent)| (id, parent, None)),
+            )
+            .chain(
+                registry
+                    .script_fpv_variants()
+                    .map(|(id, parent, name)| (id, parent, Some(name))),
+            )
         {
             for axis in [false, true] {
-                let Some(sides) = registry.fpv_assemblies_for(id, parent, axis) else {
+                let Some(sides) =
+                    registry.fpv_assemblies_for_viewmodel(id, parent, axis, viewmodel)
+                else {
                     continue;
                 };
                 for assembly in std::iter::once(&sides.bare)
@@ -184,7 +196,8 @@ impl FpvPreparationJob {
         let work_total = (models.len()
             + camouflage_materials.len()
             + layouts_queue.len()
-            + registry.alternate_fpv_pairs().count()) as u64
+            + registry.alternate_fpv_pairs().count()
+            + registry.script_fpv_variants().count()) as u64
             + u64::from(weapon_n);
         if let Some(stage) = &progress {
             stage.set_total(work_total);
@@ -208,7 +221,15 @@ impl FpvPreparationJob {
             layouts: HashMap::new(),
             next_weapon: 0,
             alternate_queue: {
-                let mut pairs: Vec<_> = registry.alternate_fpv_pairs().collect();
+                let mut pairs: Vec<_> = registry
+                    .alternate_fpv_pairs()
+                    .map(|(id, parent)| (id, parent, None))
+                    .chain(
+                        registry
+                            .script_fpv_variants()
+                            .map(|(id, parent, name)| (id, parent, Some(name.to_owned()))),
+                    )
+                    .collect();
                 pairs.sort_unstable();
                 pairs.reverse();
                 pairs
@@ -222,6 +243,7 @@ impl FpvPreparationJob {
             guns: Vec::with_capacity(weapon_n as usize + 1),
             slots: Vec::with_capacity(weapon_n as usize + 1),
             alternate_slots: HashMap::new(),
+            script_slots: HashMap::new(),
             refused: Vec::new(),
         }
     }
@@ -340,6 +362,7 @@ impl FpvPreparationJob {
         &mut self,
         composition: &PreparedFpvComposition,
         orders: &[Option<usize>],
+        viewmodel: Option<&str>,
     ) -> Vec<Option<Arc<[u16]>>> {
         let registry = Arc::clone(&self.owner.weapons);
         let assembly = composition.assembly();
@@ -352,7 +375,12 @@ impl FpvPreparationJob {
                     .entry((key, order))
                     .or_insert_with(|| {
                         let clip = self.owner.clips.clip_at(order)?;
-                        compose_clip_tracks(assembly, order, &clip, registry.fpv_clip_tracks())
+                        compose_clip_tracks(
+                            assembly,
+                            order,
+                            &clip,
+                            registry.fpv_tracks_for_viewmodel(viewmodel)?,
+                        )
                     })
                     .clone()
             })
@@ -365,6 +393,7 @@ impl FpvPreparationJob {
         dual: bool,
         right: &[Option<usize>],
         left: &[Option<usize>],
+        viewmodel: Option<&str>,
     ) -> Arc<PreparedFpvRig> {
         let key: RigKey = (
             composition_key(composition),
@@ -376,8 +405,8 @@ impl FpvPreparationJob {
             return Arc::clone(rig);
         }
         let tracks = [
-            self.clip_tracks(composition, right),
-            self.clip_tracks(composition, left),
+            self.clip_tracks(composition, right, viewmodel),
+            self.clip_tracks(composition, left, viewmodel),
         ];
         let rig = Arc::new(PreparedFpvRig::build(
             Arc::clone(composition),
@@ -491,7 +520,7 @@ impl FpvPreparationJob {
 
     fn prepare_next_weapon(&mut self, fpv: &FpvMeshCatalog, xanims: &XAnimCatalog) {
         let registry = Arc::clone(&self.owner.weapons);
-        let (id, parent) = if self.next_weapon as usize > registry.len() {
+        let (id, parent, viewmodel) = if self.next_weapon as usize > registry.len() {
             let Some(pair) = self.alternate_queue.pop() else {
                 self.stage = FpvPreparationStage::Done;
                 return;
@@ -508,17 +537,17 @@ impl FpvPreparationJob {
             );
             self.hud_iris.push(registry.overlay_is_hud_iris(id));
             self.melee.push(registry.melee_weapon_of(id));
-            (id, 0)
+            (id, 0, None)
         };
         let gun = registry
             .gun_xmodel_edge_of(id)
             .and_then(|edge| edge.bound_index())
             .filter(|&order| fpv.get_at(order).is_some())
             .map(FpvMeshIndex::from_order);
-        if parent == 0 {
+        if parent == 0 && viewmodel.is_none() {
             self.guns.push(gun);
         }
-        if id == 0 {
+        if id == 0 || (registry.uses_script_viewmodels() && viewmodel.is_none()) {
             self.slots
                 .push([FpvWeaponSlot::Absent, FpvWeaponSlot::Absent]);
             return;
@@ -534,7 +563,9 @@ impl FpvPreparationJob {
                 FpvWeaponSlot::Refused(cause()),
                 FpvWeaponSlot::Refused(cause()),
             ];
-            if parent == 0 {
+            if let Some(name) = viewmodel {
+                self.script_slots.insert((id, parent, name), sides);
+            } else if parent == 0 {
                 self.slots.push(sides);
             } else {
                 self.alternate_slots.insert((id, parent), sides);
@@ -600,8 +631,10 @@ impl FpvPreparationJob {
             .all(|order| {
                 let clip = xanims.clip_at(order);
                 registry
-                    .fpv_clip_tracks()
-                    .matches_clip(fpv.identity(), order, clip.as_deref())
+                    .fpv_tracks_for_viewmodel(viewmodel.as_deref())
+                    .is_some_and(|tracks| {
+                        tracks.matches_clip(fpv.identity(), order, clip.as_deref())
+                    })
             });
         let sides: [FpvWeaponSlot; 2] = [false, true].map(|axis| {
             if !sources_match {
@@ -613,8 +646,8 @@ impl FpvPreparationJob {
                 )));
             }
             let (Some((hands, hands_index)), Some(assemblies)) = (
-                registry.fpv_hands_of(id, axis),
-                registry.fpv_assemblies_for(id, parent, axis),
+                registry.fpv_hands_for(id, axis, viewmodel.as_deref()),
+                registry.fpv_assemblies_for_viewmodel(id, parent, axis, viewmodel.as_deref()),
             ) else {
                 return FpvWeaponSlot::Refused(Cow::<'static, str>::Owned(format!(
                     "FPV dependency unresolved for weapon {weapon_id}: {role} `{name}`",
@@ -710,31 +743,64 @@ impl FpvPreparationJob {
             };
             let mut rigs = FpvRigSet::default();
             if let Some(jammed) = &jammed {
-                rigs.jammed[0] = Some(self.rig(jammed, false, &right_orders, &[]));
+                rigs.jammed[0] =
+                    Some(self.rig(jammed, false, &right_orders, &[], viewmodel.as_deref()));
                 if left.is_some() {
-                    rigs.jammed[1] = Some(self.rig(jammed, true, &right_orders, &left_orders));
+                    rigs.jammed[1] = Some(self.rig(
+                        jammed,
+                        true,
+                        &right_orders,
+                        &left_orders,
+                        viewmodel.as_deref(),
+                    ));
                 }
             }
-            rigs.bare[0] = Some(self.rig(&bare, false, &right_orders, &[]));
+            rigs.bare[0] = Some(self.rig(&bare, false, &right_orders, &[], viewmodel.as_deref()));
             if left.is_some() {
-                rigs.bare[1] = Some(self.rig(&bare, true, &right_orders, &left_orders));
+                rigs.bare[1] = Some(self.rig(
+                    &bare,
+                    true,
+                    &right_orders,
+                    &left_orders,
+                    viewmodel.as_deref(),
+                ));
             }
             if let Some(rocket) = &rocket {
-                rigs.rocket[0] = Some(self.rig(rocket, false, &right_orders, &[]));
+                rigs.rocket[0] =
+                    Some(self.rig(rocket, false, &right_orders, &[], viewmodel.as_deref()));
                 if left.is_some() {
-                    rigs.rocket[1] = Some(self.rig(rocket, true, &right_orders, &left_orders));
+                    rigs.rocket[1] = Some(self.rig(
+                        rocket,
+                        true,
+                        &right_orders,
+                        &left_orders,
+                        viewmodel.as_deref(),
+                    ));
                 }
             }
             if let Some(melee) = &melee {
-                rigs.melee[0] = Some(self.rig(melee, false, &right_orders, &[]));
+                rigs.melee[0] =
+                    Some(self.rig(melee, false, &right_orders, &[], viewmodel.as_deref()));
                 if left.is_some() {
-                    rigs.melee[1] = Some(self.rig(melee, true, &right_orders, &left_orders));
+                    rigs.melee[1] = Some(self.rig(
+                        melee,
+                        true,
+                        &right_orders,
+                        &left_orders,
+                        viewmodel.as_deref(),
+                    ));
                 }
             }
             if let Some(ads) = &ads {
-                rigs.ads[0] = Some(self.rig(ads, false, &right_orders, &[]));
+                rigs.ads[0] = Some(self.rig(ads, false, &right_orders, &[], viewmodel.as_deref()));
                 if left.is_some() {
-                    rigs.ads[1] = Some(self.rig(ads, true, &right_orders, &left_orders));
+                    rigs.ads[1] = Some(self.rig(
+                        ads,
+                        true,
+                        &right_orders,
+                        &left_orders,
+                        viewmodel.as_deref(),
+                    ));
                 }
             }
             FpvWeaponSlot::Ready(Arc::new(FpvWeaponView {
@@ -762,7 +828,9 @@ impl FpvPreparationJob {
                 ));
             }
         }
-        if parent == 0 {
+        if let Some(name) = viewmodel {
+            self.script_slots.insert((id, parent, name), sides);
+        } else if parent == 0 {
             self.slots.push(sides);
         } else {
             self.alternate_slots.insert((id, parent), sides);
@@ -785,6 +853,7 @@ impl FpvPreparationJob {
             guns: self.guns,
             slots: self.slots,
             alternate_slots: self.alternate_slots,
+            script_slots: self.script_slots,
         };
         (self.owner, table)
     }
@@ -805,6 +874,7 @@ fn refused_table(
         guns: Vec::with_capacity(weapon_n as usize + 1),
         slots: Vec::with_capacity(weapon_n as usize + 1),
         alternate_slots: HashMap::new(),
+        script_slots: HashMap::new(),
     };
     for id in 0..=weapon_n {
         table.facts.push(

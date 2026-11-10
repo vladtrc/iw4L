@@ -69,6 +69,7 @@ impl Plugin for HudPlugin {
 
         frame::register_ui_contracts(app);
         crate::overhead_names::register(app);
+        crate::campaign_objectives::register(app);
         app.add_message::<LifeStarted>()
             .add_observer(crate::killfeed::obituary)
             .add_systems(
@@ -145,6 +146,7 @@ impl Plugin for HudPlugin {
                     begin_hud_tess_frame,
                     flush_flash_tess.in_set(frame::InMatch),
                     flush_overhead_names_tess,
+                    flush_campaign_objectives_tess,
                     flush_hud_tess,
                     flush_killcam_skip_tess,
                     flush_playercard_tess,
@@ -274,24 +276,38 @@ fn sync_map_zone_tree(mut hud_images: ResMut<HudImages>, report: Option<Res<Laun
 
 fn sync_zone_atlases(
     catalog: Option<Res<asset_game::MenuCatalog>>,
+    campaign: Option<Res<asset_game::CampaignHudCatalog>>,
+    profile: Option<Res<frame::MatchRuntimeProfile>>,
     mut hud_images: ResMut<HudImages>,
 ) {
+    let catalog = campaign
+        .as_ref()
+        .map(|c| c.0.as_ref())
+        .or(catalog.as_deref());
     match catalog {
-        Some(catalog) if !hud_images.zone_installed() || catalog.is_changed() => {
-            hud_images.install_zone_catalog(&catalog)
-        }
+        Some(catalog) => hud_images.install_zone_catalog(
+            catalog,
+            profile
+                .as_ref()
+                .map_or(Default::default(), |profile| profile.0),
+        ),
         None if hud_images.zone_installed() => hud_images.clear_zone_catalog(),
-        _ => {}
+        None => {}
     }
 }
 
 fn warm_hud_images(
     catalog: Option<Res<asset_game::MenuCatalog>>,
+    campaign: Option<Res<asset_game::CampaignHudCatalog>>,
     compass: Option<Res<assets::SessionCompass>>,
     mut hud_images: ResMut<HudImages>,
     mut images: ResMut<Assets<Image>>,
 ) {
-    hud_images.warm_present_stems(&mut images, catalog.as_deref(), compass.as_deref());
+    let catalog = campaign
+        .as_ref()
+        .map(|c| c.0.as_ref())
+        .or(catalog.as_deref());
+    hud_images.warm_present_stems(&mut images, catalog, compass.as_deref());
 }
 
 #[derive(Component)]
@@ -344,6 +360,10 @@ fn ensure_hud_root(mut commands: Commands, existing: Query<Entity, With<HudRoot>
         ))
         .with_children(|root| {
             crate::font_overlay::spawn_overlay(root, crate::overhead_names::OverheadNamesRaster);
+            crate::font_overlay::spawn_overlay(
+                root,
+                crate::campaign_objectives::CampaignObjectivesRaster,
+            );
             spawn_reticle(root);
             crate::damage_direction::spawn(root);
             spawn_iris(root);
@@ -783,5 +803,23 @@ fn release_hud_publication(
     *blood = BloodGpuJob::Hide;
     if let Some(mut flash) = flash {
         *flash = FlashGpuJob::Hide;
+    }
+}
+
+pub(crate) fn flush_campaign_objectives_tess(
+    mut writer: gpu_list::HudTessWriter,
+    mut pass: ResMut<HudTessPass>,
+    mut raster: Query<
+        (&mut Node, &mut crate::gpu_list::GpuListLatch),
+        With<crate::campaign_objectives::CampaignObjectivesRaster>,
+    >,
+) {
+    let _body = gpu_list::TessBody::open();
+    if !writer.is_ready() {
+        return;
+    }
+    let job = std::mem::take(&mut pass.campaign_objectives);
+    if let Ok((mut host, mut latch)) = raster.single_mut() {
+        writer.apply(job, &mut host, &mut latch);
     }
 }

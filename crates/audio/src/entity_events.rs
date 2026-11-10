@@ -26,7 +26,10 @@ fn entity_event_sound(
         }
         return;
     }
-    if event == EntityEventKind::SOUND_ALIAS {
+    if matches!(
+        event,
+        EntityEventKind::SOUND_ALIAS | EntityEventKind::SOUND_ALIAS_AS_MASTER
+    ) {
         play_cs_sound_alias(
             &sound.event,
             Some(crate::AudioEvent::from_entity(
@@ -37,10 +40,6 @@ fn entity_event_sound(
             adopted.as_deref(),
             &mut play,
         );
-        return;
-    }
-    if event == EntityEventKind::SOUND_ALIAS_AS_MASTER {
-        diag::warn!(Audio, "audio: EV_SOUND_ALIAS_AS_MASTER is unsupported");
         return;
     }
     let Ok(identity) = identities.get(sound.entity) else {
@@ -109,7 +108,7 @@ fn play_cs_sound_alias(
         .split_once(':')
         .and_then(|(ns, name)| asset_core::FamilyId::parse(ns).map(|ns| (ns, name.to_owned())))
         .unwrap_or((asset_core::FamilyId::IW4, alias));
-    play.write(crate::AliasCommand::Play(PlayAlias {
+    let sound = PlayAlias {
         event,
         namespace,
         alias,
@@ -120,7 +119,12 @@ fn play_cs_sound_alias(
         } else {
             ent_from_number(payload.payload.number)
         },
-    }));
+    };
+    play.write(if payload.event == EntityEventKind::SOUND_ALIAS_AS_MASTER {
+        crate::AliasCommand::PlayAsMaster(sound)
+    } else {
+        crate::AliasCommand::Play(sound)
+    });
 }
 
 fn movement_sound(

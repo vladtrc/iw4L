@@ -82,6 +82,7 @@ impl PlayerCollisionRepresentation {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EntityClipKind {
+    BodyBounds,
     CollTris,
     BoneBoxes,
     LinkedBrush,
@@ -90,6 +91,7 @@ pub enum EntityClipKind {
 impl EntityClipKind {
     pub const fn dump_label(self) -> &'static str {
         match self {
+            Self::BodyBounds => "body_bounds",
             Self::CollTris => "colltris",
             Self::BoneBoxes => "boxes",
             Self::LinkedBrush => "brush",
@@ -661,6 +663,32 @@ pub(crate) fn phase_trace(
             let scaled =
                 ((bullet_damage_at_distance(&facts, dist) as f32) * segment.damage_mult) as i32;
             if !exit {
+                let shooter =
+                    crate::script::host::players::player_object(world.ecs(), em.attacker.0);
+                if fire_weapon_kind(facts.weap_type, facts.weap_class)
+                    == Some(FireWeaponKind::Bullet)
+                    && let crate::script::Value::Object(shooter) = shooter
+                    && let Err(message) = crate::script::host::actors::suppression::bullet_line(
+                        world.ecs(),
+                        shooter,
+                        segment.start,
+                        segment.end,
+                        crate::level_time_ms(tick),
+                    )
+                {
+                    world
+                        .ecs()
+                        .resource_mut::<crate::script::RoundScript>()
+                        .fault = Some(crate::script::Fault::at(
+                        &crate::script::Location {
+                            module: "<engine>".into(),
+                            function: "actor suppression".into(),
+                            line: 0,
+                            column: 0,
+                        },
+                        message,
+                    ));
+                }
                 let means = crate::script_player::means(
                     world,
                     DamageSource::Shot(em.shot_id),
@@ -721,7 +749,8 @@ pub(crate) fn phase_trace(
                 other_entity_num: match segment.collider {
                     Some(
                         ColliderId::EntityDObjBone { owner, .. }
-                        | ColliderId::EntityLinkedBrush { owner, .. },
+                        | ColliderId::EntityLinkedBrush { owner, .. }
+                        | ColliderId::EntityBody { owner },
                     ) => owner
                         .script_model()
                         .and_then(|id| world.gentity_number(id))
@@ -817,7 +846,8 @@ pub(crate) fn phase_trace(
                 Some(ColliderId::Player { .. }) => {}
                 Some(
                     ColliderId::EntityDObjBone { owner, .. }
-                    | ColliderId::EntityLinkedBrush { owner, .. },
+                    | ColliderId::EntityLinkedBrush { owner, .. }
+                    | ColliderId::EntityBody { owner },
                 ) => {
                     if let Some(ColliderId::EntityDObjBone { bone, .. }) = segment.collider
                         && crate::model_behaviors::apply_hit(
@@ -1097,9 +1127,9 @@ fn entity_collision_epoch(
     rows: &[EntityCollisionTraceGeom],
 ) -> Option<EntityCollisionEpoch> {
     let owner = match terminal? {
-        ColliderId::EntityDObjBone { owner, .. } | ColliderId::EntityLinkedBrush { owner, .. } => {
-            owner
-        }
+        ColliderId::EntityDObjBone { owner, .. }
+        | ColliderId::EntityLinkedBrush { owner, .. }
+        | ColliderId::EntityBody { owner } => owner,
         ColliderId::World { .. } | ColliderId::Player { .. } => return None,
     };
     rows.iter()
@@ -1144,6 +1174,7 @@ fn entity_clip_kind(
     rows: &[EntityCollisionTraceGeom],
 ) -> Option<EntityClipKind> {
     match terminal {
+        Some(ColliderId::EntityBody { .. }) => Some(EntityClipKind::BodyBounds),
         Some(ColliderId::EntityLinkedBrush { .. }) => Some(EntityClipKind::LinkedBrush),
         Some(ColliderId::EntityDObjBone { owner, .. }) => {
             let coll = rows
@@ -1174,12 +1205,14 @@ fn shot_collision_geometry(
             representation,
             history: player_history,
         },
-        Some(ColliderId::EntityDObjBone { .. } | ColliderId::EntityLinkedBrush { .. }) => {
-            match entity_epoch {
-                Some(epoch) => ShotCollisionGeometry::Entity { epoch },
-                None => ShotCollisionGeometry::Miss,
-            }
-        }
+        Some(
+            ColliderId::EntityDObjBone { .. }
+            | ColliderId::EntityLinkedBrush { .. }
+            | ColliderId::EntityBody { .. },
+        ) => match entity_epoch {
+            Some(epoch) => ShotCollisionGeometry::Entity { epoch },
+            None => ShotCollisionGeometry::Miss,
+        },
         Some(ColliderId::World { .. }) => ShotCollisionGeometry::World,
         None => match player_history {
             HistorySampleVerdict::Refused { .. } => ShotCollisionGeometry::Player {
@@ -1627,7 +1660,8 @@ pub fn owner_shot_effects(
                             other_entity_num: match segment.collider {
                                 Some(
                                     ColliderId::EntityDObjBone { owner, .. }
-                                    | ColliderId::EntityLinkedBrush { owner, .. },
+                                    | ColliderId::EntityLinkedBrush { owner, .. }
+                                    | ColliderId::EntityBody { owner },
                                 ) => owner
                                     .script_model()
                                     .and_then(|id| {

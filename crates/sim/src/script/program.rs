@@ -57,6 +57,27 @@ impl Program {
     pub fn native_count(&self) -> usize {
         self.natives.len()
     }
+    pub fn animation_references(&self) -> BTreeMap<String, std::collections::BTreeSet<String>> {
+        let mut trees = BTreeMap::<String, std::collections::BTreeSet<String>>::new();
+        for function in &self.functions {
+            for (_, op) in &function.code {
+                match op {
+                    super::ir::Op::Constant(super::Value::Animation { tree, name }) => {
+                        trees
+                            .entry(tree.to_string())
+                            .or_default()
+                            .insert(name.to_string());
+                    }
+                    super::ir::Op::Constant(super::Value::AnimationTree(tree)) => {
+                        trees.entry(tree.to_string()).or_default();
+                    }
+                    _ => {}
+                }
+            }
+        }
+        trees
+    }
+
     pub fn fingerprint(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         let mut digest = Sha256::new();

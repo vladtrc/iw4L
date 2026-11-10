@@ -61,7 +61,7 @@ Control ranks eight map voices with a 0.002 gain floor. Device recovery uses
 bounded backoff; one-shots preserve PCM during short outages until their start
 deadlines expire. Master volume is applied once. `OfflineRenderer` shares the
 mixing kernel. Portal cues take the shortest route through open aperture centres;
-snapshot exit availability controls attenuation and panning. General occlusion, streaming and DSP buses/tails remain unfinished.
+snapshot exit availability controls attenuation and panning. General occlusion and streaming remain unfinished.
 `IW4L_AUDIO_DIAG=1` enables cue identities/decisions, request/preparation timings,
 slow control stages, affinity and device/null frame counts. Set
 `IW4L_AUDIO_DIAG_PATH` for a buffered file; the bounded queue counts dropped
@@ -73,3 +73,16 @@ normal audio command path. Count defaults to 1 and is bounded at 8192. An
 unqualified alias must be unique across the loaded families. `dump` includes
 `pressure_refusals`, a cumulative count of starts refused by the bounded inbox
 or pending-work budget, so an overload can be distinguished from silent playback.
+
+Room reverberation uses a procedurally generated stereo impulse-response matrix
+and FFT convolution with 128/1024/4096-frame partitions. The room bank is prepared
+before device startup. Rendering uses preallocated histories; changing rooms
+crossfades two bounded render states over 128 ms and coalesces further requests.
+Match retirement clears the histories. The 26 script room names select IW4L's
+own decay, brightness and reflection-spacing recipes.
+
+For local listening, `set snd_roomPreview concerthall` selects a room independently
+of script environment commands. `set snd_roomPreviewWet 0.5` sets its send level
+in 0..1; dry remains unity. `set snd_roomPreview off` restores script control.
+Preview retains alias send/exclusion flags, `snd_enableReverb` and menu bypass;
+it does not send changes to other clients or alter the script's saved environment.

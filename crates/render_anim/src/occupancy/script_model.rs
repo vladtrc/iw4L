@@ -53,17 +53,23 @@ struct SpawnedSceneModel {
 struct ScriptMoverCentitySample {
     angles: [f32; 3],
     skip: Option<&'static str>,
+    hero_lighting: bool,
 }
 
 impl ScriptMoverCentitySample {
-    fn posed(angles: [f32; 3]) -> Self {
-        Self { angles, skip: None }
+    fn posed(angles: [f32; 3], hero_lighting: bool) -> Self {
+        Self {
+            angles,
+            skip: None,
+            hero_lighting,
+        }
     }
 
     fn skip(why: &'static str) -> Self {
         Self {
             angles: [0.0; 3],
             skip: Some(why),
+            hero_lighting: false,
         }
     }
 }
@@ -111,6 +117,7 @@ struct ScriptOwnerRow {
     camera_hidden: bool,
     lighting_origin: [f32; 3],
     lookup_fallback: u8,
+    hero_lighting: bool,
     caster_bound: render_scene::XModelCasterBound,
 }
 
@@ -467,9 +474,13 @@ fn apply_script_mover_centity_pose(
             roll.to_radians(),
         );
         transform.translation = Vec3::from_array(origin);
-        persist
-            .mover_pose
-            .insert(mapent, ScriptMoverCentitySample::posed(angles));
+        persist.mover_pose.insert(
+            mapent,
+            ScriptMoverCentitySample::posed(
+                angles,
+                runtime.current.e_flags & entity_iw4::SP_HERO_ONLY_LIGHTING != 0,
+            ),
+        );
     }
 }
 
@@ -551,7 +562,15 @@ fn occupy_script_model_scene_ents(
             })
             .collect();
         scene_submissions.write(AnimDObjSceneSubmission {
-            render_fx_flags: 0,
+            render_fx_flags: if persist
+                .mover_pose
+                .get(&owner.id.source_ordinal())
+                .is_some_and(|sample| sample.hero_lighting)
+            {
+                0x100
+            } else {
+                0
+            },
             has_tree: owner.dobj_state.tree.is_some(),
             origin,
             lighting_origin: owner.lighting_origin,
@@ -812,6 +831,10 @@ fn pose_script_models(
             ),
             lighting_origin: owner.lighting_origin,
             lookup_fallback: atpoint.fallback(owner.lighting_origin, box_half),
+            hero_lighting: persist
+                .mover_pose
+                .get(&owner.id.source_ordinal())
+                .is_some_and(|sample| sample.hero_lighting),
             caster_bound,
         });
     }
@@ -984,6 +1007,7 @@ fn commit_script_model_draw_plan(
                 owner: ModelLightingOwner::ScriptModel(row.entity),
                 origin: row.lighting_origin,
                 lookup_fallback: row.lookup_fallback,
+                hero_lighting: row.hero_lighting,
             })
         });
         let object_id = (owners.len() as u16).saturating_add(0x200);

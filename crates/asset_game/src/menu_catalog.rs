@@ -696,6 +696,33 @@ pub fn load_menu_catalog(path: &Path) -> Result<MenuCatalog, String> {
     load_menu_catalog_with_iwd(path, None)
 }
 
+#[derive(Resource, Clone)]
+pub struct CampaignHudCatalog(pub Arc<MenuCatalog>);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BloodOverlayAssets {
+    pub material: &'static str,
+    pub color: &'static str,
+    pub mask: &'static str,
+}
+
+impl BloodOverlayAssets {
+    pub const fn for_profile(profile: asset_core::RuntimeProfile) -> Self {
+        match profile {
+            asset_core::RuntimeProfile::Campaign => Self {
+                material: "splatter_alt_sp",
+                color: "blood_defocus_color_sp",
+                mask: "blood_defocus_mask_sp",
+            },
+            asset_core::RuntimeProfile::Multiplayer => Self {
+                material: "splatter_alt",
+                color: "blood_defocus_color",
+                mask: "blood_defocus_mask",
+            },
+        }
+    }
+}
+
 fn load_menu_catalog_with_iwd(path: &Path, games: Option<&Path>) -> Result<MenuCatalog, String> {
     let image = open_zone(path).map_err(|e| e.to_string())?;
     let header = image.header().map_err(|e| e.to_string())?;

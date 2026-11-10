@@ -1736,11 +1736,13 @@ impl ShadowProductDependencies {
 
 fn identity_placement_kind(kind: &RetainedDrawKind) -> bool {
     match *kind {
-        RetainedDrawKind::World { .. }
-        | RetainedDrawKind::CodeMesh { .. }
+        RetainedDrawKind::CodeMesh { .. }
         | RetainedDrawKind::MarkMesh { .. }
         | RetainedDrawKind::Glass { .. } => true,
-        RetainedDrawKind::Smodel {
+        RetainedDrawKind::World {
+            world_from_local, ..
+        }
+        | RetainedDrawKind::Smodel {
             world_from_local, ..
         }
         | RetainedDrawKind::XModel {

@@ -44,6 +44,7 @@ fn captured_input(f: WeaponBodyFacts, melee_charge_anim: bool) -> CapturedCombat
         reload_empty_time_ms: f.reload_empty_time_ms,
         empty_reload: weapon_iw4::EmptyReloadPolicy::Authored,
         clip_size: f.clip_size,
+        clip_only: f.clip_only,
         start_ammo: f.start_ammo_rounds(),
         max_ammo: f.max_ammo_rounds(),
         ammo_index: f.ammo_index,

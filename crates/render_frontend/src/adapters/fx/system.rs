@@ -1332,6 +1332,7 @@ impl FxPresentEnv<'_> {
                 owner: ModelLightingOwner::FxModel(instance.elem_handle),
                 origin: instance.origin,
                 lookup_fallback,
+                hero_lighting: false,
             });
             let quat = Quat::from_array(fx_iw4::axis_to_quat(instance.axis));
             let world_from_local = Mat4::from_scale_rotation_translation(

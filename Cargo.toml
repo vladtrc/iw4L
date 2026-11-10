@@ -137,7 +137,6 @@ ext_t5_world = { path = "extensions/t5/world" }
 ext_t5_material = { path = "extensions/t5/material" }
 ext_t5_zone = { path = "extensions/t5/zone" }
 anim_iw4 = { path = "crates/anim_iw4" }
-approved_tests = { path = "crates/approved_tests" }
 asset_anim = { path = "crates/asset_anim" }
 asset_audio = { path = "crates/asset_audio" }
 asset_core = { path = "crates/asset_core" }
@@ -181,10 +180,8 @@ glam = "0.33.2"
 hud = { path = "crates/hud" }
 hud_iw4 = { path = "crates/hud_iw4" }
 input_iw4 = { path = "crates/input_iw4" }
-iw4l-master = { path = "crates/iw4l-master" }
 ext_iw5 = { path = "extensions/iw5" }
 killcam_iw4 = { path = "crates/killcam_iw4" }
-launcher = { path = "apps/launcher" }
 lighting_iw4 = { path = "crates/lighting_iw4" }
 lzokay-native = "0.1"
 marks_iw4 = { path = "crates/marks_iw4" }
@@ -221,7 +218,6 @@ ui = { path = "crates/ui" }
 updater = { path = "crates/updater" }
 weapon_iw4 = { path = "crates/weapon_iw4" }
 xmodel_runtime = { path = "crates/xmodel_runtime" }
-xtask = { path = "xtask" }
 zip = { default-features = false, features = ["deflate"], version = "6" }
 
 [profile.release]

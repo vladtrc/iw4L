@@ -51,9 +51,14 @@ mod projectile_loops;
 
 mod weapon_lock;
 
+mod eq;
+mod master;
+mod room_dsp;
+mod room_mix;
 mod script_ambient;
 mod script_mix;
 mod script_music;
+mod script_sounds;
 
 mod admission;
 mod control;

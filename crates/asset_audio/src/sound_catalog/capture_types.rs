@@ -115,6 +115,7 @@ pub struct CapturedAlias {
     pub dist_max: f32,
 
     pub flags: Option<u32>,
+    pub slave_percentage: Option<f32>,
     pub channel_id: Option<u32>,
 
     pub looping: Option<bool>,

@@ -45,6 +45,8 @@ pub(crate) struct ResolvedCue {
 
 #[derive(Clone)]
 pub(crate) struct CueExecutionPolicy {
+    pub master_slave: Option<asset_audio::MasterSlavePolicy>,
+    pub room: Option<crate::room_mix::RoomVoice>,
     pub looping: asset_audio::LoopingPolicy,
     pub composition: asset_audio::CueCompositionPolicy,
     pub stereo_speaker_gains: Option<[[f32; 2]; 2]>,
@@ -76,6 +78,10 @@ impl CueExecutionPolicy {
             }),
         });
         Self {
+            master_slave: policy.master_slave,
+            room: policy
+                .reverb_flags
+                .map(crate::room_mix::RoomVoice::from_flags),
             looping: policy.looping(),
             composition: policy.composition.clone(),
             stereo_speaker_gains: policy.stereo_speaker_gains,
@@ -133,6 +139,9 @@ impl CueHandle {
     pub(crate) fn active(&self) -> bool {
         self.0.active()
     }
+    pub(crate) fn primary_active(&self) -> bool {
+        self.0.primary_active()
+    }
     pub(crate) fn fade_to(&self, frame: u64, to: f32, frames: u64) -> bool {
         self.0.release.fade_to(frame, to, frames)
     }
@@ -164,15 +173,20 @@ impl CueHandle {
 
 impl CueState {
     fn active(&self) -> bool {
+        self.primary_active()
+            || self
+                .children
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .iter()
+                .any(|(_, child)| child.active())
+    }
+
+    fn primary_active(&self) -> bool {
         self.playback.get().map_or_else(
             || self.completion.get().is_none(),
             |instance| !instance.has_reached(crate::render_core::InstanceStatus::Retired),
-        ) || self
-            .children
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .iter()
-            .any(|(_, child)| child.active())
+        )
     }
     fn completion(&self) -> Option<crate::StartDecision> {
         let mut decision = self.completion.get()?.clone();

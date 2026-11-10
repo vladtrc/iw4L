@@ -34,6 +34,52 @@ pub(crate) struct PayloadIndex {
 #[derive(Resource, Clone, Copy)]
 struct SimStateEntity(Entity);
 
+// ECS entity IDs belong to the current World. Checkpoints retain typed payloads
+// and rebuild this world's indexes against the restored kernel generations.
+#[derive(Clone)]
+pub(crate) struct FrameCheckpoint {
+    state: SimState,
+    players: Vec<(ClientId, PlayerState)>,
+    projectiles: Vec<ProjectileState>,
+    movers: Vec<ScriptMoverGentity>,
+    items: Vec<DroppedItem>,
+}
+
+impl FrameCheckpoint {
+    pub(crate) fn capture(world: &World) -> Result<Self, String> {
+        validate_entity_payloads(world)?;
+        Ok(Self {
+            state: world.get::<SimState>(state_entity(world)).unwrap().clone(),
+            players: collect_players(world),
+            projectiles: collect_projectiles(world),
+            movers: collect_script_movers(world),
+            items: collect_dropped_items(world),
+        })
+    }
+
+    pub(crate) fn content(&self) -> std::sync::Arc<crate::SimContent> {
+        self.state.content()
+    }
+
+    pub(crate) fn restore(&self, world: &mut World) {
+        clear_payload_rows(world);
+        let entity = state_entity(world);
+        *world.get_mut::<SimState>(entity).unwrap() = self.state.clone();
+        for &(client, state) in &self.players {
+            spawn_player_row(world, client, state);
+        }
+        for &projectile in &self.projectiles {
+            spawn_projectile(world, projectile);
+        }
+        for &mover in &self.movers {
+            spawn_script_mover_row(world, mover);
+        }
+        for &item in &self.items {
+            spawn_dropped_item(world, item);
+        }
+    }
+}
+
 pub(crate) fn install_state_entity(world: &mut World, entity: Entity) {
     world.insert_resource(SimStateEntity(entity));
 }
@@ -326,10 +372,6 @@ impl FrameWorld<'_> {
         true
     }
 
-    pub(crate) fn dropped_item_count(&self) -> usize {
-        dropped_item_row_count(self.ecs)
-    }
-
     pub(crate) fn dropped_item_numbers_sorted(&self) -> Vec<i32> {
         dropped_item_numbers_sorted(self.ecs)
     }
@@ -563,13 +605,17 @@ impl FrameWorld<'_> {
     }
 
     pub fn snapshot(&self, tick: Tick) -> Snapshot {
-        self.snapshot_with_dynamic_rows(
+        let mut snapshot = self.snapshot_with_dynamic_rows(
             tick,
             collect_players(self.ecs),
             collect_projectiles(self.ecs),
             collect_script_movers(self.ecs),
             collect_dropped_items(self.ecs),
-        )
+            crate::script::host::audio::eq_disabled_entities(self.ecs),
+        );
+        snapshot.meta.campaign_dvars =
+            crate::script::host::natives::iw4::campaign_shared_dvars(self.ecs);
+        snapshot
     }
 
     pub fn shutdown_game(&mut self) {
@@ -654,10 +700,6 @@ pub(crate) fn player_row_count(world: &World) -> usize {
 
 pub(crate) fn script_mover_row_count(world: &World) -> usize {
     script_mover_numbers_sorted(world).len()
-}
-
-fn dropped_item_row_count(world: &World) -> usize {
-    dropped_item_numbers_sorted(world).len()
 }
 
 pub(crate) fn script_mover_by_number(world: &World, number: i32) -> Option<ScriptMoverGentity> {

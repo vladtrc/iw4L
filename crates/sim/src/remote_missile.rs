@@ -16,7 +16,7 @@ const SKY_CEILING_MIN_NORMAL_Z: f32 = 0.7;
 
 // The mark is kept for the missile's whole flight. The pilot's control link is
 // dropped when the pilot dies, and the missile must still pass the sky ceiling then.
-#[derive(Resource, Debug, Default)]
+#[derive(Resource, Clone, Debug, Default)]
 pub(crate) struct RemoteMissiles(Vec<ProjectileId>);
 
 pub(crate) fn mark_remote(world: &mut World, id: ProjectileId) {

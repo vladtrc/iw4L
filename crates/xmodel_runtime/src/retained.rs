@@ -479,6 +479,5 @@ pub fn pose_dobj_with_controller(
         }
     }
     controller(dobj, &requested, &mut locals);
-    dobj.apply_duplicates(&mut locals);
     Ok(dobj.compose(&locals, world_from_model))
 }

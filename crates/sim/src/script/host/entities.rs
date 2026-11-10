@@ -19,6 +19,10 @@ impl StringTable {
 
 #[derive(Clone, Debug, Default)]
 pub struct LevelData {
+    pub anim_trees: Arc<BTreeMap<String, super::animations::ScriptAnimTree>>,
+    pub profile: asset_core::RuntimeProfile,
+    pub campaign_player: Option<crate::ClientId>,
+    pub path_nodes: std::sync::Arc<[asset_core::PathNode]>,
     pub absent_effects: std::collections::BTreeSet<String>,
     pub entities: Vec<Vec<(String, String)>>,
     pub tables: BTreeMap<String, StringTable>,
@@ -157,12 +161,15 @@ pub(crate) struct PersistentFx {
 pub enum EntityKind {
     Map,
     Spawned,
+    Drone,
+    Actor,
     HudElem,
     Player,
     Corpse { slot: u8, anim: Option<Arc<str>> },
     Item(i32),
     Missile(crate::ProjectileId),
     Vehicle,
+    VehicleSpawner,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -190,6 +197,11 @@ pub struct ScriptEntity {
     pub cylinder: Option<(f32, f32)>,
     pub brush: Option<u32>,
     pub trigger_model: Option<u32>,
+    pub eq_disabled: bool,
+    pub hero_only_lighting: bool,
+    pub aim_assist: bool,
+    pub look_at_name: Option<Arc<str>>,
+    pub look_at_description: Option<Arc<str>>,
     pub hidden: bool,
     pub shown_to: u64,
     pub solid: bool,
@@ -205,6 +217,7 @@ pub struct ScriptEntity {
     pub part_ops: Vec<(Arc<str>, bool)>,
     pub anim_op: Option<Option<Arc<str>>>,
     pub loop_sound: Option<Arc<str>>,
+    pub(crate) sound_wait: Option<super::audio::waits::SoundWait>,
     pub(crate) usable: Option<Usable>,
     pub(crate) trigger_policy: super::triggers::TriggerPolicy,
 }
@@ -265,6 +278,11 @@ impl RoundScript {
         kind: EntityKind,
         classname: &str,
     ) -> Result<u64, String> {
+        let actor_slot = if kind == EntityKind::Actor {
+            Some(super::actors::free_slot(self)?)
+        } else {
+            None
+        };
         let number = if kind == EntityKind::HudElem {
             if self
                 .entities
@@ -300,6 +318,11 @@ impl RoundScript {
                 cylinder: None,
                 brush: None,
                 trigger_model: None,
+                eq_disabled: false,
+                hero_only_lighting: false,
+                aim_assist: false,
+                look_at_name: None,
+                look_at_description: None,
                 hidden: false,
                 shown_to: 0,
                 solid: true,
@@ -315,20 +338,34 @@ impl RoundScript {
                 part_ops: Vec::new(),
                 anim_op: None,
                 loop_sound: None,
+                sound_wait: None,
                 usable: None,
                 trigger_policy: Default::default(),
             },
         );
         if kind != EntityKind::HudElem {
             self.set_object_field(id, "classname", Value::string(classname));
-            let code = if classname.starts_with("script_vehicle") {
+            let code = if classname.starts_with("script_vehicle")
+                && classname != "script_vehicle_collmap"
+            {
                 "script_vehicle"
             } else {
                 classname
             };
             self.set_object_field(id, "code_classname", Value::string(code));
+            if self.profile == asset_core::RuntimeProfile::Campaign {
+                self.set_object_field(id, "spawnflags", Value::Int(0));
+            }
+            self.set_object_field(id, "anglelerprate", Value::Float(540.0));
             self.set_object_field(id, "origin", Value::Vector([0.0; 3]));
             self.set_object_field(id, "angles", Value::Vector([0.0; 3]));
+        }
+        if let Some(slot) = actor_slot
+            && let Err(error) = super::actors::allocate(self, id, slot)
+        {
+            self.entities.remove(&id);
+            self.objects.remove(&id);
+            return Err(error);
         }
         Ok(id)
     }
@@ -344,6 +381,11 @@ impl RoundScript {
                 cylinder: None,
                 brush: None,
                 trigger_model: None,
+                eq_disabled: false,
+                hero_only_lighting: false,
+                aim_assist: false,
+                look_at_name: None,
+                look_at_description: None,
                 hidden: false,
                 shown_to: 0,
                 solid: true,
@@ -359,6 +401,7 @@ impl RoundScript {
                 part_ops: Vec::new(),
                 anim_op: None,
                 loop_sound: None,
+                sound_wait: None,
                 usable: None,
                 trigger_policy: Default::default(),
             },
@@ -383,6 +426,18 @@ impl RoundScript {
     }
 
     pub(crate) fn delete_entity(&mut self, id: u64) {
+        super::actors::suppression::dissociate(self, id);
+        self.path_nodes.remove_blocker(id);
+        self.actors.remove(&id);
+        for actor in self.actors.values_mut() {
+            actor.goals.remove_entity(id);
+        }
+        self.spawners.remove(&id);
+        self.sentients.remove(&id);
+        for actor in self.actors.values_mut() {
+            actor.sentient_info.remove(&id);
+        }
+        self.animators.remove(&id);
         if let Some(client) = self.player_client(id) {
             self.release_trigger_claims(client);
         }
@@ -394,7 +449,11 @@ impl RoundScript {
                 presence,
                 matches!(
                     entity.kind,
-                    EntityKind::Spawned | EntityKind::Vehicle | EntityKind::Missile(_)
+                    EntityKind::Spawned
+                        | EntityKind::Drone
+                        | EntityKind::Actor
+                        | EntityKind::Vehicle
+                        | EntityKind::Missile(_)
                 ),
             ));
         }
@@ -515,6 +574,28 @@ impl RoundScript {
                 };
                 self.set_object_field(id, &key, value);
             }
+            if self.profile == asset_core::RuntimeProfile::Campaign
+                && classname.starts_with("script_vehicle")
+            {
+                if classname == "script_vehicle_collmap" {
+                    let entity = self.entities.get_mut(&id).unwrap();
+                    entity.solid = false;
+                    entity.contents = 0;
+                    entity.hidden = true;
+                } else if matches!(self.object_field(id, "spawnflags"), Value::Int(flags) if flags & 2 != 0)
+                {
+                    let entity = self.entities.get_mut(&id).unwrap();
+                    entity.kind = EntityKind::VehicleSpawner;
+                    entity.solid = false;
+                    entity.contents = 0;
+                    entity.hidden = true;
+                }
+            }
+            if self.profile == asset_core::RuntimeProfile::Campaign
+                && super::spawners::aitype_module(classname).is_some()
+            {
+                super::spawners::install_map_actor(self, id, pairs)?;
+            }
             if let Some(entity) = self.entities.get_mut(&id) {
                 if classname == "trigger_radius" {
                     entity.cylinder = Some((radius.unwrap_or(0.0), height.unwrap_or(0.0)));
@@ -535,3 +616,27 @@ impl RoundScript {
 
 pub(crate) const MAX_SCRIPT_ENTITIES: usize = 2048 - 64;
 pub(crate) const MAX_HUD_ELEMS: usize = 1024;
+
+pub(crate) fn load_native_field(runtime: &RoundScript, id: u64, field: &str) -> Option<Value> {
+    super::actors::load_field(runtime, id, field)
+        .or_else(|| super::sentients::load_field(runtime, id, field))
+}
+pub(crate) fn store_native_field(
+    runtime: &mut RoundScript,
+    id: u64,
+    field: &str,
+    value: &Value,
+) -> Result<bool, String> {
+    if super::actors::store_field(runtime, id, field, value)? {
+        return Ok(true);
+    }
+    super::sentients::store_field(runtime, id, field, value)
+}
+pub(crate) fn check_native_array_write(
+    runtime: &RoundScript,
+    id: u64,
+    field: &str,
+) -> Result<(), String> {
+    super::actors::check_array_write(runtime, id, field)?;
+    super::sentients::check_array_write(runtime, id, field)
+}

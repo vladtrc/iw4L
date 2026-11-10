@@ -81,7 +81,42 @@ pub fn light_grid_apply_contrast_tweaks(accum: &mut [u16], contrast_fixed: u16) 
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LightGridTweaks {
+    pub intensity: f32,
+    pub contrast: f32,
+}
+
+impl LightGridTweaks {
+    pub fn valid(self) -> bool {
+        self.intensity.is_finite()
+            && (0.0..=2.0).contains(&self.intensity)
+            && self.contrast.is_finite()
+            && (-1.0..=1.0).contains(&self.contrast)
+    }
+
+    pub fn apply(self, accum: &mut [u16]) {
+        light_grid_apply_intensity_tweaks(accum, self.intensity);
+        light_grid_apply_contrast_tweaks(
+            accum,
+            light_grid_tweak_fixed_from_float(self.contrast + 1.0),
+        );
+    }
+}
+
 pub fn light_grid_accumulate_colors(colors: &[&[u8]], weights: &[u16], out: &mut [u8]) -> bool {
+    light_grid_accumulate_colors_with_tweaks(colors, weights, out, None)
+}
+
+pub fn light_grid_accumulate_colors_with_tweaks(
+    colors: &[&[u8]],
+    weights: &[u16],
+    out: &mut [u8],
+    tweaks: Option<LightGridTweaks>,
+) -> bool {
+    if tweaks.is_some_and(|tweaks| !tweaks.valid()) {
+        return false;
+    }
     if colors.is_empty()
         || colors.len() != weights.len()
         || out.len() != LIGHT_GRID_COLORS_BYTE_COUNT
@@ -98,6 +133,9 @@ pub fn light_grid_accumulate_colors(colors: &[&[u8]], weights: &[u16], out: &mut
     light_grid_expand_colors(colors[0], weights[0], &mut accum);
     for i in 1..colors.len() {
         light_grid_add_colors(colors[i], weights[i], &mut accum);
+    }
+    if let Some(tweaks) = tweaks {
+        tweaks.apply(&mut accum);
     }
     light_grid_pack_colors(&accum, out);
     true

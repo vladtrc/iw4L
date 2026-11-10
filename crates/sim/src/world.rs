@@ -475,6 +475,14 @@ impl SimState {
         self.presentation.script_audio.push(command);
     }
 
+    pub(crate) fn push_objective_update(&mut self, update: crate::ObjectiveUpdate) {
+        self.presentation.objective_updates.push(update);
+    }
+
+    pub(crate) fn take_objective_updates(&mut self) -> Vec<crate::ObjectiveUpdate> {
+        core::mem::take(&mut self.presentation.objective_updates)
+    }
+
     pub(crate) fn take_pending_script_audio(&mut self) -> Vec<crate::ScriptAudioCommand> {
         core::mem::take(&mut self.presentation.script_audio)
     }
@@ -709,7 +717,7 @@ impl SimState {
     }
 
     pub(crate) fn rank_for_xp(&self, xp: i32) -> Option<u32> {
-        self.content.weapons().rank_progression.rank(xp)
+        self.content.weapons().rank_progression.as_ref()?.rank(xp)
     }
 
     pub(crate) fn weapon_unlock_requirement(
@@ -795,6 +803,32 @@ impl SimState {
                         .get(*weapon as usize)
                         .is_some_and(Option::is_some)
             })
+    }
+
+    pub(crate) fn weapon_clip_model(&self, weapon: u32) -> &str {
+        self.content
+            .weapons()
+            .weapon_clip_models
+            .get(weapon as usize)
+            .map_or("", String::as_str)
+    }
+
+    pub(crate) fn weapon_has_thermal_scope(&self, weapon: u32) -> bool {
+        self.content
+            .weapons()
+            .weapon_thermal_scopes
+            .get(weapon as usize)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn weapon_item_facts(&self, weapon: u32) -> Option<crate::WeaponItemFacts> {
+        self.content
+            .weapons()
+            .weapon_items
+            .get(weapon as usize)
+            .copied()
+            .flatten()
     }
 
     pub(crate) fn weapon_world_model(&self, weapon: u32) -> Option<(&str, &[String])> {
@@ -938,6 +972,18 @@ impl SimState {
         }
     }
 
+    pub(crate) fn set_script_viewmodel(
+        &mut self,
+        id: ClientId,
+        name: String,
+    ) -> Result<(), String> {
+        if !self.content.has_script_viewmodel(&name) {
+            return Err(format!("viewmodel `{name}` was not prepared for this map"));
+        }
+        self.client_meta_mut(id).viewmodel = Some(name);
+        Ok(())
+    }
+
     pub fn weapon_combat_len(&self) -> usize {
         self.content.weapons().weapon_combat.len()
     }
@@ -952,6 +998,10 @@ impl SimState {
 
     pub fn content_digest(&self) -> u64 {
         self.content_digest
+    }
+
+    pub(crate) fn checkpoint_content_digest(&self) -> u64 {
+        crate::content::content_digest(&self.content, &self.bootstrap, &[])
     }
 
     pub fn content_components(&self) -> crate::ContentComponents {
@@ -2275,6 +2325,7 @@ impl SimState {
         projectiles: Vec<ProjectileState>,
         script_movers: Vec<crate::gentity::ScriptMoverGentity>,
         dropped_items: Vec<crate::item::DroppedItem>,
+        eq_disabled_entities: Vec<u16>,
     ) -> Snapshot {
         let clients = self
             .clients
@@ -2331,6 +2382,9 @@ impl SimState {
                 clip_l: item.clip_l,
                 stock: item.stock,
                 scavenger: i32::from(item.scavenger),
+                authored: item.authored,
+                dual_wield: item.dual_wield,
+                alternate: item.alternate,
                 parented: self
                     .entity_kernel
                     .current_ref(item.state.number)
@@ -2343,6 +2397,8 @@ impl SimState {
             players,
             projectiles,
             meta: SnapshotMeta {
+                campaign_dvars: Vec::new(),
+                eq_disabled_entities,
                 objectives: self.objectives.clone(),
                 phase: self.phase,
                 round_serial: self.round_serial,

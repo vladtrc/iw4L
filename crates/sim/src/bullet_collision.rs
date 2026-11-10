@@ -123,6 +123,9 @@ impl AuthorityModelOwner {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ColliderId {
+    EntityBody {
+        owner: AuthorityModelOwner,
+    },
     World {
         surface_flags: u32,
         contents: u32,
@@ -508,6 +511,40 @@ impl AuthorityDObjState {
         true
     }
 
+    pub(crate) fn set_script_animation_tree(&mut self, tree: &xmodel_runtime::XAnimTreeRuntime) {
+        let mut snapshot = xmodel_runtime::XAnimTreeSnapshot::active(tree, 1, 0);
+        if self.play_anim.is_none()
+            && self
+                .semantic_state
+                .tree
+                .as_ref()
+                .is_some_and(|old| old.nodes == snapshot.nodes)
+        {
+            return;
+        }
+        self.play_anim = None;
+        self.pose_revision = self.pose_revision.wrapping_add(1);
+        snapshot.state_revision = self.pose_revision;
+        self.semantic_state.tree = Some(snapshot);
+        self.semantic_state.pose_revision = self.pose_revision;
+        self.pose_request.tree = Some(tree.clone());
+        self.current_collision = None;
+        self.materialized_pose_revision = None;
+    }
+
+    pub(crate) fn clear_script_animation_tree(&mut self) {
+        if self.semantic_state.tree.is_none() {
+            return;
+        }
+        self.play_anim = None;
+        self.pose_revision = self.pose_revision.wrapping_add(1);
+        self.semantic_state.tree = None;
+        self.semantic_state.pose_revision = self.pose_revision;
+        self.pose_request.tree = None;
+        self.current_collision = None;
+        self.materialized_pose_revision = None;
+    }
+
     pub fn clear_script_model_play_anim(&mut self) {
         if self.play_anim.take().is_none() {
             return;
@@ -759,6 +796,7 @@ impl EntityCollisionEpoch {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct EntityCollisionTraceGeom {
+    pub(crate) body: Option<crate::entity_body::EntityBodyPose>,
     pub owner: AuthorityModelOwner,
     pub epoch: EntityCollisionEpoch,
     pub collision: Option<AuthorityDObjCollision>,
@@ -771,6 +809,7 @@ pub struct EntityCollisionTraceGeom {
 
 #[derive(Clone, Debug)]
 pub struct EntityCollisionCapabilities {
+    pub(crate) body: Option<crate::entity_body::EntityBodyPose>,
     pub owner: AuthorityModelOwner,
     epoch: EntityCollisionEpoch,
     pub dobj: Option<AuthorityDObjState>,
@@ -787,6 +826,7 @@ impl EntityCollisionCapabilities {
         linked_brushes: Vec<LinkedBrushCollisionBrush>,
     ) -> Self {
         Self {
+            body: None,
             owner,
             epoch: EntityCollisionEpoch::CurrentTick,
             dobj,
@@ -823,6 +863,12 @@ impl EntityCollisionCapabilities {
             .dobj
             .as_ref()
             .and_then(|state| state.current_collision.as_ref());
+        if let Some(body) = self.body {
+            let (mins, maxs) = body.bounds.abs_bounds(body.origin);
+            if !matches!(ray_aabb_box(start, end, mins, maxs), RayAabb::Miss) {
+                return true;
+            }
+        }
         entity_abs_aabb(&self.linked_brushes, collision, cmodels).is_some_and(|(mins, maxs)| {
             !matches!(ray_aabb_box(start, end, mins, maxs), RayAabb::Miss)
         })
@@ -831,6 +877,7 @@ impl EntityCollisionCapabilities {
     pub fn trace_geom(&self) -> EntityCollisionTraceGeom {
         if !self.solid {
             return EntityCollisionTraceGeom {
+                body: None,
                 owner: self.owner,
                 epoch: self.epoch,
                 collision: None,
@@ -840,17 +887,20 @@ impl EntityCollisionCapabilities {
             };
         }
         EntityCollisionTraceGeom {
+            body: self.body,
             owner: self.owner,
             epoch: self.epoch,
             collision: self
                 .dobj
                 .as_ref()
                 .and_then(|state| state.current_collision.clone()),
-            dobj_contents: self.dobj.as_ref().and_then(|state| {
-                state
-                    .capability
-                    .as_ref()
-                    .and_then(|capability| capability.contents)
+            dobj_contents: self.body.map(|body| body.bounds.contents).or_else(|| {
+                self.dobj.as_ref().and_then(|state| {
+                    state
+                        .capability
+                        .as_ref()
+                        .and_then(|capability| capability.contents)
+                })
             }),
             model_key: self.dobj.as_ref().map(|state| state.current_model.clone()),
             linked_brushes: self.linked_brushes.clone(),
@@ -1377,6 +1427,12 @@ fn bullet_trace_filtered(
     }
 
     for geom in script_models {
+        if geom
+            .body
+            .is_some_and(|body| body.bounds.contents & query.mask == 0)
+        {
+            continue;
+        }
         if query.ignore_model.is_some() && geom.owner.script_model() == query.ignore_model {
             continue;
         }
@@ -1389,6 +1445,34 @@ fn bullet_trace_filtered(
             }
         } else {
             continue;
+        }
+        if let Some(body) = geom.body
+            && body.bounds.contents & query.mask != 0
+            && geom.collision.is_none()
+        {
+            let collider = ColliderId::EntityBody { owner: geom.owner };
+            let hit = body.trace(movement_iw4::GroundTraceInput {
+                start: query.start,
+                end: query.end,
+                mins: [0.; 3],
+                maxs: [0.; 3],
+                tracemask: query.mask,
+            });
+            if hit.startsolid != 0 {
+                return TraceOutcome::StartSolid {
+                    collider: Some(collider),
+                    end: query.start,
+                };
+            }
+            if hit.fraction < 1. {
+                candidates.push(TraceCandidate {
+                    fraction: hit.fraction,
+                    endpos: hit.endpos,
+                    normal: hit.normal,
+                    collider,
+                    startsolid: false,
+                });
+            }
         }
         for brush in &geom.linked_brushes {
             let Some(cmodel) =
@@ -1884,7 +1968,11 @@ fn fire_penetrate(
         start = next_start;
         seg_start = last_hit.end;
         let entry_pos = last_hit.end;
-        let fwd = decode_hit(trace_from(world, query, start, ignore_hit));
+        let forward_query = BulletTraceQuery {
+            ignore_model: script_model_id(last_hit.collider).or(query.ignore_model),
+            ..*query
+        };
+        let fwd = decode_hit(trace_from(world, &forward_query, start, ignore_hit));
         let (trace_hit, fwd_hit) = match fwd {
             Decode::Hit(hit) => (true, Some(hit)),
             Decode::StopMiss { end } => {
@@ -1906,7 +1994,7 @@ fn fire_penetrate(
             Decode::StopSolid { collider, .. } => {
                 let Some(exit) = walk_out_of_solid(
                     world,
-                    query,
+                    &forward_query,
                     start,
                     dir,
                     ignore_hit,
@@ -1967,7 +2055,10 @@ fn fire_penetrate(
             mask: query.mask,
             ignore: query.ignore,
             ignore_hit: rev_ignore,
-            ignore_model: query.ignore_model,
+            ignore_model: fwd_hit
+                .as_ref()
+                .and_then(|hit| script_model_id(hit.collider))
+                .or(query.ignore_model),
         };
         let rev = (world.trace)(&rev_q);
         let (rev_hit_pos, rev_surf, rev_hit) = match rev {
@@ -2164,7 +2255,7 @@ fn surf_type_for(collider: ColliderId) -> u8 {
             hitloc: crate::shield::HITLOC,
             ..
         } => crate::shield::SURFACE,
-        ColliderId::Player { .. } => SURF_TYPE_FLESH as u8,
+        ColliderId::Player { .. } | ColliderId::EntityBody { .. } => SURF_TYPE_FLESH as u8,
         ColliderId::EntityDObjBone { surface_flags, .. }
         | ColliderId::EntityLinkedBrush { surface_flags, .. } => {
             surface_type_from_flags(surface_flags)
@@ -2187,7 +2278,7 @@ fn collider_surface_flags(collider: ColliderId) -> u32 {
             hitloc: crate::shield::HITLOC,
             ..
         } => (u32::from(crate::shield::SURFACE) << 20) | weapon_iw4::SURF_NOPENETRATE,
-        ColliderId::Player { .. } => SURF_TYPE_FLESH << 20,
+        ColliderId::Player { .. } | ColliderId::EntityBody { .. } => SURF_TYPE_FLESH << 20,
         ColliderId::EntityDObjBone { surface_flags, .. }
         | ColliderId::EntityLinkedBrush { surface_flags, .. } => surface_flags,
     }
@@ -2236,7 +2327,8 @@ fn collider_hit_kind(collider: ColliderId, startsolid: bool) -> (i32, u16) {
         ColliderId::World { .. } => (trace_iw4::HITTYPE_ENTITY, trace_iw4::ENTITYNUM_WORLD),
         ColliderId::Player { .. }
         | ColliderId::EntityDObjBone { .. }
-        | ColliderId::EntityLinkedBrush { .. } => (trace_iw4::HITTYPE_ENTITY, 0),
+        | ColliderId::EntityLinkedBrush { .. }
+        | ColliderId::EntityBody { .. } => (trace_iw4::HITTYPE_ENTITY, 0),
     }
 }
 
@@ -2264,7 +2356,17 @@ fn is_damage_collider(collider: ColliderId) -> bool {
         ColliderId::Player { .. }
             | ColliderId::EntityDObjBone { .. }
             | ColliderId::EntityLinkedBrush { .. }
+            | ColliderId::EntityBody { .. }
     )
+}
+
+fn script_model_id(collider: ColliderId) -> Option<ScriptModelId> {
+    match collider {
+        ColliderId::EntityBody { owner }
+        | ColliderId::EntityDObjBone { owner, .. }
+        | ColliderId::EntityLinkedBrush { owner, .. } => owner.script_model(),
+        _ => None,
+    }
 }
 
 fn player_id(collider: ColliderId) -> Option<ClientId> {
@@ -2424,7 +2526,9 @@ fn hit_order_key(hit: &TraceCandidate) -> (u8, u32, u8) {
         ColliderId::EntityDObjBone { owner, bone, .. } => {
             (1, owner_order_key(owner).wrapping_add(u32::from(bone)), 0)
         }
-        ColliderId::EntityLinkedBrush { owner, .. } => (2, owner_order_key(owner), 0),
+        ColliderId::EntityLinkedBrush { owner, .. } | ColliderId::EntityBody { owner } => {
+            (2, owner_order_key(owner), 0)
+        }
         ColliderId::World { .. } => (3, 0, 0),
     }
 }
@@ -2684,7 +2788,17 @@ fn geom_abs_aabb(
     geom: &EntityCollisionTraceGeom,
     cmodels: &SimClipCmodels,
 ) -> Option<([f32; 3], [f32; 3])> {
-    entity_abs_aabb(&geom.linked_brushes, geom.collision.as_ref(), cmodels)
+    let model = entity_abs_aabb(&geom.linked_brushes, geom.collision.as_ref(), cmodels);
+    let Some(body) = geom.body else {
+        return model;
+    };
+    let (mins, maxs) = body.bounds.abs_bounds(body.origin);
+    Some(model.map_or((mins, maxs), |(a, b)| {
+        (
+            std::array::from_fn(|i| a[i].min(mins[i])),
+            std::array::from_fn(|i| b[i].max(maxs[i])),
+        )
+    }))
 }
 
 fn entity_abs_aabb(

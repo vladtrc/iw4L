@@ -354,6 +354,9 @@ pub(super) fn idle_from_capture(c: WeaponIdleCapture) -> WeaponIdleInputs {
 }
 
 pub(super) fn merge_body_facts(dst: &mut WeaponBodyFacts, src: WeaponBodyFacts) {
+    if dst.item_ammo.is_none() {
+        dst.item_ammo = src.item_ammo;
+    }
     dst.dual_wield |= src.dual_wield;
     if dst.fire_time_ms == 0 {
         dst.fire_time_ms = src.fire_time_ms;

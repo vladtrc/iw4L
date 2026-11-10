@@ -358,6 +358,7 @@ impl Iw5SoundCapture {
                 }
             });
         CapturedAlias {
+            slave_percentage: None,
             secondary: optional_name(s, row, s.layout(sz::SND_ALIAS_SECONDARY_OFF, 16)),
             chain: optional_name(s, row, s.layout(sz::SND_ALIAS_CHAIN_OFF, 24)),
             mixer_group: optional_name(s, row, s.layout(sz::SND_ALIAS_MIXER_GROUP_OFF, 32)),

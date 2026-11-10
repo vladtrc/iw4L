@@ -1,6 +1,8 @@
+mod actor_overlay;
 mod ammo;
 mod blood;
 mod breath_hint;
+mod campaign_objectives;
 mod chrome;
 mod compass;
 mod connection_notice;

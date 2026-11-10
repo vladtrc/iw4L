@@ -26,6 +26,7 @@ impl CollisionScene {
     }
 
     pub fn adopt_snapshot(&mut self, snapshot: &Snapshot) {
+        crate::entity_body::synchronize(&mut self.capabilities, &snapshot.meta.script_movers);
         crate::presence::follow_movers(
             &mut self.capabilities,
             &snapshot.meta.script_movers,
@@ -184,6 +185,10 @@ pub(crate) fn model_movement_brushes(
 ) -> Vec<SimBrush> {
     let mut brushes = Vec::new();
     for row in capabilities.iter().filter(|row| row.solid && keep(row)) {
+        if let Some(body) = row.body {
+            brushes.push(body.bounds.brush(body.origin));
+            continue;
+        }
         let Some(dobj) = &row.dobj else { continue };
         let Some(capability) = &dobj.capability else {
             continue;
@@ -455,9 +460,12 @@ pub(crate) fn trace_scene(
         linked,
         input,
     );
+    let hit = crate::entity_body::trace_bodies(hit, capabilities, input, exclude);
     clip_move_to_model_brushes(
         hit,
-        &model_movement_brushes(capabilities, |row| Some(row.owner) != exclude),
+        &model_movement_brushes(capabilities, |row| {
+            row.body.is_none() && Some(row.owner) != exclude
+        }),
         input,
     )
 }

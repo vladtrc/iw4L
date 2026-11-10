@@ -148,7 +148,7 @@ impl OverlayCodeNeed {
     }
 }
 
-pub fn overlay_smodel_world_matrix(
+pub fn overlay_world_matrix(
     sources: &mut RuntimeCodeSources,
     view_origin: Vec3,
     world_from_local: Mat4,

@@ -160,6 +160,7 @@ pub(crate) struct CueMix {
 }
 
 pub(crate) struct CueTrigger {
+    pub force_master: bool,
     pub event: Option<crate::AudioEvent>,
     pub bank: Arc<asset_audio::SoundCatalog>,
     pub namespace: FamilyId,
@@ -174,6 +175,7 @@ pub(crate) struct CueTrigger {
 }
 
 pub(crate) struct CueIntent {
+    pub force_master: bool,
     pub event: Option<crate::AudioEvent>,
     pub origin_inches: Option<[f32; 3]>,
     pub emitter: Option<u32>,
@@ -370,6 +372,23 @@ impl CueWork {
             .stereo_speaker_gains
             .map(|gains| gains[usize::from(pcm.channels() == 2)]);
         let mut media = RenderMedia::from_buffer(pcm);
+        if self.request.scope != AudioScope::Menu {
+            media.master_slave = match crate::master::MasterVoice::from_policy(
+                cue.policy.master_slave,
+                intent.force_master,
+            ) {
+                Ok(voice) => Some(voice),
+                Err(error) => return self.fail(error),
+            };
+        }
+        if self.request.scope != AudioScope::Menu {
+            media.room = cue.policy.room;
+            media.eq_channel = cue
+                .policy
+                .channel
+                .filter(|channel| channel.namespace == asset_core::FamilyId::IW4 && channel.id < 64)
+                .map(|channel| channel.id as u8);
+        }
         if let Some(gain) = output_gain {
             media.output_gain = gain;
         }
@@ -523,6 +542,7 @@ impl CueWork {
             pitch_scale: 1.0,
             volume_scale: self.request.volume_scale,
             execution: CueIntent {
+                force_master: intent.force_master,
                 event: intent.event,
                 origin_inches: intent.origin_inches,
                 emitter: intent.emitter,

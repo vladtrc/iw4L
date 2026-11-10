@@ -1532,6 +1532,7 @@ fn enqueue_remote_body_lighting(
                 owner: ModelLightingOwner::RemoteClient(client),
                 origin: item.origin,
                 lookup_fallback,
+                hero_lighting: true,
             }),
         );
     }

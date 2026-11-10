@@ -19,7 +19,10 @@ pub use area_entities::{
     AREA_SECTOR_COUNT, AreaBounds, AreaEntityLink, AreaEntityWorld, AreaEntityWorldError,
     AreaSector,
 };
-pub use cmodel::{ClipCmodel, CmodelTransform, clip_handle_to_model, transformed_capsule_trace};
+pub use cmodel::{
+    ClipCmodel, CmodelTransform, clip_handle_to_model, transformed_box_sight_trace,
+    transformed_capsule_trace,
+};
 pub use layouts::{
     Cbrush, Cbrushside, Cleaf, CleafBrushNode, ClipMaterial, Cmodel, Cnode, CollisionAabbTree,
     CollisionPartition,

@@ -417,7 +417,10 @@ fn classify_shot(outcome: TraceOutcome) -> SightSample {
         },
         TraceOutcome::Hit {
             fraction,
-            collider: ColliderId::EntityDObjBone { .. } | ColliderId::EntityLinkedBrush { .. },
+            collider:
+                ColliderId::EntityDObjBone { .. }
+                | ColliderId::EntityLinkedBrush { .. }
+                | ColliderId::EntityBody { .. },
             ..
         } => SightSample::Blocked {
             fraction,

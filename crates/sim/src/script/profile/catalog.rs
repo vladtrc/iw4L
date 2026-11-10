@@ -16,6 +16,8 @@ pub enum Owner {
     PlayerCommand,
     Helicopter,
     Vehicle,
+    Actor,
+    Sentient,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -49,6 +51,12 @@ pub struct Catalog {
 impl Catalog {
     pub fn iw4() -> Self {
         Self::from_list(crate::script::FamilyId::IW4, super::iw4_catalog::IW4)
+    }
+    pub fn iw4_campaign() -> Self {
+        Self::from_list(
+            crate::script::FamilyId::IW4,
+            super::iw4_campaign_catalog::IW4_CAMPAIGN,
+        )
     }
     pub fn from_list(realm: crate::script::FamilyId, list: &[Builtin]) -> Self {
         let mut catalog = Self {

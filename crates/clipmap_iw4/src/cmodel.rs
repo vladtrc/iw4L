@@ -15,6 +15,62 @@ pub fn clip_handle_to_model(cmodels: &[ClipCmodel], handle: u32) -> Option<&Clip
     cmodels.get(handle as usize)
 }
 
+pub fn transformed_box_sight_trace<B: BrushView>(
+    cmodel: &ClipCmodel,
+    leafbrushes: &[u16],
+    brushes: &[B],
+    ext: &TraceExtents,
+    origin: [f32; 3],
+    angles: [f32; 3],
+) -> bool {
+    let axis = angles_to_axis(angles);
+    let half: [f32; 3] = core::array::from_fn(|i| (ext.maxs[i] - ext.mins[i]) * 0.5);
+    let mid: [f32; 3] = core::array::from_fn(|i| (ext.maxs[i] + ext.mins[i]) * 0.5);
+    let mut start = core::array::from_fn(|i| ext.start[i] + mid[i] - origin[i]);
+    let mut end = core::array::from_fn(|i| ext.end[i] + mid[i] - origin[i]);
+    rotate_point(&mut start, &axis);
+    rotate_point(&mut end, &axis);
+    let first = cmodel.first_brush as usize;
+    let last = first + usize::from(cmodel.num_brushes);
+    for &index in leafbrushes.get(first..last).unwrap_or(&[]) {
+        let Some(brush) = brushes.get(usize::from(index)) else {
+            continue;
+        };
+        let brush = crate::brush_ref(brush);
+        if brush.contents & ext.mask == 0 || brush.planes.is_empty() {
+            continue;
+        }
+        let (mut enter, mut leave) = (0.0f32, 1.0f32);
+        let mut outside = false;
+        for plane in brush.planes {
+            let radius: f32 = (0..3).map(|i| plane[i].abs() * half[i]).sum();
+            let a: f32 = (0..3).map(|i| plane[i] * start[i]).sum::<f32>() - plane[3] - radius;
+            let b: f32 = (0..3).map(|i| plane[i] * end[i]).sum::<f32>() - plane[3] - radius;
+            if a > 0.0 && b > 0.0 {
+                outside = true;
+                break;
+            }
+            if a <= 0.0 && b <= 0.0 {
+                continue;
+            }
+            let fraction = a / (a - b);
+            if a > b {
+                enter = enter.max(fraction);
+            } else {
+                leave = leave.min(fraction);
+            }
+            if enter > leave {
+                outside = true;
+                break;
+            }
+        }
+        if !outside {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn transformed_capsule_trace<B: BrushView>(
     cmodel: &ClipCmodel,
     leafbrushes: &[u16],

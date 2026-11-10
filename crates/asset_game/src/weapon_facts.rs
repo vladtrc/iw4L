@@ -2,6 +2,7 @@ use weapon_iw4::{WeaponIdleInputs, WeaponMovementOfsInputs};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct WeaponBodyFacts {
+    pub item_ammo: Option<weapon_iw4::WeaponItemAmmoFacts>,
     pub body_resolved: bool,
 
     pub fire_time_ms: i32,

@@ -737,6 +737,7 @@ pub(crate) fn enqueue_glass_model_lighting(
             owner,
             origin: draw.origin,
             lookup_fallback,
+            hero_lighting: false,
         }));
     }
 }

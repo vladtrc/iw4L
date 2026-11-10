@@ -26,6 +26,9 @@ type LightingShOutput = (u32, std::sync::Arc<Vec<Option<[[f32; 4]; 3]>>>);
 pub struct WorldModelLightingCache {
     pub handle: u16,
 
+    tweaks: Option<lighting_iw4::LightGridTweaks>,
+    hero_enabled: bool,
+    slot_hero_lighting: Vec<bool>,
     body_handles: HashMap<ModelLightingOwner, u16>,
     slot_owner: Vec<Option<ModelLightingOwner>>,
     rover: u32,
@@ -64,6 +67,9 @@ impl WorldModelLightingCache {
         let ones = vec![!0u32; words];
         Self {
             handle: 0,
+            tweaks: None,
+            hero_enabled: true,
+            slot_hero_lighting: vec![false; limit],
             body_handles: HashMap::new(),
             slot_owner: vec![None; limit],
             rover: 0,
@@ -135,10 +141,21 @@ impl WorldModelLightingCache {
             owner: key,
             origin,
             lookup_fallback,
+            hero_lighting,
         } = request;
         let dims = atlas.dims;
         let base = dims.smodel_entry_limit;
         let current = self.body_handles.get(&key).copied().unwrap_or(0);
+        let current =
+            if lighting_iw4::model_lighting_cache_slot(base, current).is_some_and(|slot| {
+                self.slot_hero_lighting.get(slot as usize).copied() != Some(hero_lighting)
+            }) {
+                // Changed mode requires a new tile even when the origin is unchanged.
+                self.body_handles.remove(&key);
+                0
+            } else {
+                current
+            };
         // Rewriting a held slot in place relies on its tile write reaching the GPU
         // after every earlier frame's draws.
         let owned = lighting_iw4::model_lighting_cache_slot(base, current)
@@ -191,6 +208,7 @@ impl WorldModelLightingCache {
                 self.body_handles.insert(key, handle);
                 if let Some(owner) = self.slot_owner.get_mut(slot as usize) {
                     *owner = Some(key);
+                    self.slot_hero_lighting[slot as usize] = hero_lighting;
                 }
                 (handle, true, Some(slot))
             }
@@ -243,10 +261,16 @@ impl WorldModelLightingCache {
                 self.body_handles.remove(&key);
                 return 0;
             };
-            match asset_model::sample_light_grid_with_lookup_fallback(
+            match asset_model::sample_light_grid_with_hero_lights(
                 &grid.view(),
                 origin,
                 lookup_fallback,
+                if hero_lighting { self.tweaks } else { None },
+                if hero_lighting && self.hero_enabled {
+                    &grid.hero_lights
+                } else {
+                    &[]
+                },
             ) {
                 Ok(sampled) => {
                     if key == ModelLightingOwner::Eye {
@@ -379,6 +403,7 @@ pub fn viewmodel_lighting_origin(
 
 pub(crate) fn begin_dyn_model_lighting_frame(
     cache: Option<ResMut<WorldModelLightingCache>>,
+    presented: Option<Res<net::PresentedSnapshot>>,
     mut requests: ResMut<ModelLightingRequests>,
     mut resolved: ResMut<ResolvedModelLightingTable>,
 ) {
@@ -387,7 +412,63 @@ pub(crate) fn begin_dyn_model_lighting_frame(
     let Some(mut cache) = cache else {
         return;
     };
+    let tweaks = presented
+        .as_ref()
+        .and_then(|presented| presented.snapshot())
+        .and_then(|snapshot| light_grid_tweaks(&snapshot.meta.objectives.server_info));
+    let hero_enabled = presented
+        .as_ref()
+        .and_then(|presented| presented.snapshot())
+        .is_none_or(|snapshot| hero_lighting_enabled(&snapshot.meta.objectives.server_info));
+    if cache.tweaks != tweaks || cache.hero_enabled != hero_enabled {
+        // Discard ownership, retaining the frame free-bit history so tiles still in
+        // flight cannot be overwritten by a changed lighting setting.
+        cache.body_handles.clear();
+        cache.slot_owner.fill(None);
+        cache.handle = 0;
+        cache.tweaks = tweaks;
+        cache.hero_enabled = hero_enabled;
+    }
     cache.toggle_frame();
+}
+
+fn hero_lighting_enabled(dvars: &[(String, String)]) -> bool {
+    dvars
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("r_herolighting"))
+        .and_then(|(_, value)| value.parse::<i32>().ok())
+        .unwrap_or(1)
+        != 0
+}
+
+fn light_grid_tweaks(dvars: &[(String, String)]) -> Option<lighting_iw4::LightGridTweaks> {
+    let value = |name: &str| {
+        dvars
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    };
+    let enabled = |name: &str, default: i32| {
+        value(name)
+            .and_then(|value| value.parse::<i32>().ok())
+            .unwrap_or(default)
+            != 0
+    };
+    if !enabled("r_lightgridenabletweaks", 0)
+        || !enabled("r_lightgridusetweakedvalues", 1)
+        || !enabled("r_herolighting", 1)
+    {
+        return None;
+    }
+    let tweaks = lighting_iw4::LightGridTweaks {
+        intensity: value("r_lightgridintensity")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(1.0),
+        contrast: value("r_lightgridcontrast")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0.0),
+    };
+    tweaks.valid().then_some(tweaks)
 }
 
 pub fn enqueue_fpv_model_lighting(
@@ -438,6 +519,7 @@ pub fn enqueue_fpv_model_lighting(
         owner: ModelLightingOwner::Eye,
         origin,
         lookup_fallback,
+        hero_lighting: false,
     });
 }
 

@@ -6,7 +6,7 @@ use glam::{Mat4, Vec3};
 use crate::overlay::{
     OverlayCodeNeed, apply_shadowable_light, overlay_code_mesh_tess_code_constants,
     overlay_particle_cloud_tess_code_constants, overlay_smodel_tess_code_constants,
-    overlay_smodel_world_matrix, overlay_viewmodel_depth_hack,
+    overlay_viewmodel_depth_hack, overlay_world_matrix,
 };
 use render_frame::{
     MaterialExecFrame, RetainedDrawItem, RetainedDrawKind, host_viewmodel_render_fx_flags,
@@ -315,7 +315,10 @@ fn execution_share_key(
 
 fn instance_matrix_bits(draw: &RetainedDrawItem) -> Option<[u32; 16]> {
     match draw.kind {
-        RetainedDrawKind::Smodel {
+        RetainedDrawKind::World {
+            world_from_local, ..
+        }
+        | RetainedDrawKind::Smodel {
             world_from_local, ..
         }
         | RetainedDrawKind::XModel {
@@ -325,13 +328,16 @@ fn instance_matrix_bits(draw: &RetainedDrawItem) -> Option<[u32; 16]> {
     }
 }
 
-fn smodel_code_world_from_local(kind: &RetainedDrawKind) -> Mat4 {
+fn draw_code_world_from_local(kind: &RetainedDrawKind) -> Mat4 {
     match *kind {
         RetainedDrawKind::Smodel {
             stream: Some(lighting_iw4::SmodelSurfPath::Skinned),
             ..
         } => Mat4::IDENTITY,
-        RetainedDrawKind::Smodel {
+        RetainedDrawKind::World {
+            world_from_local, ..
+        }
+        | RetainedDrawKind::Smodel {
             world_from_local, ..
         }
         | RetainedDrawKind::XModel {
@@ -406,15 +412,27 @@ fn overlay_draw_material(
         runtime.view_origin,
     )?;
     match draw.kind {
+        RetainedDrawKind::World {
+            world_from_local, ..
+        } => {
+            overlay_world_matrix(
+                scratch,
+                runtime.view_origin,
+                world_from_local,
+                runtime.clip_from_world,
+                runtime.view_from_world,
+                need,
+            );
+        }
         RetainedDrawKind::Smodel {
             lighting_handle,
             packed_lighting,
             ..
         } => {
-            overlay_smodel_world_matrix(
+            overlay_world_matrix(
                 scratch,
                 runtime.view_origin,
-                smodel_code_world_from_local(&draw.kind),
+                draw_code_world_from_local(&draw.kind),
                 runtime.clip_from_world,
                 runtime.view_from_world,
                 need,
@@ -434,7 +452,7 @@ fn overlay_draw_material(
             world_from_local,
             ..
         } => {
-            overlay_smodel_world_matrix(
+            overlay_world_matrix(
                 scratch,
                 runtime.view_origin,
                 world_from_local,
@@ -503,7 +521,6 @@ fn overlay_draw_material(
                 need,
             );
         }
-        _ => {}
     }
     Ok(())
 }
@@ -518,6 +535,18 @@ fn overlay_draw_obj_only(
     overlay_reflection_sh(runtime.frame, draw, scratch);
     overlay_smodel_lighting_sh(runtime.frame, draw, scratch);
     match draw.kind {
+        RetainedDrawKind::World {
+            world_from_local, ..
+        } => {
+            overlay_world_matrix(
+                scratch,
+                runtime.view_origin,
+                world_from_local,
+                runtime.clip_from_world,
+                runtime.view_from_world,
+                need,
+            );
+        }
         RetainedDrawKind::Smodel {
             lighting_handle,
             packed_lighting,
@@ -528,10 +557,10 @@ fn overlay_draw_obj_only(
             packed_lighting,
             ..
         } => {
-            overlay_smodel_world_matrix(
+            overlay_world_matrix(
                 scratch,
                 runtime.view_origin,
-                smodel_code_world_from_local(&draw.kind),
+                draw_code_world_from_local(&draw.kind),
                 runtime.clip_from_world,
                 runtime.view_from_world,
                 need,
@@ -551,7 +580,7 @@ fn overlay_draw_obj_only(
                     scratch,
                     clip,
                     runtime.view_origin,
-                    smodel_code_world_from_local(&draw.kind),
+                    draw_code_world_from_local(&draw.kind),
                 );
             }
         }
@@ -593,7 +622,6 @@ fn overlay_draw_obj_only(
                 need,
             );
         }
-        _ => {}
     }
 }
 

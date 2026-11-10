@@ -10,6 +10,7 @@ pub enum ReliableRow {
     Failure(String),
     Sound(crate::SvcSound),
     ScriptAudio(sim::ScriptAudioCommand),
+    Objective(sim::ObjectiveUpdate),
     Card(crate::SvcCardSlot),
     Menu(crate::SvcOpenMenu),
     Splash(crate::SvcHudSplash),
@@ -138,6 +139,12 @@ pub fn encode_reliable_payload(
     for (seq, row) in rows {
         out.put_u16(*seq);
         match row {
+            ReliableRow::Objective(value) => {
+                out.put_u8(10);
+                out.put_u8(value.state as u8);
+                out.put_u16(value.text.len() as u16);
+                out.put_bytes(value.text.as_bytes());
+            }
             ReliableRow::ScriptAudio(value) => {
                 out.put_u8(9);
                 crate::svc_script_audio::encode_script_audio(out, value);
@@ -189,6 +196,28 @@ pub fn decode_reliable_payload(input: &mut WireReader<'_>) -> Result<ReliablePay
     for _ in 0..count {
         let seq = input.get_u16()?;
         let row = match input.get_u8()? {
+            10 => {
+                let state = sim::ObjectiveState::from_u8(input.get_u8()?)
+                    .filter(|s| {
+                        matches!(
+                            s,
+                            sim::ObjectiveState::Active
+                                | sim::ObjectiveState::Current
+                                | sim::ObjectiveState::Done
+                                | sim::ObjectiveState::Failed
+                        )
+                    })
+                    .ok_or(WireError::Malformed("objective update state"))?;
+                let len = input.get_u16()? as usize;
+                if len > 1023 {
+                    return Err(WireError::Malformed("objective update length"));
+                }
+                let mut bytes = vec![0; len];
+                input.get_bytes(&mut bytes)?;
+                let text = String::from_utf8(bytes)
+                    .map_err(|_| WireError::Malformed("objective update text"))?;
+                ReliableRow::Objective(sim::ObjectiveUpdate { state, text })
+            }
             ROW_TAG_EVENT => ReliableRow::Event(decode_event(input)?),
             9 => ReliableRow::ScriptAudio(crate::svc_script_audio::decode_script_audio(input)?),
             2 => {

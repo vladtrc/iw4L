@@ -247,6 +247,13 @@ fn actor_report(
     );
     report["death_tick"] = json!(run.death_tick.map(|t| t.0));
     report["future_weapons"] = json!(run.program.future_weapons);
+    report["allow_menu_responses"] = json!(run.program.allow_menu_responses);
+    report["menu_responses"] = json!(
+        run.menu_responses
+            .iter()
+            .map(|(tick, menu, response)| json!({"tick":tick.0,"menu":menu,"response":response}))
+            .collect::<Vec<_>>()
+    );
     report["weapon_facts"] = json!(run.initial_player.weapons.iter().copied()
         .filter(|&id|id>0).map(|id|id as u32)
         .chain(run.program.future_weapons.iter().map(|&id|u32::from(id)))
@@ -256,7 +263,8 @@ fn actor_report(
             "drop_ms":f.drop_time_ms,"raise_ms":f.raise_time_ms,"first_raise_ms":f.first_raise_time_ms,
             "reload_ms":f.reload_time_ms,"reload_add_ms":f.reload_add_time_ms,
             "rechamber_ms":f.rechamber_time_ms,"bolt_delay_ms":f.rechamber_bolt_delay_ms,
-            "bolt_action":f.bolt_action,"clip_size":f.clip_size
+            "bolt_action":f.bolt_action,"clip_size":f.clip_size,
+            "clip_only":f.clip_only,"start_ammo":f.start_ammo,"max_ammo":f.max_ammo
         }))).collect::<Vec<_>>());
     report["missile_facts"] = json!(
         run.initial_player
@@ -380,6 +388,7 @@ fn parse_program(
             "actors",
             "future_weapons",
             "stop_on_death",
+            "allow_menu_responses",
             "scoreboard_window_ms",
         ],
     )?;
@@ -402,6 +411,7 @@ fn parse_program(
                         "samples",
                         "future_weapons",
                         "stop_on_death",
+                        "allow_menu_responses",
                         "scoreboard_window_ms",
                     ],
                 )?;
@@ -505,6 +515,11 @@ fn parse_actor(value: &Value, client: sim::ClientId) -> Result<InputProgram, Str
             })
             .transpose()?
             .unwrap_or_else(Vec::new),
+        allow_menu_responses: value
+            .get("allow_menu_responses")
+            .map(|v| v.as_bool().ok_or("allow_menu_responses must be a boolean"))
+            .transpose()?
+            .unwrap_or(false),
         stop_on_death: value
             .get("stop_on_death")
             .map(|v| v.as_bool().ok_or("stop_on_death must be a boolean"))

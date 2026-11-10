@@ -87,6 +87,7 @@ impl NativeWeaponCapture for WeaponCatalog {
                 .map(t6_model_name),
             hand_xmodel: None,
             knife_xmodel: None,
+            clip_model: None,
             world_model: weapon
                 .def_asset_array_name(ext_t6_fastfile::weapon::def::WORLD_MODEL, 0)
                 .map(t6_model_name),

@@ -92,6 +92,7 @@ pub struct FpvWeaponTable {
     pub(super) guns: Vec<Option<FpvMeshIndex>>,
     pub(super) slots: Vec<[FpvWeaponSlot; 2]>,
     pub(super) alternate_slots: HashMap<(u32, u32), [FpvWeaponSlot; 2]>,
+    pub(super) script_slots: HashMap<(u32, u32, String), [FpvWeaponSlot; 2]>,
 }
 
 impl FpvWeaponTable {
@@ -150,7 +151,26 @@ impl FpvWeaponTable {
         Ok(BoundFpvTable(self))
     }
 
-    fn slot_unchecked(&self, weapon: u32, parent: u32, axis: bool) -> &FpvWeaponSlot {
+    fn slot_unchecked(
+        &self,
+        weapon: u32,
+        parent: u32,
+        axis: bool,
+        viewmodel: Option<&str>,
+    ) -> &FpvWeaponSlot {
+        if self.owner.weapons.uses_script_viewmodels() {
+            let parent = if self
+                .facts_of(weapon)
+                .is_some_and(|facts| facts.is_alternate())
+            {
+                parent
+            } else {
+                0
+            };
+            return viewmodel
+                .and_then(|name| self.script_slots.get(&(weapon, parent, name.to_owned())))
+                .map_or(&ABSENT_SLOT, |sides| &sides[usize::from(axis)]);
+        }
         if parent != 0 && self.facts_of(weapon).is_some_and(|f| f.is_alternate()) {
             return self
                 .alternate_slots
@@ -192,6 +212,7 @@ impl<'a> BoundFpvTable<'a> {
         weapon: asset_game::WeaponHandle,
         parent: Option<asset_game::WeaponHandle>,
         axis: bool,
+        viewmodel: Option<&str>,
     ) -> Result<&'a FpvWeaponSlot, &'static str> {
         let registry = &self.0.owner.weapons;
         let weapon = registry
@@ -203,7 +224,8 @@ impl<'a> BoundFpvTable<'a> {
             .map_err(|_| "FPV owner differs from prepared content")?;
         let id = weapon.wire_id();
         let parent_id = parent.map_or(0, |p| p.wire_id());
-        if weapon.fpv_facts().is_some_and(|f| f.is_alternate())
+        if !registry.uses_script_viewmodels()
+            && weapon.fpv_facts().is_some_and(|f| f.is_alternate())
             && parent_id != 0
             && !registry
                 .alternate_fpv_pairs()
@@ -211,7 +233,7 @@ impl<'a> BoundFpvTable<'a> {
         {
             return Err("invalid alternate FPV parent");
         }
-        Ok(self.0.slot_unchecked(id, parent_id, axis))
+        Ok(self.0.slot_unchecked(id, parent_id, axis, viewmodel))
     }
 }
 

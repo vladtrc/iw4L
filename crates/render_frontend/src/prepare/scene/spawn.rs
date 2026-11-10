@@ -185,6 +185,7 @@ pub(crate) fn spawn_world(
         Res<render_anim::PreparedFpv>,
         Res<render_anim::PreparedModelMaterials>,
     ),
+    profile: Option<Res<frame::MatchRuntimeProfile>>,
 ) {
     let (fpv, model_materials) = prepared;
     // Pacing belongs to the load that is still running, not to the screen that
@@ -388,6 +389,9 @@ pub(crate) fn spawn_world(
             scene.runtime_material_catalog.clone(),
             programs,
             exact_shaders,
+            profile
+                .as_ref()
+                .map_or(Default::default(), |profile| profile.0),
         );
         {
             let value = render_scene::TessMaterials::new(

@@ -252,6 +252,7 @@ pub(crate) fn write_class_data(
 }
 
 pub(crate) fn register(registry: &mut NativeRegistry) {
+    super::super::players::campaign_damage::register(registry);
     registry.register(Method, "ishost", |world, receiver, _| {
         let client = player(world, receiver)?;
         Ok(Value::Int((client == 0).into()))
@@ -414,6 +415,9 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
     });
     registry.register(Method, "notifyonplayercommand", |world, receiver, args| {
         let client = player(world, receiver)?;
+        if world.resource::<RoundScript>().profile == asset_core::RuntimeProfile::Campaign {
+            return super::super::commands::register(world, Some(client), args);
+        }
         let notify: Arc<str> = super::super::args::byte_string(args, 0)?.symbol_key();
         let command: Arc<str> = string(args, 1)?.to_ascii_lowercase().into();
         let slot = slot(world, client)?;
@@ -473,11 +477,22 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         "setweaponhudiconoverride",
         "pingplayer",
         "kc_regweaponforfxremoval",
-        "setviewmodel",
         "forceusehinton",
         "forceusehintoff",
         "predictstreampos",
     );
+    registry.register(Method, "setviewmodel", |world, receiver, args| {
+        if world.resource::<RoundScript>().profile != asset_core::RuntimeProfile::Campaign {
+            return present(world, receiver, "setviewmodel", args);
+        }
+        let client = client_of(world, receiver)?;
+        let name = string(args, 0)?.to_ascii_lowercase();
+        if name.is_empty() {
+            return Err("setviewmodel requires a nonempty model name".into());
+        }
+        FrameWorld::from_world(world).set_script_viewmodel(client, name)?;
+        Ok(Value::Undefined)
+    });
     registry.register(Method, "isitemunlocked", |world, receiver, args| {
         let client = data_client(world, player(world, receiver)?)?;
         let name = string(args, 0)?;
@@ -616,18 +631,45 @@ fn item_number(world: &World, receiver: &Value) -> Result<i32, String> {
     }
 }
 
+pub(crate) fn animation_clip_or_branch(
+    world: &mut World,
+    args: &[Value],
+    index: usize,
+) -> Result<Option<Arc<xmodel_runtime::AnimClip>>, String> {
+    let name = match arg(args, index)? {
+        Value::Animation { tree, name } => {
+            let runtime = world.resource::<RoundScript>();
+            if let Some(definition) = runtime.anim_trees.get(&**tree) {
+                let node = definition
+                    .names
+                    .iter()
+                    .position(|node| node == &**name)
+                    .ok_or_else(|| format!("animation '{name}' is not in tree '{tree}'"))?;
+                return match &definition.definition.nodes()[node].kind {
+                    xmodel_runtime::XAnimNodeKind::Leaf { clip, .. } => Ok(Some(clip.clone())),
+                    _ => Ok(None),
+                };
+            }
+            if runtime.profile == asset_core::RuntimeProfile::Campaign {
+                return Err(format!("animation tree '{tree}' is not loaded"));
+            }
+            name.clone()
+        }
+        other => return Err(format!("{} is not an animation", kind(other))),
+    };
+    FrameWorld::from_world(world)
+        .player_anim_clip_named(&name)
+        .map(Some)
+        .ok_or_else(|| format!("animation '{name}' is not loaded in the simulation"))
+}
+
 fn anim_clip(
     world: &mut World,
     args: &[Value],
     index: usize,
 ) -> Result<Arc<xmodel_runtime::AnimClip>, String> {
-    let name = match arg(args, index)? {
-        Value::Animation { name, .. } => name.clone(),
-        other => return Err(format!("{} is not an animation", kind(other))),
-    };
-    FrameWorld::from_world(world)
-        .player_anim_clip_named(&name)
-        .ok_or_else(|| format!("animation '{name}' is not loaded in the simulation"))
+    animation_clip_or_branch(world, args, index)?
+        .ok_or_else(|| "animation is not a primitive".into())
 }
 
 pub(crate) const SCAVENGER_ITEM_CLASS: &str = "scavenger_item";
@@ -642,6 +684,7 @@ pub(crate) fn new_item_entity(
         .map_or([0.0; 3], |i| i.origin);
     let mut runtime = world.resource_mut::<RoundScript>();
     let id = runtime.create_entity(super::super::entities::EntityKind::Item(number), classname)?;
+    runtime.entities.get_mut(&id).unwrap().number = number;
     runtime.set_object_field(id, "origin", Value::Vector(origin));
     Ok(Value::Object(id))
 }
@@ -843,6 +886,9 @@ fn register_death(registry: &mut NativeRegistry) {
     }
     registry.register(Method, "itemweaponsetammo", |world, receiver, args| {
         let number = item_number(world, receiver)?;
+        if world.resource::<RoundScript>().profile == asset_core::RuntimeProfile::Campaign {
+            return super::super::weapons::items::set_ammo(world, number, args);
+        }
         let clip = int(args, 0)?;
         let stock = int(args, 1)?;
         let clip_l = optional(args, 2, int)?;
@@ -893,6 +939,16 @@ pub(crate) fn link_to(
 ) -> Result<Value, String> {
     let client = player(world, receiver)?;
     let parent = super::engine::entity_id(world, arg(args, 0)?)?;
+    if FrameWorld::from_world(world)
+        .player(ClientId(client))
+        .is_some_and(|ps| {
+            let mask = playerstate_iw4::pm_flags::SCRIPT_NO_STAND
+                | playerstate_iw4::pm_flags::SCRIPT_NO_CROUCH;
+            ps.pm_flags & mask == mask
+        })
+    {
+        return Err("cannot link a player with standing and crouching disabled".into());
+    }
     if world.resource::<RoundScript>().player_client(parent) == Some(client) {
         return Err("cannot link an entity to itself".into());
     }
@@ -961,6 +1017,86 @@ fn weapon_arg(world: &mut World, args: &[Value], index: usize) -> Result<u32, St
     script_player::weapon_named(&FrameWorld::from_world(world), &name)
 }
 
+fn campaign_weapon_activity(
+    world: &mut World,
+    receiver: &Value,
+    melee: bool,
+) -> Result<Value, String> {
+    if world.resource::<RoundScript>().profile != asset_core::RuntimeProfile::Campaign {
+        return Err("weapon-state query requires the campaign native contract".into());
+    }
+    let client = client_of(world, receiver)?;
+    let active = FrameWorld::from_world(world)
+        .player(client)
+        .is_some_and(|ps| {
+            let is_melee = |state| {
+                (weapon_iw4::WeaponState::MeleeInit as i32
+                    ..=weapon_iw4::WeaponState::MeleeEnd as i32)
+                    .contains(&state)
+            };
+            if melee {
+                is_melee(ps.weaponstate_primary)
+            } else {
+                [ps.weaponstate_primary, ps.weaponstate_secondary]
+                    .into_iter()
+                    .any(|state| {
+                        is_melee(state)
+                            || matches!(
+                                weapon_iw4::WeaponState::from_i32(state),
+                                Ok(weapon_iw4::WeaponState::Firing
+                                    | weapon_iw4::WeaponState::Rechambering)
+                            )
+                    })
+            }
+        });
+    Ok(Value::Int(active.into()))
+}
+
+fn ammo_fraction(
+    world: &mut World,
+    receiver: &Value,
+    args: &[Value],
+    maximum: bool,
+) -> Result<Value, String> {
+    if world.resource::<RoundScript>().profile != asset_core::RuntimeProfile::Campaign {
+        return Err("ammo fraction query requires the campaign native contract".into());
+    }
+    let client = client_of(world, receiver)?;
+    let weapon = player_weapon(world, client, args, 0)?;
+    if weapon == 0 {
+        return Err("unknown weapon 'none'".into());
+    }
+    let frame = FrameWorld::from_world(world);
+    if !script_player::has_weapon(&frame, client, weapon) {
+        return Ok(Value::Float(1.0));
+    }
+    let facts = frame
+        .combat_facts_for(weapon)
+        .ok_or("weapon ammunition facts are unavailable")?;
+    let (amount, denominator) = if maximum && facts.clip_only {
+        (
+            script_player::ammo_clip(&frame, client, weapon),
+            facts.clip_size,
+        )
+    } else {
+        (
+            script_player::ammo_stock(&frame, client, weapon),
+            if maximum {
+                facts.max_ammo
+            } else {
+                facts.start_ammo
+            },
+        )
+    };
+    Ok(Value::Float(if denominator < 1 {
+        1.0
+    } else if amount < 1 {
+        0.0
+    } else {
+        amount as f32 / denominator as f32
+    }))
+}
+
 fn player_weapon(
     world: &mut World,
     id: ClientId,
@@ -1006,7 +1142,58 @@ fn controls(
     Ok(Value::Undefined)
 }
 
+fn allow_stance<const BIT: u32>(
+    world: &mut World,
+    receiver: &Value,
+    args: &[Value],
+) -> Result<Value, String> {
+    use playerstate_iw4::pm_flags;
+    let id = client_of(world, receiver)?;
+    let allow = int(args, 0)? != 0;
+    let mut frame = FrameWorld::from_world(world);
+    let ps = frame.player_mut(id).ok_or("player has not spawned")?;
+    let flags = if allow {
+        ps.pm_flags & !BIT
+    } else {
+        ps.pm_flags | BIT
+    };
+    if flags & pm_flags::SCRIPT_NO_STANCES == pm_flags::SCRIPT_NO_STANCES {
+        return Err("cannot disable every player stance".into());
+    }
+    let linked_mask = pm_flags::SCRIPT_NO_STAND | pm_flags::SCRIPT_NO_CROUCH;
+    if (ps.pm_type == playerstate_iw4::PM_TYPE_NORMAL_LINKED
+        || ps.e_flags & playerstate_iw4::eflags::SP_LINKED_STANCE != 0)
+        && flags & linked_mask == linked_mask
+    {
+        return Err("cannot disable standing and crouching for a linked player".into());
+    }
+    ps.pm_flags = flags;
+    Ok(Value::Undefined)
+}
+
 fn register_body(registry: &mut NativeRegistry) {
+    use playerstate_iw4::pm_flags;
+    registry.register(
+        Method,
+        "allowstand",
+        allow_stance::<{ pm_flags::SCRIPT_NO_STAND }>,
+    );
+    registry.register(
+        Method,
+        "allowcrouch",
+        allow_stance::<{ pm_flags::SCRIPT_NO_CROUCH }>,
+    );
+    registry.register(
+        Method,
+        "allowprone",
+        allow_stance::<{ pm_flags::SCRIPT_NO_PRONE }>,
+    );
+    registry.register(Method, "getplayerviewheight", |world, receiver, _| {
+        let id = client_of(world, receiver)?;
+        let frame = FrameWorld::from_world(world);
+        let ps = frame.player(id).ok_or("player has not spawned")?;
+        Ok(Value::Float(ps.view_height_current))
+    });
     registry.register(Method, "spawn", |world, receiver, args| {
         let client = player(world, receiver)?;
         let origin = vector(args, 0)?;
@@ -1485,6 +1672,21 @@ fn register_inventory(registry: &mut NativeRegistry) {
         let weapon = frame.player(id).map_or(0, |ps| ps.weapon);
         Ok(Value::Int(script_player::ammo_clip(&frame, id, weapon)))
     });
+    registry.register(Method, "ismeleeing", |world, receiver, _| {
+        campaign_weapon_activity(world, receiver, true)
+    });
+    registry.register(Method, "isfiring", |world, receiver, _| {
+        campaign_weapon_activity(world, receiver, false)
+    });
+    registry.register(Method, "isthrowinggrenade", |world, receiver, _| {
+        let id = client_of(world, receiver)?;
+        let throwing = FrameWorld::from_world(world).player(id).is_some_and(|ps| {
+            (weapon_iw4::WeaponState::OffhandInit as i32
+                ..=weapon_iw4::WeaponState::OffhandEnd as i32)
+                .contains(&ps.weaponstate_primary)
+        });
+        Ok(Value::Int(i32::from(throwing)))
+    });
     registry.register(Method, "isreloading", |world, receiver, _| {
         let id = client_of(world, receiver)?;
         let frame = FrameWorld::from_world(world);
@@ -1564,6 +1766,12 @@ fn register_inventory(registry: &mut NativeRegistry) {
             id,
             weapon,
         )))
+    });
+    registry.register(Method, "getfractionstartammo", |world, receiver, args| {
+        ammo_fraction(world, receiver, args, false)
+    });
+    registry.register(Method, "getfractionmaxammo", |world, receiver, args| {
+        ammo_fraction(world, receiver, args, true)
     });
     registry.register(Method, "getammocount", |world, receiver, args| {
         let id = client_of(world, receiver)?;

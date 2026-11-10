@@ -895,6 +895,7 @@ pub struct ReliableControlEvent(pub sim::SimEvent);
 pub struct SvcFrameWriters<'w> {
     sound: MessageWriter<'w, crate::SvcLocalSound>,
     audio: MessageWriter<'w, crate::SvcScriptAudio>,
+    objective: MessageWriter<'w, crate::SvcObjective>,
     card: MessageWriter<'w, crate::SvcCardSlotCmd>,
     menu: MessageWriter<'w, crate::SvcOpenMenuCmd>,
     splash: MessageWriter<'w, crate::SvcHudSplash>,
@@ -954,6 +955,9 @@ impl ReliableInbound<'_> {
                 crate::ReliableRow::Failure(_) => unreachable!("terminal handled before sequence"),
                 crate::ReliableRow::ScriptAudio(cmd) => {
                     self.svc.audio.write(crate::SvcScriptAudio(cmd.clone()));
+                }
+                crate::ReliableRow::Objective(cmd) => {
+                    self.svc.objective.write(crate::SvcObjective(cmd.clone()));
                 }
                 crate::ReliableRow::Sound(cmd) => {
                     // Reliable controls can overtake the snapshot that publishes
@@ -1132,7 +1136,18 @@ impl ClientCommandSampler<'_> {
             self.template.ready = false;
             self.actions.client.weapon_cycles.clear();
             self.actions.client.action_slots.clear();
+            self.actions.client.command_notifications.clear();
             return;
+        }
+        for command in std::mem::take(&mut self.actions.client.command_notifications) {
+            if let Some(inbox) = self.action_inbox.as_mut()
+                && let Err(error) = inbox.push(
+                    source.client_id(),
+                    sim::ClientAction::InputCommand { command },
+                )
+            {
+                diag::warn!(Net, "input command notification: not queued — {error}");
+            }
         }
         let times = clocks.capture();
         self.actions.frame_msec = times.key_frame_msec;
@@ -2483,6 +2498,7 @@ pub fn register_client_runtime(app: &mut App) {
         .scoped::<crate::Scoreboard>(frame::Timeline::Live)
         .scoped_message::<crate::SvcLocalSound>(frame::Timeline::Live)
         .scoped_message::<crate::SvcScriptAudio>(frame::Timeline::Live)
+        .scoped_message::<crate::SvcObjective>(frame::Timeline::Live)
         .scoped_message::<crate::SvcCardSlotCmd>(frame::Timeline::Live)
         .scoped_message::<crate::SvcOpenMenuCmd>(frame::Timeline::Live)
         .scoped_message::<crate::SvcHudSplash>(frame::Timeline::Live)

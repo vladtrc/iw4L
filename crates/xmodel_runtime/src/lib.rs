@@ -28,12 +28,12 @@ pub use semantic::{
     XAnimSemanticNode, XAnimSemanticNodeKind, XAnimTreeSnapshot,
 };
 pub use xanim_clip::{
-    AnimClip, ClipError, ClipNotify, FrameIndices, Keyed, RawDeltaTrans, RawXAnimParts, Rotation,
-    SampledTrack, Track, Translation,
+    AnimClip, ClipError, ClipNotify, FrameIndices, Keyed, RawDeltaQuat, RawDeltaTrans,
+    RawXAnimParts, RootMotionDelta, RootMotionPose, Rotation, SampledTrack, Track, Translation,
 };
 pub use xanim_tree::{
-    XAnimNodeDefinition, XAnimNodeId, XAnimNodeKind, XAnimNodeState, XAnimTreeDefinition,
-    XAnimTreeError, XAnimTreeRuntime,
+    XAnimNodeDefinition, XAnimNodeId, XAnimNodeKind, XAnimNodeState, XAnimSyncTree,
+    XAnimTreeDefinition, XAnimTreeError, XAnimTreeRuntime,
 };
 
 pub use destructible::{T5DestructibleDef, T5DestructiblePiece, T5DestructibleStage};

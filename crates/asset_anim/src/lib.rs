@@ -22,3 +22,5 @@ pub mod xanim_clip {
 pub mod asset_graph {
     pub use asset_core::*;
 }
+
+pub use atr_compile::compile_script_animtree;

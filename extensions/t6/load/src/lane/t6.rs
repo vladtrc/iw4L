@@ -2692,6 +2692,7 @@ impl ZoneLane for T6Lane {
                 ..assets::PreparedWorld::empty(crate::world::policy::POLICY.draw)
             };
             Ok(LoadedWorld {
+                weapon_assets: Default::default(),
                 scripts,
                 world,
                 materials,
@@ -2730,10 +2731,11 @@ impl ZoneLane for T6Lane {
         }
     }
 
-    fn load_common_mp(
+    fn load_common(
         &self,
         path: &Path,
         image: &ZoneImage,
+        _profile: asset_core::RuntimeProfile,
         progress: &LoadProgress,
         _decode_color_maps: bool,
         material_seed: asset_material::MaterialCatalog,

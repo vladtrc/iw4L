@@ -69,7 +69,11 @@ impl PredictionScene<'_> {
             let clip_key = weapon_iw4::clip_table_key(facts.clip_index, weapon);
             let ammo_key = weapon_iw4::ammo_table_key(facts.ammo_index, weapon);
             let have_stock = weapon_iw4::get_ammo_not_in_clip(&ps.ammo, ammo_key);
-            if have_stock >= facts.max_ammo || item.stock + item.clip_r + item.clip_l <= 0 {
+            if have_stock >= facts.max_ammo
+                || [item.stock, item.clip_r, item.clip_l]
+                    .iter()
+                    .all(|ammo| *ammo <= 0)
+            {
                 continue;
             }
             let mut room = facts.max_ammo.saturating_sub(have_stock).max(0);
@@ -88,7 +92,7 @@ impl PredictionScene<'_> {
                 .into_iter()
                 .any(|ammo| ammo > 0);
             let name = self.level.content.weapon_script_name(weapon);
-            let akimbo = facts.dual_wield || name.contains("_akimbo");
+            let akimbo = item.dual_wield || facts.dual_wield || name.contains("_akimbo");
             weapon_iw4::pickup_owned_ammo(ps, weapon, Some(&facts), akimbo, stock + right + left);
             meta.weapon_carry.sync_pickup_ammo(
                 ps,

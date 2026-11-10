@@ -91,6 +91,8 @@ pub struct InputProgram {
     /// Declarations grant no inventory; possession is checked before issuance.
     pub future_weapons: Vec<u16>,
     pub stop_on_death: bool,
+    /// UI replies are a separate input channel; opt in explicitly for menu-driven scenarios.
+    pub allow_menu_responses: bool,
     pub scoreboard_window_ms: Option<[i32; 2]>,
 }
 
@@ -142,6 +144,7 @@ pub struct InputProgramRun {
     pub final_killcams: Vec<InputFinalKillcam>,
     pub match_states: Vec<InputMatchState>,
     pub scoreboard_samples: Vec<(Tick, [f32; 3])>,
+    pub menu_responses: Vec<(Tick, String, String)>,
     pub life: LifeSequence,
     pub start_tick: Option<Tick>,
     pub last_input_tick: Option<Tick>,
@@ -263,6 +266,9 @@ impl InputProgramRun {
                 hash.update(weapon.to_le_bytes());
             }
         }
+        if program.allow_menu_responses {
+            hash.update(b"menu-responses-v1\0");
+        }
         if let Some([start, end]) = program.scoreboard_window_ms {
             hash.update(b"scoreboard-v1\0");
             hash.update(start.to_le_bytes());
@@ -288,6 +294,7 @@ impl InputProgramRun {
             final_killcams: Vec::new(),
             match_states: Vec::new(),
             scoreboard_samples: Vec::new(),
+            menu_responses: Vec::new(),
             life: meta.life_sequence,
             start_tick: None,
             last_input_tick: None,
@@ -361,11 +368,35 @@ impl InputProgramRun {
         let actor = self.program.client;
         resolved.cmds.retain(|cmd| cmd.client != actor);
         resolved.shot_samples.retain(|((id, _), _)| *id != actor);
-        if resolved.actions.iter().any(|(id, _)| *id == actor) {
-            self.failure
-                .get_or_insert("actor action conflicts with exclusive input program".into());
+        let allow_menu_responses = self.program.allow_menu_responses;
+        let independent_action = |action: &crate::ClientAction| {
+            matches!(action, crate::ClientAction::SoundDone { .. })
+                || (allow_menu_responses
+                    && matches!(action, crate::ClientAction::MenuResponse { .. }))
+        };
+        if let Some((_, action)) = resolved
+            .actions
+            .iter()
+            .find(|(id, action)| *id == actor && !independent_action(action))
+        {
+            self.failure.get_or_insert_with(|| {
+                format!("actor action conflicts with exclusive input program: {action:?}")
+            });
         }
-        resolved.actions.retain(|(id, _)| *id != actor);
+        // Sound completion and explicitly enabled UI replies belong to their
+        // presentation channels. Actor movement and inventory remain tape-owned.
+        resolved
+            .actions
+            .retain(|(id, action)| *id != actor || independent_action(action));
+        for (_, action) in resolved.actions.iter().filter(|(id, _)| *id == actor) {
+            if let crate::ClientAction::MenuResponse { menu, response } = action {
+                self.menu_responses.push((
+                    tick,
+                    crate::menu_response_text(menu).to_owned(),
+                    crate::menu_response_text(response).to_owned(),
+                ));
+            }
+        }
         if self.failure.is_some() {
             return resolved;
         }

@@ -143,6 +143,8 @@ struct CatalogWeapon {
     pub hand_xmodel: Option<String>,
     pub dual_wield_weapon: Option<String>,
 
+    pub clip_model: Option<String>,
+
     pub world_model: Option<String>,
 
     pub camo_models: WeaponCamoModels,
@@ -212,6 +214,7 @@ pub struct WeaponDependencyGap {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct CombatFxSlots {
+    closed: bool,
     view_flash: Option<Ptr>,
     world_flash: Option<Ptr>,
     view_shell_eject: Option<Ptr>,
@@ -315,11 +318,13 @@ struct WeaponRow {
 
     attachment_view_model_edges: Vec<AssetEdge<FpvMeshSpace>>,
 
-    fpv_soldiers: [Option<Result<crate::SoldierFpvPresentation, String>>; 2],
+    fpv_soldiers: [Option<Result<crate::FpvHandsPresentation, String>>; 2],
 
     fpv_mount_plan: Option<Result<asset_model::FpvMountPlan, asset_model::FpvMountError>>,
 
     fpv_assemblies: [Option<Result<crate::FpvSideAssemblies, String>>; 2],
+
+    clip_model: Option<String>,
 
     world_model: Option<String>,
 
@@ -445,6 +450,7 @@ impl Default for WeaponRow {
             fpv_soldiers: [None, None],
             fpv_mount_plan: None,
             fpv_assemblies: [None, None],
+            clip_model: None,
             world_model: None,
             world_model_edge: AssetEdge::Absent,
             camo_models: WeaponCamoModels::default(),
@@ -510,7 +516,16 @@ impl Default for WeaponRow {
 }
 
 #[derive(Clone, Debug)]
+struct ScriptViewmodel {
+    hands: Result<crate::FpvHandsPresentation, String>,
+    assemblies: Vec<[Option<Result<crate::FpvSideAssemblies, String>>; 2]>,
+    alternates: AlternateFpvCache,
+    tracks: Arc<crate::FpvClipTracks>,
+}
+
+#[derive(Clone, Debug)]
 pub struct WeaponRegistry {
+    script_viewmodels: Option<std::collections::BTreeMap<String, ScriptViewmodel>>,
     rows: Vec<WeaponRow>,
 
     world_catalog_identity: u64,
@@ -597,6 +612,50 @@ impl WeaponBuild {
         self.family_tables = tables;
     }
 
+    /// Map-authored definitions replace common definitions without changing their IDs.
+    /// The incoming build contains captured rows, before configuration preparation.
+    pub fn overlay_authored(&mut self, mut other: Self) {
+        self.combat_slots
+            .resize(self.registry.rows.len(), CombatFxSlots::default());
+        assert!(
+            other.registry.configurations.is_empty(),
+            "map definitions must precede configuration preparation"
+        );
+        self.registry
+            .vehicle_compass
+            .extend(std::mem::take(&mut other.registry.vehicle_compass));
+        self.registry
+            .vehicle_accel
+            .extend(std::mem::take(&mut other.registry.vehicle_accel));
+        self.registry
+            .vehicle_turrets
+            .extend(std::mem::take(&mut other.registry.vehicle_turrets));
+        self.registry.attachments.absorb(other.registry.attachments);
+        self.family_tables.extend(other.family_tables);
+        self.registry.item_groups.extend(other.registry.item_groups);
+        for (row, slots) in other
+            .registry
+            .rows
+            .into_iter()
+            .zip(other.combat_slots)
+            .skip(1)
+        {
+            if let Some(&id) = self
+                .registry
+                .by_namespaced
+                .get(&(row.namespace, row.name.clone()))
+            {
+                self.registry.rows[id as usize] = row;
+                self.combat_slots[id as usize] = slots;
+            } else {
+                self.registry.rows.push(row);
+                self.combat_slots.push(slots);
+            }
+        }
+        self.registry.rebuild_name_maps();
+        self.registry.revision = mint_weapon_revision();
+    }
+
     pub fn absorb(&mut self, mut other: Self) {
         self.registry
             .vehicle_compass
@@ -629,6 +688,18 @@ impl WeaponBuild {
         self.registry.item_groups.extend(other.registry.item_groups);
         self.registry.rebuild_name_maps();
         self.registry.revision = mint_weapon_revision();
+    }
+
+    /// Finish pointer lookup against the source zone before moving its definitions.
+    pub fn resolve_zone_combat_fx(
+        &mut self,
+        fx: &crate::FxCatalog,
+        tracers: &crate::TracerCatalog,
+    ) {
+        self.resolve_combat_fx(fx, tracers);
+        for slots in &mut self.combat_slots {
+            slots.closed = true;
+        }
     }
 
     pub fn resolve_combat_fx(&mut self, fx: &crate::FxCatalog, tracers: &crate::TracerCatalog) {
@@ -1222,6 +1293,7 @@ impl WeaponCatalog {
             gun_xmodel: input.gun_xmodel,
             hand_xmodel: input.hand_xmodel,
             dual_wield_weapon: input.dual_wield_weapon,
+            clip_model: input.clip_model,
             world_model: input.world_model,
             camo_models: input.camo_models,
             skin_parent: input.skin_parent,
@@ -1236,6 +1308,7 @@ impl WeaponCatalog {
             combat_fx: input.combat_fx,
             flame: input.flame,
             combat_slots: CombatFxSlots {
+                closed: false,
                 view_flash: input.combat_slots.view_flash.map(address),
                 world_flash: input.combat_slots.world_flash.map(address),
                 view_shell_eject: input.combat_slots.view_shell_eject.map(address),

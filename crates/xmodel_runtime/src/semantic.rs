@@ -132,6 +132,60 @@ impl DObjSemanticState {
 }
 
 impl XAnimTreeSnapshot {
+    pub fn active(
+        runtime: &XAnimTreeRuntime,
+        definition_revision: u32,
+        state_revision: u32,
+    ) -> Self {
+        let mut mapping = vec![None; runtime.definition().nodes().len()];
+        let mut nodes = Vec::new();
+        for (index, definition) in runtime.definition().nodes().iter().enumerate() {
+            let state = runtime.states()[index];
+            if state.weight == 0.0
+                || definition
+                    .parent
+                    .is_some_and(|parent| mapping[parent.0 as usize].is_none())
+            {
+                continue;
+            }
+            let (kind, clip, parts) = match &definition.kind {
+                XAnimNodeKind::Blend => (XAnimSemanticNodeKind::Blend, None, None),
+                XAnimNodeKind::Additive => (XAnimSemanticNodeKind::Additive, None, None),
+                XAnimNodeKind::Leaf { clip, parts } => {
+                    (XAnimSemanticNodeKind::Leaf, Some(clip.name.clone()), *parts)
+                }
+            };
+            mapping[index] = Some(XAnimNodeId(nodes.len() as u16));
+            nodes.push(XAnimSemanticNode {
+                parent: definition
+                    .parent
+                    .and_then(|parent| mapping[parent.0 as usize]),
+                kind,
+                clip,
+                parts,
+                state,
+            });
+        }
+        if nodes.is_empty() {
+            nodes.push(XAnimSemanticNode {
+                parent: None,
+                kind: XAnimSemanticNodeKind::Blend,
+                clip: None,
+                parts: None,
+                state: XAnimNodeState {
+                    weight: 1.0,
+                    goal_weight: 1.0,
+                    ..Default::default()
+                },
+            });
+        }
+        Self {
+            definition_revision,
+            state_revision,
+            nodes,
+        }
+    }
+
     pub fn resolve(
         &self,
         mut resolve_clip: impl FnMut(&str) -> Option<Arc<AnimClip>>,

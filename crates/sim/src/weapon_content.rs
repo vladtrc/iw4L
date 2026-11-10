@@ -21,6 +21,8 @@ pub struct WeaponScriptSounds {
 }
 
 pub struct SimWeaponRow {
+    pub thermal_scope: bool,
+    pub item: Option<WeaponItemFacts>,
     pub unlock_requirement: Result<gamemode_iw4::progression::UnlockRequirement, String>,
     pub wire_id: u32,
     pub scales: (f32, f32, f32),
@@ -30,6 +32,7 @@ pub struct SimWeaponRow {
     pub penetration: weapon_iw4::BulletPenFacts,
     pub script_name: String,
     pub setup: Option<WeaponSetup>,
+    pub clip_model: String,
     pub world_model: (String, Vec<String>),
     pub shield_model: Option<Arc<xmodel_runtime::RetainedModelCapability>>,
     pub projectile_model: String,
@@ -38,9 +41,17 @@ pub struct SimWeaponRow {
     pub equipment: crate::EquipmentRuntimeFacts,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WeaponItemFacts {
+    pub ammo: weapon_iw4::WeaponItemAmmoFacts,
+    pub alternate: u32,
+}
+
 #[derive(Debug)]
 pub struct SimWeaponContent {
-    pub(crate) rank_progression: gamemode_iw4::progression::RankProgression,
+    pub(crate) weapon_thermal_scopes: Vec<bool>,
+    pub(crate) weapon_items: Vec<Option<WeaponItemFacts>>,
+    pub(crate) rank_progression: Option<gamemode_iw4::progression::RankProgression>,
     pub(crate) unlock_requirements:
         Vec<Result<gamemode_iw4::progression::UnlockRequirement, String>>,
     pub(crate) weapon_def_scales: Vec<(f32, f32, f32)>,
@@ -55,6 +66,7 @@ pub struct SimWeaponContent {
     pub(crate) weapon_script_names: Arc<[String]>,
     pub(crate) weapon_script_aliases: BTreeMap<String, u32>,
     pub(crate) weapon_setups: Arc<[Option<WeaponSetup>]>,
+    pub(crate) weapon_clip_models: Vec<String>,
     pub(crate) weapon_world_models: Vec<(String, Vec<String>)>,
     pub(crate) shield_models: Vec<Option<Arc<xmodel_runtime::RetainedModelCapability>>>,
     pub(crate) weapon_projectile_models: Vec<String>,
@@ -66,6 +78,8 @@ pub struct SimWeaponContent {
 impl SimWeaponContent {
     pub(crate) fn bootstrap() -> Self {
         Self {
+            weapon_items: Vec::new(),
+            weapon_thermal_scopes: Vec::new(),
             rank_progression: Default::default(),
             unlock_requirements: Default::default(),
             weapon_def_scales: Default::default(),
@@ -80,6 +94,7 @@ impl SimWeaponContent {
             weapon_script_names: Default::default(),
             weapon_script_aliases: Default::default(),
             weapon_setups: Default::default(),
+            weapon_clip_models: Default::default(),
             weapon_world_models: Default::default(),
             shield_models: Default::default(),
             weapon_projectile_models: Default::default(),
@@ -94,9 +109,12 @@ impl SimWeaponContent {
         aliases: impl IntoIterator<Item = (String, u32)>,
         pen_table: weapon_iw4::PenetrationDepthTable,
         pen_table_loaded: bool,
-        rank_progression: gamemode_iw4::progression::RankProgression,
+        rank_progression: Option<gamemode_iw4::progression::RankProgression>,
     ) -> Result<Arc<Self>, &'static str> {
-        if rank_progression.rank(0).is_none() {
+        if rank_progression
+            .as_ref()
+            .is_some_and(|ranks| ranks.rank(0).is_none())
+        {
             return Err("invalid rank progression");
         }
         let mut result = Self {
@@ -122,8 +140,11 @@ impl SimWeaponContent {
             result.weapon_combat.push(combat);
             result.execution_refusals.push(refusal);
             result.weapon_transition_groups.push(row.transition_group);
+            result.weapon_items.push(row.item);
+            result.weapon_thermal_scopes.push(row.thermal_scope);
             result.weapon_camouflage_slots.push(row.camouflage_slots);
             result.bullet_pen.push(row.penetration);
+            result.weapon_clip_models.push(row.clip_model);
             result.weapon_world_models.push(row.world_model);
             result.shield_models.push(row.shield_model);
             result.weapon_projectile_models.push(row.projectile_model);

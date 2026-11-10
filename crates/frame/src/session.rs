@@ -68,6 +68,9 @@ pub struct LaunchIdentity {
     pub zone: String,
 }
 
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct MatchRuntimeProfile(pub asset_core::RuntimeProfile);
+
 #[derive(Resource, Clone, Debug)]
 pub struct LaunchReport {
     pub zone: String,

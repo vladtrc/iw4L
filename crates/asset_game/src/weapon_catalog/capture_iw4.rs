@@ -24,6 +24,11 @@ impl WeaponCatalog {
             .and_then(|ptr| stream.cstr(ptr).ok())
             .filter(|s| !s.is_empty())
             .map(str::to_owned);
+        let clip_model = geometry
+            .clip_model_name
+            .and_then(|ptr| stream.cstr(ptr).ok())
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
         let world_model = geometry
             .world_model_name
             .and_then(|ptr| stream.cstr(ptr).ok())
@@ -75,6 +80,8 @@ impl WeaponCatalog {
             .map(|arr| read_sz_xanims(stream, arr))
             .unwrap_or([const { None }; WEAPON_ANIM_SLOTS]);
         let hide_tags = read_hide_tags(stream, &self.strings, geometry.hide_tags);
+        let allow_dual_wield = !geometry.no_dual_wield
+            && weapon_iw4::has_akimbo_viewmodel_anims(sz_xanims_right[weap_anim::IDLE].as_deref());
         self.insert_capture(crate::WeaponCaptureInput {
             namespace: self
                 .capture_ns
@@ -133,6 +140,7 @@ impl WeaponCatalog {
             projectile_fx: WeaponProjectileFx::default(),
             gun_xmodel,
             hand_xmodel,
+            clip_model,
             world_model,
             camo_models,
             skin_parent: None,
@@ -307,6 +315,23 @@ impl WeaponCatalog {
                 ..WeaponCombatFx::empty(crate::FamilyId::IW4)
             },
             facts: WeaponBodyFacts {
+                item_ammo: geometry.item_ammo.map(
+                    |[
+                        total_min,
+                        total_max,
+                        clip_percent_min,
+                        clip_percent_max,
+                        shared,
+                    ]| weapon_iw4::WeaponItemAmmoFacts {
+                        clip_size: geometry.clip_size,
+                        total_min,
+                        total_max,
+                        clip_percent_min,
+                        clip_percent_max,
+                        shared_ammo: shared >= 0,
+                        allow_dual_wield,
+                    },
+                ),
                 body_resolved: geometry.weap_def.is_some(),
                 fire_time_ms: geometry.fire_time_ms,
                 impact_type: geometry.impact_type,

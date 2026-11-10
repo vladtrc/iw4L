@@ -92,6 +92,22 @@ impl std::ops::DerefMut for TracerCatalog {
 }
 
 impl TracerCatalog {
+    /// Move named definitions, never zone-local pointer aliases, across walks.
+    pub fn absorb_definitions(&mut self, other: Self) {
+        self.published.capture_gaps += other.published.capture_gaps;
+        let saved = self.published.capture_zone;
+        for (index, def) in other.published.defs.into_iter().enumerate() {
+            self.published.capture_zone = other
+                .published
+                .zones
+                .get(index)
+                .copied()
+                .unwrap_or(other.published.capture_zone);
+            self.published.insert_owned(def);
+        }
+        self.published.capture_zone = saved;
+    }
+
     pub fn note_loaded(&mut self, slot: Ptr, insert_slot: Option<Ptr>) {
         let Some(index) = self.last_captured.take() else {
             return;

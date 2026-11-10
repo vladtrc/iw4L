@@ -34,6 +34,7 @@ impl FpvMeshKey {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FpvHands {
+    FromScript { namespace: FamilyId, name: String },
     FromKit { namespace: FamilyId, name: String },
 
     FromWeaponDef { namespace: FamilyId, name: String },
@@ -45,7 +46,8 @@ pub enum FpvHands {
 impl FpvHands {
     pub fn key(&self) -> Option<(FamilyId, &str)> {
         match self {
-            Self::FromKit { namespace, name }
+            Self::FromScript { namespace, name }
+            | Self::FromKit { namespace, name }
             | Self::FromWeaponDef { namespace, name }
             | Self::GameDefault { namespace, name } => Some((*namespace, name.as_str())),
             Self::Unresolved => None,

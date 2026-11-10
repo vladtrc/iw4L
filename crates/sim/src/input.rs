@@ -10,6 +10,15 @@ pub struct ClassId(pub u32);
 pub enum ClientAction {
     JoinMatch,
 
+    InputCommand {
+        command: u32,
+    },
+
+    SoundDone {
+        entity: u16,
+        alias_index: u16,
+    },
+
     LeaveMatch,
 
     SelectClass {

@@ -41,7 +41,8 @@ pub fn class_catalog_perk_name(id: u32) -> Option<&'static str> {
 }
 
 pub use snapshot_meta::{
-    ClientSnapshotMeta, DroppedItemAmmo, ItemPickupRecord, ScriptDvars, SnapshotMeta, TargetBoxDvar,
+    ActorOverlay, ClientSnapshotMeta, DroppedItemAmmo, ItemPickupRecord, ScriptDvars, SnapshotMeta,
+    TargetBoxDvar,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,6 +74,8 @@ impl InputReceipt {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ClientMatchState {
+    pub viewmodel: Option<String>,
+    pub actor_overlay: Option<snapshot_meta::ActorOverlay>,
     pub shield: Option<crate::ShieldAttachment>,
     pub weapon_lock: crate::WeaponLock,
     pub lifecycle: ClientLifecycle,
@@ -145,6 +148,8 @@ pub struct ScriptControls {
 impl ClientMatchState {
     pub(crate) fn to_snapshot_meta(&self) -> ClientSnapshotMeta {
         ClientSnapshotMeta {
+            viewmodel: self.viewmodel.clone(),
+            actor_overlay: self.actor_overlay.clone(),
             weapon_carry: self.weapon_carry.clone(),
             shield: self.shield,
             shield_collision: None,

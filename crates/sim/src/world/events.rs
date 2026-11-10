@@ -146,6 +146,7 @@ pub(super) struct PresentationQueue {
     pub(super) prints: Vec<PendingPrint>,
     pub(super) local_sounds: Vec<PendingLocalSound>,
     pub(super) script_audio: Vec<crate::ScriptAudioCommand>,
+    pub(super) objective_updates: Vec<crate::ObjectiveUpdate>,
 }
 impl PresentationQueue {
     pub(super) fn reset(&mut self) {
@@ -153,5 +154,6 @@ impl PresentationQueue {
         self.prints.clear();
         self.local_sounds.clear();
         self.script_audio.clear();
+        self.objective_updates.clear();
     }
 }

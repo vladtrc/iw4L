@@ -544,6 +544,7 @@ pub(crate) fn predict_projectile(
                         surface_type_from_flags(surface_flags)
                     }
                     ColliderId::Player { .. } => 0,
+                    ColliderId::EntityBody { .. } => weapon_iw4::SURF_TYPE_FLESH as u8,
                 };
                 let hit_time = time + ((next - time) as f32 * fraction) as i32;
                 projectile.velocity = projectile.velocity_at(hit_time);
@@ -1135,7 +1136,8 @@ pub(crate) fn think_projectile(world: &mut FrameWorld, tick: Tick, entnum: i32) 
                     }
                     if let Some(
                         ColliderId::EntityDObjBone { owner, .. }
-                        | ColliderId::EntityLinkedBrush { owner, .. },
+                        | ColliderId::EntityLinkedBrush { owner, .. }
+                        | ColliderId::EntityBody { owner },
                     ) = collider
                         && let Some(target) = owner.script_model()
                     {
@@ -1327,14 +1329,16 @@ pub(crate) fn think_projectile(world: &mut FrameWorld, tick: Tick, entnum: i32) 
                 }
                 Some(
                     collider @ (ColliderId::EntityDObjBone { .. }
-                    | ColliderId::EntityLinkedBrush { .. }),
+                    | ColliderId::EntityLinkedBrush { .. }
+                    | ColliderId::EntityBody { .. }),
                 ) => {
                     let epoch = entity_collision_epoch(collider, &script_models)
                         .unwrap_or(EntityCollisionEpoch::CurrentTick);
                     if armed && facts.proj_impact_explode {
                         if let Some(target) = match collider {
                             ColliderId::EntityDObjBone { owner, .. }
-                            | ColliderId::EntityLinkedBrush { owner, .. } => owner.script_model(),
+                            | ColliderId::EntityLinkedBrush { owner, .. }
+                            | ColliderId::EntityBody { owner } => owner.script_model(),
                             _ => None,
                         } {
                             let bone = match collider {
@@ -1830,7 +1834,9 @@ impl MissileContact {
             projectile.attached_to = player_attachment(world, client, origin);
         }
         if let Some(
-            ColliderId::EntityDObjBone { owner, .. } | ColliderId::EntityLinkedBrush { owner, .. },
+            ColliderId::EntityDObjBone { owner, .. }
+            | ColliderId::EntityLinkedBrush { owner, .. }
+            | ColliderId::EntityBody { owner },
         ) = collider
         {
             projectile.attached_to = owner
@@ -2175,9 +2181,9 @@ fn entity_collision_epoch(
     rows: &[EntityCollisionTraceGeom],
 ) -> Option<EntityCollisionEpoch> {
     let owner = match terminal {
-        ColliderId::EntityDObjBone { owner, .. } | ColliderId::EntityLinkedBrush { owner, .. } => {
-            owner
-        }
+        ColliderId::EntityDObjBone { owner, .. }
+        | ColliderId::EntityLinkedBrush { owner, .. }
+        | ColliderId::EntityBody { owner } => owner,
         ColliderId::World { .. } | ColliderId::Player { .. } => return None,
     };
     rows.iter()

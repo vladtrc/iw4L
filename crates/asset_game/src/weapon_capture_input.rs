@@ -59,6 +59,8 @@ pub struct WeaponCaptureInput {
     pub gun_xmodel: Option<String>,
     pub hand_xmodel: Option<String>,
     pub dual_wield_weapon: Option<String>,
+    pub clip_model: Option<String>,
+
     pub world_model: Option<String>,
     pub camo_models: WeaponCamoModels,
     pub skin_parent: Option<String>,

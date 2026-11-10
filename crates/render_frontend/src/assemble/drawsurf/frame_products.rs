@@ -308,6 +308,7 @@ pub(crate) fn admit_material_generation(
     catalog: Arc<RuntimeMaterialCatalog>,
     programs: RuntimeProgramRegistry,
     exact_shaders: Vec<Handle<bevy::shader::Shader>>,
+    profile: asset_core::RuntimeProfile,
 ) -> MaterialGeneration {
     let prepared = PreparedMaterialTable::from_catalog(&catalog, |pass, vertex_type| {
         programs
@@ -315,7 +316,7 @@ pub(crate) fn admit_material_generation(
             .map(RuntimeProgramPort::admitted_facts)
     });
     let postfx = super::build_runtime_postfx(&catalog, &prepared, &programs, &exact_shaders);
-    let blood = super::build_runtime_blood(&catalog, &prepared, &programs, &exact_shaders)
+    let blood = super::build_runtime_blood(&catalog, &prepared, &programs, &exact_shaders, profile)
         .inspect_err(|cause| diag::warn!(World, "blood material admission: RED cause={cause:?}"))
         .ok();
     MaterialGeneration {

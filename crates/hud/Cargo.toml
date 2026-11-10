@@ -27,5 +27,8 @@ sim = { workspace = true }
 math_iw4.workspace = true
 gamemode_iw4.workspace = true
 
+[dev-dependencies]
+fastfile_iw4.workspace = true
+
 [lints]
 workspace = true

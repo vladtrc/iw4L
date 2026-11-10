@@ -201,6 +201,7 @@ fn play_ui_sound_messages(
             &mut pending.0,
             &mut decisions,
             crate::cue_execution::CueTrigger {
+                force_master: false,
                 event: None,
                 bank: Arc::clone(bank),
                 namespace: ns,

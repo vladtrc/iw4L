@@ -1038,3 +1038,97 @@ pub(crate) fn dispatch_triggers(world: &mut World) {
         );
     }
 }
+
+pub(crate) fn contact_point(
+    world: &mut World,
+    object: u64,
+    point: [f32; 3],
+) -> Result<bool, String> {
+    if !point.into_iter().all(f32::is_finite) {
+        return Err("contact point must be finite".into());
+    }
+    super::presence::settle_collision(world);
+    world.resource_scope(|world, mut runtime: bevy_ecs::prelude::Mut<RoundScript>| {
+        let entity = runtime
+            .entities
+            .get(&object)
+            .ok_or("volume entity is no longer live")?;
+        let (cylinder, presence, brush) = (entity.cylinder, entity.presence, entity.brush);
+        let origin = match runtime.object_field(object, "origin") {
+            Value::Vector(v) => v,
+            _ => [0.0; 3],
+        };
+        let angles = match runtime.object_field(object, "angles") {
+            Value::Vector(v) => v,
+            _ => [0.0; 3],
+        };
+        if !origin.into_iter().chain(angles).all(f32::is_finite) {
+            return Err("volume pose must be finite".into());
+        }
+        let frame = FrameWorld::from_world(world);
+        let axis = math_iw4::angles_to_axis(angles);
+        let offset: [f32; 3] = std::array::from_fn(|i| point[i] - origin[i]);
+        let local: [f32; 3] = std::array::from_fn(|i| (0..3).map(|j| axis[i][j] * offset[j]).sum());
+        if let Some(volume) = volume(&mut runtime, &frame, object) {
+            if !volume.in_world(point) {
+                return Ok(false);
+            }
+            let sample = if cylinder.is_some() {
+                point
+            } else {
+                std::array::from_fn(|i| local[i] + origin[i])
+            };
+            return match volume.shape {
+                VolumeShape::Box { .. } if brush.is_some() => {
+                    let model = &frame.clip_cmodels().models[brush.unwrap() as usize];
+                    if model.num_brushes == 0 {
+                        Ok(false)
+                    } else {
+                        Err("brush volume lacks retained brush planes".into())
+                    }
+                }
+                VolumeShape::Brushes {
+                    origin,
+                    ids,
+                    brushes,
+                } => Ok(ids
+                    .iter()
+                    .filter_map(|&id| brushes.get(usize::from(id)))
+                    .any(|brush| {
+                        brush.contents != 0
+                            && !brush.planes.is_empty()
+                            && brush.planes.iter().all(|plane| {
+                                (0..3)
+                                    .map(|i| plane[i] * (sample[i] - origin[i]))
+                                    .sum::<f32>()
+                                    <= plane[3]
+                            })
+                    })),
+                _ => Ok(volume.shape.touches(sample, sample)),
+            };
+        }
+        let body = presence.and_then(|presence| {
+            frame
+                .entity_collision_capabilities()
+                .iter()
+                .find(|row| row.owner.script_model() == Some(presence))
+                .and_then(|row| row.body)
+        });
+        let body = body.ok_or("volume entity has no retained contact geometry")?;
+        let (mins, maxs) = body.bounds.abs_bounds([0.0; 3]);
+        let trace = clipmap_iw4::transformed_temp_capsule_trace(
+            &clipmap_iw4::TraceExtents {
+                start: local,
+                end: local,
+                mins: [0.0; 3],
+                maxs: [0.0; 3],
+                mask: u32::MAX,
+            },
+            [0.0; 3],
+            mins,
+            maxs,
+            body.bounds.contents,
+        );
+        Ok(trace.allsolid != 0)
+    })
+}

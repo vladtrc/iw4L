@@ -116,11 +116,7 @@ fn approve_map_load(
             Ok(path) => asset_transport::find_runtime_common_mp(&games, path).map(|zone| zone.path),
             Err(error) => Err(error.clone()),
         };
-        let error = zone_ff
-            .as_ref()
-            .err()
-            .or_else(|| common_mp.as_ref().err())
-            .cloned();
+        let error = zone_ff.as_ref().err().cloned();
         if let Some(error) = error {
             failed.write(MapLoadFailed {
                 match_key: request.match_key,

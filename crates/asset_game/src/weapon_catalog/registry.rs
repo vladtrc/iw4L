@@ -300,6 +300,80 @@ impl WeaponRegistry {
             .map(|(slot, _)| slot)
     }
 
+    pub fn script_viewmodel_names(&self) -> impl Iterator<Item = &str> {
+        self.script_viewmodels
+            .iter()
+            .flat_map(|variants| variants.iter())
+            .filter(|(_, variant)| variant.hands.is_ok())
+            .map(|(name, _)| name.as_str())
+    }
+
+    pub fn script_fpv_variants(&self) -> impl Iterator<Item = (u32, u32, &str)> {
+        self.script_viewmodels
+            .iter()
+            .flat_map(|variants| variants.iter())
+            .flat_map(|(name, variant)| {
+                (1..variant.assemblies.len() as u32)
+                    .map(|id| (id, 0, name.as_str()))
+                    .chain(
+                        variant
+                            .alternates
+                            .keys()
+                            .map(|&(id, parent)| (id, parent, name.as_str())),
+                    )
+            })
+    }
+
+    pub fn uses_script_viewmodels(&self) -> bool {
+        self.script_viewmodels.is_some()
+    }
+
+    pub fn fpv_hands_for(
+        &self,
+        index: u32,
+        axis: bool,
+        viewmodel: Option<&str>,
+    ) -> Option<(&asset_model::FpvHands, crate::FpvMeshIndex)> {
+        if let Some(variants) = &self.script_viewmodels {
+            let hands = variants.get(viewmodel?)?.hands.as_ref().ok()?;
+            return Some((hands.hands().choice(), hands.hands().model()));
+        }
+        self.fpv_hands_of(index, axis)
+    }
+
+    pub fn fpv_assemblies_for_viewmodel(
+        &self,
+        index: u32,
+        parent: u32,
+        axis: bool,
+        viewmodel: Option<&str>,
+    ) -> Option<&crate::FpvSideAssemblies> {
+        if let Some(variants) = &self.script_viewmodels {
+            let variant = variants.get(viewmodel?)?;
+            if parent != 0 && self.facts_of(index).is_some_and(|f| f.inventory_type == 3) {
+                return variant.alternates.get(&(index, parent))?[usize::from(axis)]
+                    .as_ref()?
+                    .as_ref()
+                    .ok();
+            }
+            return variant.assemblies.get(index as usize)?[usize::from(axis)]
+                .as_ref()?
+                .as_ref()
+                .ok();
+        }
+        self.fpv_assemblies_for(index, parent, axis)
+    }
+
+    pub fn fpv_tracks_for_viewmodel(
+        &self,
+        viewmodel: Option<&str>,
+    ) -> Option<&crate::FpvClipTracks> {
+        if let Some(variants) = &self.script_viewmodels {
+            return Some(&variants.get(viewmodel?)?.tracks);
+        }
+        Some(self.fpv_clip_tracks())
+    }
+
     pub fn fpv_hands_of(
         &self,
         index: u32,
@@ -514,6 +588,35 @@ impl WeaponRegistry {
                 kind: "FPV mount",
                 name: error.to_string(),
             });
+        }
+        if let Some(variants) = &self.script_viewmodels {
+            if row.gun_xmodel_edge.is_bound()
+                && !variants.values().any(|variant| {
+                    variant
+                        .assemblies
+                        .get(id as usize)
+                        .is_some_and(|sides| sides.iter().flatten().any(Result::is_ok))
+                })
+            {
+                let reason = variants
+                    .values()
+                    .find_map(|variant| {
+                        variant.assemblies.get(id as usize).and_then(|sides| {
+                            sides
+                                .iter()
+                                .flatten()
+                                .find_map(|value| value.as_ref().err())
+                        })
+                    })
+                    .cloned()
+                    .unwrap_or_else(|| "no loaded script viewmodel was prepared".into());
+                gaps.push(WeaponDependencyGap {
+                    id,
+                    kind: "script FPV skeleton",
+                    name: reason,
+                });
+            }
+            return gaps;
         }
         for (side, assembly) in row.fpv_assemblies.iter().enumerate() {
             if let Some(Err(error)) = assembly {
@@ -958,6 +1061,12 @@ impl WeaponRegistry {
         self.rows
             .get(index as usize)
             .and_then(|row| row.gun_xmodel.as_deref())
+    }
+
+    pub fn clip_model_of(&self, index: u32) -> Option<&str> {
+        self.rows
+            .get(index as usize)
+            .and_then(|row| row.clip_model.as_deref())
     }
 
     pub fn world_model_of(&self, index: u32) -> Option<&str> {

@@ -11,7 +11,17 @@ use super::events::{EntityEventRecord, EventRecord, PelletFxRecord, SimEvent};
 use super::loadout::LoadoutSpec;
 
 #[derive(Clone, Debug, Default, PartialEq)]
+pub struct ActorOverlay {
+    pub entity: u16,
+    pub name: String,
+    pub description: String,
+    pub hostile: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ClientSnapshotMeta {
+    pub viewmodel: Option<String>,
+    pub actor_overlay: Option<ActorOverlay>,
     pub weapon_carry: crate::WeaponCarry,
     pub shield: Option<crate::ShieldAttachment>,
     pub shield_collision: Option<crate::ShieldCarrierCollision>,
@@ -76,6 +86,7 @@ pub struct ClientSnapshotMeta {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SnapshotMeta {
+    pub campaign_dvars: Vec<(String, String)>,
     pub objectives: crate::ObjectiveMatch,
     pub phase: MatchPhase,
     pub round_serial: u32,
@@ -117,6 +128,8 @@ pub struct SnapshotMeta {
 
     pub script_movers: Vec<crate::ScriptMoverGentity>,
 
+    pub eq_disabled_entities: Vec<u16>,
+
     pub generations: Vec<u32>,
 
     pub corpses: crate::PlayerCorpsePool,
@@ -134,6 +147,9 @@ pub struct DroppedItemAmmo {
     pub stock: i32,
     pub scavenger: i32,
     pub parented: bool,
+    pub authored: bool,
+    pub dual_wield: bool,
+    pub alternate: Option<crate::ItemWeaponAmmo>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -166,6 +182,7 @@ impl SnapshotMeta {
             client: self
                 .for_client(id)
                 .map_or(&[], |m| m.client_dvars.as_slice()),
+            shared: &self.campaign_dvars,
             server: &self.objectives.server_info,
         }
     }
@@ -230,6 +247,7 @@ fn parse_float_dvar(value: &str) -> f32 {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ScriptDvars<'a> {
     client: &'a [(String, String)],
+    shared: &'a [(String, String)],
     server: &'a [(String, String)],
 }
 
@@ -237,6 +255,7 @@ impl<'a> ScriptDvars<'a> {
     pub fn string(&self, name: &str) -> Option<&'a str> {
         self.client
             .iter()
+            .chain(self.shared)
             .chain(self.server)
             .find(|(key, _)| key.eq_ignore_ascii_case(name))
             .map(|(_, value)| value.as_str())

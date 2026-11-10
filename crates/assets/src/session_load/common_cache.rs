@@ -9,6 +9,7 @@ pub struct CommonKey {
     source_revision: u64,
     collision_adapter_version: u32,
     families: frame::AssetFamilies,
+    profile: asset_core::RuntimeProfile,
 }
 
 impl CommonKey {
@@ -17,6 +18,7 @@ impl CommonKey {
         runtime: Option<&Path>,
         report: &mut Vec<String>,
         families: frame::AssetFamilies,
+        profile: asset_core::RuntimeProfile,
     ) -> Self {
         let source_revision =
             games_root().map_or(0, |games| asset_transport::installation_revision(&games.0));
@@ -24,8 +26,13 @@ impl CommonKey {
             collision_adapter_version: asset_world::COLLISION_ADAPTER_VERSION,
             source_revision,
             runtime: runtime.map(Path::to_path_buf),
-            foreign: resolve_foreign_material_donor(zone_ff, runtime, report, families.clone()),
+            foreign: if profile == asset_core::RuntimeProfile::Campaign {
+                None
+            } else {
+                resolve_foreign_material_donor(zone_ff, runtime, report, families.clone())
+            },
             families,
+            profile,
         }
     }
 
@@ -43,6 +50,7 @@ impl CommonKey {
             runtime,
             foreign: None,
             families: frame::AssetFamilies::all_installed(),
+            profile: asset_core::RuntimeProfile::Multiplayer,
         }
     }
 }
@@ -51,7 +59,7 @@ impl std::fmt::Display for CommonKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.runtime {
             Some(path) => write!(f, "{}", path.display())?,
-            None => f.write_str("<no runtime common_mp>")?,
+            None => write!(f, "<no runtime {}>", self.profile.common_zone())?,
         }
         if let Some(foreign) = &self.foreign {
             write!(f, " + {}", foreign.display())?;
@@ -82,6 +90,7 @@ pub(super) struct CommonMaterialDonor {
 
 #[derive(Clone)]
 pub(super) struct CommonProducts {
+    pub(super) campaign_hud: Option<asset_game::CampaignHudCatalog>,
     pub(super) scripts: crate::ScriptSources,
     pub(super) material_seed: MaterialCatalog,
     pub(super) map_payloads: super::map_common_payloads::MapCommonPayloads,
@@ -368,22 +377,35 @@ async fn prepare_common(key: CommonKey) -> Arc<CommonSet> {
     let progress = LoadProgress::default();
     let pool = load_pool();
     let anchor = key.runtime.clone();
+    let profile = key.profile;
     let startup_walk = {
         let anchor = anchor.clone();
         let progress = progress.clone();
-        pool.spawn(async move { walk_startup_material_zones(anchor.as_ref(), &progress).await })
+        pool.spawn(
+            async move { walk_startup_material_zones(anchor.as_ref(), &progress, profile).await },
+        )
     };
     let seeded_prep = {
         let anchor = anchor.clone();
         let progress = progress.clone();
         let enabled = key.families.clone();
-        pool.spawn(async move { prepare_seeded_common(anchor.as_deref(), &progress, enabled) })
+        pool.spawn(async move {
+            if profile == asset_core::RuntimeProfile::Campaign {
+                return SeededCommonPrep::default();
+            }
+            prepare_seeded_common(anchor.as_deref(), &progress, enabled)
+        })
     };
     let supplemental_walk = {
         let anchor = anchor.clone();
         let progress = progress.clone();
         let enabled = key.families.clone();
-        pool.spawn(async move { walk_supplemental_common(anchor.as_deref(), &progress, enabled) })
+        pool.spawn(async move {
+            if profile == asset_core::RuntimeProfile::Campaign {
+                return SupplementalCommonProducts::default();
+            }
+            walk_supplemental_common(anchor.as_deref(), &progress, enabled)
+        })
     };
     let localize_walk = {
         let anchor = anchor.clone();
@@ -393,7 +415,8 @@ async fn prepare_common(key: CommonKey) -> Arc<CommonSet> {
             let strings = match anchor {
                 Some(path) => {
                     let stage = progress.begin(StageId::Localization, None);
-                    let strings = load_localized_strings_beside(&path, &mut report, &stage);
+                    let strings =
+                        load_localized_strings_beside(&path, &mut report, &stage, profile);
                     stage.done();
                     strings
                 }
@@ -408,12 +431,50 @@ async fn prepare_common(key: CommonKey) -> Arc<CommonSet> {
             (strings, report)
         })
     };
+    let campaign_hud_walk = {
+        let anchor = anchor.clone();
+        pool.spawn(async move {
+            let mut report = Vec::new();
+            let catalog = if profile == asset_core::RuntimeProfile::Campaign {
+                anchor.as_deref().map(|path| {
+                    let mut catalog = asset_game::MenuCatalog::default();
+                    for name in [
+                        "code_post_gfx",
+                        "localized_code_post_gfx",
+                        "common",
+                        "localized_common",
+                        "patch",
+                    ] {
+                        let Ok(found) = find_zone_for_tree(path, name) else {
+                            continue;
+                        };
+                        match asset_game::load_menu_catalog(&found.path) {
+                            Ok(part) => {
+                                report.push(format!(
+                                    "campaign HUD: {name} {} menus, {} fonts",
+                                    part.menus.len(),
+                                    part.fonts.len()
+                                ));
+                                catalog.absorb(part);
+                            }
+                            Err(error) => report.push(format!("campaign HUD gap: {name}: {error}")),
+                        }
+                    }
+                    asset_game::CampaignHudCatalog(Arc::new(catalog))
+                })
+            } else {
+                None
+            };
+            (catalog, report)
+        })
+    };
     let (
         material_seed,
         mut common_report,
         runtime_startup_tables,
         startup_light_defs,
         startup_scripts,
+        startup_xanims,
     ) = startup_walk.await;
     let startup_count = material_seed.materials.len();
     let SeededCommonProducts {
@@ -486,9 +547,11 @@ async fn prepare_common(key: CommonKey) -> Arc<CommonSet> {
             Ok(image) => match lane(image.game) {
                 Some(selected) => {
                     runtime_family = Some(image.game);
-                    runtime = selected.load_common_mp(
+                    // Common zones have no world assets from which to infer the match profile.
+                    runtime = selected.load_common(
                         path,
                         &image,
+                        key.profile,
                         &progress,
                         true,
                         std::mem::take(&mut material_seed),
@@ -526,6 +589,10 @@ async fn prepare_common(key: CommonKey) -> Arc<CommonSet> {
     let mut world_weapons = runtime.world_weapons;
     let mut projectile_meshes = runtime.projectile_meshes;
     let mut xanims = runtime.xanims;
+    let startup_anim_added = xanims.absorb(startup_xanims);
+    common_report.push(format!(
+        "startup animation keys retained: {startup_anim_added}"
+    ));
     let mut common_fx = runtime.fx;
     let mut common_fx_models = runtime.fx_models;
     let common_impact = runtime.impact_fx;
@@ -770,12 +837,15 @@ async fn prepare_common(key: CommonKey) -> Arc<CommonSet> {
             ui_images.preview_fallback(family.key.namespace, &family.image, image);
         }
     }
+    let (campaign_hud, hud_report) = campaign_hud_walk.await;
+    common_report.extend(hud_report);
     Arc::new(CommonSet {
         ui_images: ui_images.publish(),
         editor_weapons: preview_weapons,
         id: NEXT_COMMON_PROFILE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         key,
         products: CommonProducts {
+            campaign_hud,
             scripts,
             material_seed,
             map_payloads,

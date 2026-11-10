@@ -7,8 +7,17 @@ use crate::script::{ArrayKey, Fault, Native, Program, StringTable, Value};
 
 #[derive(Resource, Clone, Debug)]
 pub struct RoundScript {
+    pub(crate) anim_trees: Arc<BTreeMap<String, host::animations::ScriptAnimTree>>,
+    pub(crate) animators: BTreeMap<u64, host::animations::Animator>,
+    pub(crate) profile: asset_core::RuntimeProfile,
+    pub(crate) actors: BTreeMap<u64, host::actors::Actor>,
+    pub(crate) sentients: BTreeMap<u64, host::sentients::Sentient>,
+    pub(crate) threat_groups: host::sentients::ThreatGroups,
+    pub(crate) spawners: BTreeMap<u64, host::spawners::Spawner>,
+    pub(crate) command_notifies: Vec<host::commands::CommandNotify>,
+    pub(crate) path_nodes: host::path_nodes::PathNodes,
     pub(crate) program: Option<Arc<Program>>,
-    pub(crate) natives: Vec<Native>,
+    pub(crate) natives: Vec<Option<Native>>,
     pub(crate) next_serial: u64,
     pub(super) threads: indexmap::IndexMap<u64, crate::script::Thread>,
     pub fault: Option<Fault>,
@@ -84,6 +93,15 @@ pub struct RoundScript {
 impl RoundScript {
     pub(crate) fn new(_: &MatchScript) -> Self {
         Self {
+            anim_trees: Default::default(),
+            animators: Default::default(),
+            profile: Default::default(),
+            actors: Default::default(),
+            sentients: Default::default(),
+            threat_groups: Default::default(),
+            spawners: Default::default(),
+            command_notifies: Default::default(),
+            path_nodes: Default::default(),
             program: Default::default(),
             natives: Default::default(),
             next_serial: Default::default(),
@@ -220,6 +238,7 @@ impl RoundScript {
 pub(crate) struct MatchScript {
     pub(crate) precached: BTreeMap<(&'static str, String), i32>,
     pub(crate) dvars: BTreeMap<String, String>,
+    pub(crate) latched_dvars: BTreeMap<String, String>,
     pub(crate) local_presentation_dvars: bool,
     pub(crate) local_presentation_client: Option<crate::ClientId>,
     pub(crate) pending_local_dvars: Vec<(crate::TargetBoxDvar, String)>,

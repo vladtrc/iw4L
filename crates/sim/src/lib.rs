@@ -10,7 +10,11 @@ pub mod bullet;
 mod shield;
 pub use shield::{ShieldAttachment, ShieldCarrierCollision};
 pub mod bullet_collision;
+mod campaign_checkpoint;
+mod campaign_reload;
+pub use campaign_reload::{CampaignReloadCause, CampaignReloadRequest};
 mod carrier;
+pub use campaign_checkpoint::{CampaignCheckpoint, CampaignCheckpointLoad, CampaignSaveInfo};
 pub mod chat;
 pub mod combat;
 pub mod content;
@@ -25,8 +29,10 @@ pub mod identities;
 pub mod input;
 pub mod input_program;
 mod item;
+mod local_input;
 mod local_profile;
-pub use item::{DroppedItem, ITEM_USE_HOLD_MS, advance_item};
+pub use item::{DroppedItem, ITEM_USE_HOLD_MS, ItemWeaponAmmo, advance_item};
+pub use local_input::LocalKeyBindings;
 pub use local_profile::LocalPlayerProfile;
 mod mantle_xanim;
 pub mod match_state;
@@ -120,9 +126,9 @@ pub const FRIENDLY_BOTS_DVAR: &str = "scr_game_friendlybots";
 
 pub const TEAM_MENU: &str = "team_marinesopfor";
 pub use match_state::{
-    ClassDef, ClassRejectReason, ClientLifecycle, ClientSnapshotMeta, DroppedItemAmmo,
-    EntityEventPayload, EntityEventRecord, EventAudience, EventRecord, InputReceipt,
-    ItemPickupRecord, KillcamHud, LinkedWeaponView, LoadoutSpec, LocationSelection,
+    ActorOverlay, ClassDef, ClassRejectReason, ClientLifecycle, ClientSnapshotMeta,
+    DroppedItemAmmo, EntityEventPayload, EntityEventRecord, EventAudience, EventRecord,
+    InputReceipt, ItemPickupRecord, KillcamHud, LinkedWeaponView, LoadoutSpec, LocationSelection,
     MENU_COMMAND_TAIL, MatchEndReason, MenuCommand, MenuCommandKind, PelletFxRecord, PersonalClass,
     RadarMode, RemoteMissile, SIM_EVENT_ROSTER, ScriptBlur, ScriptControls, ScriptDepthOfField,
     ScriptDvars, ScriptSeat, SimEvent, SimEventRow, SnapshotMeta, TargetBoxDvar,
@@ -178,18 +184,23 @@ pub use scene_effects::{
 pub use time_scale::ScriptSlowMotion;
 mod objectives;
 pub use objectives::{
-    CompassObjective, CompassVehicle, ObjectiveMatch, ObjectiveState, ScriptEffect,
-    VehicleHudTarget,
+    CampaignObjective, CompassObjective, CompassVehicle, ObjectiveMatch, ObjectiveState,
+    ObjectiveUpdate, ScriptEffect, VehicleHudTarget,
 };
 
 pub use world::{SimContent, SimContentBuilder, trace_world_clip};
 mod weapon_content;
-pub use weapon_content::{SimWeaponContent, SimWeaponRow, WeaponScriptSounds, WeaponSetup};
+pub use weapon_content::{
+    SimWeaponContent, SimWeaponRow, WeaponItemFacts, WeaponScriptSounds, WeaponSetup,
+};
 
 mod script_audio;
-pub use script_audio::{ScriptAmbient, ScriptAudioCommand};
+pub use script_audio::{ScriptAmbient, ScriptAudioCommand, ScriptEqBand};
 
 pub use input::PlayerProfile;
 
 mod tick_result;
 pub use tick_result::{TickEffects, TickResult};
+
+mod entity_body;
+pub use entity_body::EntityBodyBounds;

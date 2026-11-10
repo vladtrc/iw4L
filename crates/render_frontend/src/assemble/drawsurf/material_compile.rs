@@ -610,7 +610,7 @@ impl MaterialProgramCompile {
         }
         for &name in super::postfx_plan::GLOW_MATERIALS
             .iter()
-            .chain([&super::postfx_plan::BLOOD_MATERIAL])
+            .chain(super::postfx_plan::BLOOD_MATERIALS)
         {
             match postfx_compile_location(catalog, name) {
                 Ok((set_i, pass_i)) => {

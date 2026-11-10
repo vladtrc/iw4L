@@ -50,6 +50,10 @@ impl<'a> BoundWeapon<'a> {
         self.registry.world_facts_of(self.handle.row)
     }
 
+    pub fn item_ammo_facts(self) -> Option<weapon_iw4::WeaponItemAmmoFacts> {
+        self.registry.facts_of(self.handle.row)?.item_ammo
+    }
+
     pub fn combat_facts(
         self,
         rules: weapon_iw4::WeaponHostRules,

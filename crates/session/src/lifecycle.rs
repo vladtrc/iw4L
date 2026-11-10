@@ -19,6 +19,7 @@ pub struct LiveWorldIdentity {
 pub struct SessionSwapRequest {
     pending: Option<PendingSessionSwap>,
     completed: Option<SessionSwapResult>,
+    checkpoint: Option<sim::CampaignCheckpointLoad>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,6 +77,23 @@ impl SessionSwapRequest {
         self.begin(SessionSwapTarget::Zone(zone))
     }
 
+    pub fn request_campaign_checkpoint(
+        &mut self,
+        zone: String,
+        checkpoint: sim::CampaignCheckpointLoad,
+    ) -> Result<(), String> {
+        self.begin(SessionSwapTarget::Zone(zone))?;
+        self.checkpoint = Some(checkpoint);
+        Ok(())
+    }
+
+    pub(crate) fn campaign_checkpoint(&self) -> Option<&sim::CampaignCheckpointLoad> {
+        self.pending
+            .as_ref()
+            .filter(|pending| matches!(pending.target, SessionSwapTarget::Zone(_)))?;
+        self.checkpoint.as_ref()
+    }
+
     pub fn request_demo(
         &mut self,
         name: String,
@@ -98,6 +116,7 @@ impl SessionSwapRequest {
     }
 
     fn request_return(&mut self, leave_session: bool) -> Result<(), String> {
+        self.checkpoint = None;
         let Some(pending) = self.pending.as_mut() else {
             return self.begin(SessionSwapTarget::Menu { leave_session });
         };
@@ -136,6 +155,7 @@ impl SessionSwapRequest {
         if self.pending.is_some() {
             return Err("session swap already in progress".into());
         }
+        self.checkpoint = None;
         let target_s = match &target {
             SessionSwapTarget::Zone(zone) => format!("zone:{zone}"),
             SessionSwapTarget::Demo { name, .. } => format!("demo:{name}"),
@@ -408,6 +428,7 @@ impl SessionSwapDriver<'_> {
                 ctx.arg("target", target);
             });
             self.transition.pending = None;
+            self.transition.checkpoint = None;
             self.transition.completed = Some(completed);
         }
     }

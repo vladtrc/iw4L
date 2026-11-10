@@ -213,6 +213,7 @@ struct AppliedVision {
     pain: Option<Option<sim::VisionChange>>,
     pain_slot: FilmVisionView,
     pain_strength: f32,
+    campaign_pain: hud_iw4::CampaignPainVision,
     native: NativeVisionLerp,
     native_pain: NativeVisionLerp,
     native_pain_selected: bool,
@@ -361,6 +362,7 @@ struct FilmVisionPlayback<'w> {
     film: ResMut<'w, FilmVisionView>,
     applied: ResMut<'w, AppliedVision>,
     clock: Res<'w, net::FrameClock>,
+    profile: Option<Res<'w, frame::MatchRuntimeProfile>>,
 }
 
 impl FilmVisionPlayback<'_> {
@@ -523,7 +525,21 @@ impl FilmVisionPlayback<'_> {
                 .player()
                 .filter(|ps| ps.health > 0 && ps.max_health > 0 && ps.pm_type < 5)
                 .map(|ps| ps.health as f32 / ps.max_health as f32);
-            if let Some(health) = health.filter(|_| wanted.is_some()) {
+            if self
+                .profile
+                .as_ref()
+                .is_some_and(|profile| profile.0 == asset_core::RuntimeProfile::Campaign)
+            {
+                let dvars = snapshot.meta.script_dvars(presentation.client_id());
+                self.applied.pain_strength = self.applied.campaign_pain.update(
+                    presentation.player().is_some_and(|ps| {
+                        ps.other_flags & playerstate_iw4::other_flags::PAIN_VISION != 0
+                    }),
+                    self.clock.frametime(),
+                    dvars.float("painVisionLerpInRate").unwrap_or(10.0),
+                    dvars.float("painVisionLerpOutRate").unwrap_or(0.3),
+                );
+            } else if let Some(health) = health.filter(|_| wanted.is_some()) {
                 if health <= 0.5 || self.applied.pain_strength > 0.0 {
                     let target = (1.0 - health).clamp(0.0, 1.0);
                     self.applied.pain_strength =

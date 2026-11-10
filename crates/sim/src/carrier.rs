@@ -26,6 +26,7 @@ impl Default for SimWorld {
         ecs.entity_mut(state_entity).insert(PayloadIndex::default());
         install_state_entity(&mut ecs, state_entity);
         ecs.insert_resource(crate::LocalPlayerProfile::default());
+        ecs.init_resource::<crate::LocalKeyBindings>();
         ecs.insert_resource(crate::PersistentDataStore::default());
         ecs.init_resource::<crate::script::MatchScript>();
         ecs.insert_resource(crate::script::RoundScript::new(
@@ -63,6 +64,48 @@ impl DerefMut for SimWorld {
 }
 
 impl SimWorld {
+    pub fn campaign_reload_request(&self) -> Option<crate::CampaignReloadRequest> {
+        self.ecs
+            .get_resource::<crate::campaign_reload::CampaignReload>()?
+            .request
+    }
+    pub fn prepare_campaign_checkpoint_load(
+        &self,
+    ) -> Result<crate::CampaignCheckpointLoad, String> {
+        crate::CampaignCheckpointLoad::prepare(&self.ecs)
+    }
+
+    /// Install into a freshly prepared map before starting its script entries.
+    /// The host must install the returned authority tick before releasing load hold.
+    pub fn install_campaign_checkpoint_load(
+        &mut self,
+        load: &crate::CampaignCheckpointLoad,
+    ) -> Result<Tick, String> {
+        load.install(&mut self.ecs)
+    }
+
+    /// Last committed in-process campaign save, available for a coordinated load.
+    pub fn committed_campaign_checkpoint(&self) -> Option<&crate::CampaignCheckpoint> {
+        self.ecs
+            .get_resource::<crate::campaign_checkpoint::SaveMemory>()?
+            .checkpoint()
+    }
+
+    /// Capture after a successful frame, when all script threads are parked.
+    pub fn capture_campaign_checkpoint(&self) -> Result<crate::CampaignCheckpoint, String> {
+        crate::CampaignCheckpoint::capture(&self.ecs)
+    }
+
+    /// Restore an in-process checkpoint from this map session. The caller must
+    /// reset its authority clock to the returned tick and retire client history,
+    /// queued input, and presentation from the abandoned timeline before stepping.
+    pub fn restore_campaign_checkpoint(
+        &mut self,
+        checkpoint: &crate::CampaignCheckpoint,
+    ) -> Result<Tick, String> {
+        checkpoint.restore(&mut self.ecs)
+    }
+
     pub fn validate_entity_lifetimes(&self) -> Result<(), String> {
         crate::frame::validate_entity_payloads(&self.ecs)
     }
@@ -84,7 +127,7 @@ impl SimWorld {
             .count();
         let runtime = self.ecs.resource::<crate::script::RoundScript>();
         format!(
-            "occupied_slots = {occupied}\nevent_holds = {held}\nprojectile_payloads = {}\nitem_payloads = {}\nmover_payloads = {}\nscript_objects = {}\nscript_defined_entities = {}\nentity_consistency = {:?}\nmap_glass = {:?}\n",
+            "occupied_slots = {occupied}\nevent_holds = {held}\nprojectile_payloads = {}\nitem_payloads = {}\nmover_payloads = {}\nscript_objects = {}\nscript_defined_entities = {}\nentity_consistency = {:?}\nmap_glass = {:?}\ncampaign_save = {}\n",
             collect_projectiles(&self.ecs).len(),
             collect_dropped_items(&self.ecs).len(),
             collect_script_movers(&self.ecs).len(),
@@ -95,7 +138,10 @@ impl SimWorld {
                 .filter(|id| runtime.script_is_defined(id))
                 .count(),
             self.validate_entity_lifetimes(),
-            self.content().map().glass
+            self.content().map().glass,
+            self.ecs
+                .get_resource::<crate::campaign_checkpoint::SaveMemory>()
+                .map_or_else(|| "inactive".into(), |saves| saves.summary())
         )
     }
 
@@ -123,6 +169,14 @@ impl SimWorld {
 
     pub fn set_local_player_profile(&mut self, profile: crate::LocalPlayerProfile) {
         self.ecs.insert_resource(profile);
+    }
+
+    pub fn set_local_key_bindings(&mut self, bindings: crate::LocalKeyBindings) {
+        self.ecs.insert_resource(bindings);
+    }
+
+    pub fn local_key_bindings(&self) -> &crate::LocalKeyBindings {
+        self.ecs.resource::<crate::LocalKeyBindings>()
     }
 
     pub fn frame(&mut self) -> FrameWorld<'_> {
@@ -668,13 +722,17 @@ impl SimWorld {
             .ecs
             .get::<SimState>(self.state_entity)
             .expect("simulation state entity is missing its SimState component");
-        state.snapshot_with_dynamic_rows(
+        let mut snapshot = state.snapshot_with_dynamic_rows(
             tick,
             collect_players(&self.ecs),
             collect_projectiles(&self.ecs),
             collect_script_movers(&self.ecs),
             collect_dropped_items(&self.ecs),
-        )
+            crate::script::host::audio::eq_disabled_entities(&self.ecs),
+        );
+        snapshot.meta.campaign_dvars =
+            crate::script::host::natives::iw4::campaign_shared_dvars(&self.ecs);
+        snapshot
     }
 
     pub fn slow_motion(&self) -> Option<crate::ScriptSlowMotion> {

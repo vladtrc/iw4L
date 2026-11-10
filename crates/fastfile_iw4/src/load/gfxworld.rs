@@ -101,7 +101,7 @@ pub(super) fn load_gfxworld(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSin
     }
 
     let geometry = load_gfxworld_draw(s, links, p.at(s.layout(80, 120)))?;
-    let light_grid = load_gfx_light_grid(s, p.at(s.layout(152, 264)))?;
+    let mut light_grid = load_gfx_light_grid(s, p.at(s.layout(152, 264)))?;
 
     let brush_model_count = s.i32_at(p, s.layout(208, 352))?.max(0) as usize;
     let brush_models = s.plain_array(
@@ -255,7 +255,8 @@ pub(super) fn load_gfxworld(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSin
     load_gfx_dpvs_dynamic(s, dyn_dpvs, cell_count)?;
 
     let hero_count = s.u32_at(p, s.layout(616, 924))? as usize;
-    s.plain_array(
+    light_grid.hero_light_count = hero_count;
+    light_grid.hero_lights = s.plain_array(
         p,
         s.layout(620, 928),
         4,
@@ -439,6 +440,8 @@ fn load_gfx_light_grid(s: &mut ZoneStream<'_>, p: Ptr) -> Result<GfxLightGridGeo
         entry_count,
         colors,
         color_count,
+        hero_lights: None,
+        hero_light_count: 0,
     })
 }
 

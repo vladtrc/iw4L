@@ -153,6 +153,7 @@ struct OverheadNameDisplay<'w, 's> {
     players: Query<'w, 's, (&'static CEntity, &'static CEntityRuntime)>,
     cg_clock: Res<'w, FrameClock>,
     catalog: Option<Res<'w, MenuCatalog>>,
+    strings: Option<Res<'w, assets::PreparedLocalizedStrings>>,
     collision: Option<Res<'w, net::ClientCollision>>,
     pass: ResMut<'w, HudTessPass>,
     names: Query<'w, 's, &'static mut OverheadNameState>,
@@ -194,6 +195,36 @@ impl OverheadNameDisplay<'_, '_> {
             }
             return;
         };
+        if let Some(overlay) = snapshot
+            .meta
+            .for_client(presentation.client_id())
+            .and_then(|meta| meta.actor_overlay.as_ref())
+        {
+            let dvars = snapshot.meta.script_dvars(presentation.client_id());
+            let hidden = view.in_killcam()
+                || presentation.alive_player().is_none()
+                || dvars.int("cg_paused").is_some_and(|v| v != 0)
+                || dvars.int("hud_missionfailed").is_some_and(|v| v != 0)
+                || dvars.int("cg_draw2d") == Some(0)
+                || is_flashbanged(
+                    now,
+                    ps.shellshock_time,
+                    ps.shellshock_duration,
+                    presentation
+                        .shellshock()
+                        .map_or(SCREEN_BLEND_BLURRED, |shock| shock.screen_type),
+                ) != 0;
+            if !hidden && let Some(catalog) = self.catalog.as_deref() {
+                self.pass.overhead_names = crate::actor_overlay::draw(
+                    overlay,
+                    dvars,
+                    &surface,
+                    catalog,
+                    self.strings.as_deref(),
+                );
+            }
+            return;
+        }
         if ps.other_flags & 0x10 != 0 {
             for mut name in &mut self.names {
                 name.seen = None;

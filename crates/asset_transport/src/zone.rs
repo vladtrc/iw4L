@@ -109,6 +109,14 @@ pub struct ZoneImage {
 }
 
 impl ZoneImage {
+    pub fn runtime_profile(&self) -> Result<asset_core::RuntimeProfile, String> {
+        if self.game != FamilyId::IW4 {
+            return Ok(asset_core::RuntimeProfile::Multiplayer);
+        }
+        let table = self.iw4_table().map_err(|error| error.to_string())?;
+        iw4_runtime_profile(table.kinds())
+    }
+
     pub fn iw4_table(&self) -> Result<WireAssetTable<'_>, ZoneOpenError> {
         if self.game != FamilyId::IW4 {
             return Err(ZoneOpenError::WrongGame {
@@ -384,5 +392,21 @@ impl ZoneMemory {
             b7.as_mut_slice(),
         ];
         ZoneStream::new(image, blocks, &mut self.insert_map)
+    }
+}
+
+fn iw4_runtime_profile(
+    kinds: impl IntoIterator<Item = fastfile_iw4::AssetType>,
+) -> Result<asset_core::RuntimeProfile, String> {
+    use fastfile_iw4::AssetType::*;
+    let (mut sp, mut mp) = (false, false);
+    for kind in kinds {
+        sp |= matches!(kind, ClipMapSp | GameWorldSp);
+        mp |= matches!(kind, ClipMapMp | GameWorldMp);
+    }
+    match (sp, mp) {
+        (true, true) => Err("IW4 map mixes single-player and multiplayer world assets".into()),
+        (true, false) => Ok(asset_core::RuntimeProfile::Campaign),
+        _ => Ok(asset_core::RuntimeProfile::Multiplayer),
     }
 }

@@ -1,5 +1,6 @@
 mod admission;
 mod atlas;
+mod campaign_reload;
 mod match_load;
 pub use atlas::replace_clip as prepare_scene_collision;
 pub mod readiness;

@@ -368,6 +368,7 @@ pub fn sync_camera_from_presented(
         kick.refdef_view_angles = pose.angles;
         let horiz = fpv_horizontal_fov(
             settings.fov,
+            script_fov_scale(&presentation.presented),
             ps,
             0.0,
             false,
@@ -487,6 +488,7 @@ pub fn sync_camera_from_presented(
     kick.last_weapon_pos_frac = ps.f_weapon_pos_frac;
     let horiz = fpv_horizontal_fov(
         settings.fov,
+        script_fov_scale(&presentation.presented),
         ps,
         ps.f_weapon_pos_frac,
         kick.b_position_to_ads,
@@ -501,8 +503,25 @@ pub fn sync_camera_from_presented(
     kick.horiz_fov_deg = horiz;
 }
 
+fn script_fov_scale(presented: &PresentedSnapshot) -> f32 {
+    presented
+        .snapshot()
+        .and_then(|snapshot| {
+            snapshot
+                .meta
+                .objectives
+                .server_info
+                .iter()
+                .find(|(name, _)| name == "cg_fovscale")
+        })
+        .and_then(|(_, value)| value.parse::<f32>().ok())
+        .filter(|value| value.is_finite() && (0.2..=2.0).contains(value))
+        .unwrap_or(CG_FOV_SCALE_DEFAULT)
+}
+
 fn fpv_horizontal_fov(
     base_fov: f32,
+    fov_scale: f32,
     ps: &playerstate_iw4::PlayerState,
     f_weapon_pos_frac: f32,
     b_position_to_ads: bool,
@@ -536,7 +555,7 @@ fn fpv_horizontal_fov(
         aim_down_sight: facts.aim_down_sight && facts.ads_zoom_fov > 0.0,
         ads_zoom_fov: ads_target,
         overlay_zoom: 0.0,
-        fov_scale: CG_FOV_SCALE_DEFAULT,
+        fov_scale,
         fov_min: CG_FOV_MIN_DEFAULT.min(ads_target),
     };
     let (horiz, _) = calc_fov_from_ads(&inputs, f_weapon_pos_frac, b_position_to_ads, &overlay);

@@ -1,3 +1,6 @@
+pub(crate) mod campaign;
+pub(crate) mod campaign_damage;
+
 use crate::frame::FrameWorld;
 use crate::script::runtime::{raise, run_now};
 use crate::script::{Arc, BTreeMap, Fault, Location, RoundScript, Value, VecDeque};
@@ -24,6 +27,10 @@ pub(crate) fn player_object(world: &World, client: u32) -> Value {
 }
 
 pub(crate) fn player_damage(world: &mut World, tick: crate::Tick, hit: &crate::script_player::Hit) {
+    if world.resource::<RoundScript>().profile == asset_core::RuntimeProfile::Campaign {
+        campaign_damage::apply(world, tick, hit, None);
+        return;
+    }
     if crate::script_player::god_mode(&FrameWorld::from_world(world), hit.victim) {
         return;
     }
@@ -72,6 +79,36 @@ pub(crate) fn player_damage(world: &mut World, tick: crate::Tick, hit: &crate::s
 }
 
 pub(crate) fn crush_player(world: &mut World, victim: ClientId, pusher: u64, point: [f32; 3]) {
+    if world.resource::<RoundScript>().profile == asset_core::RuntimeProfile::Campaign {
+        if !world
+            .resource::<RoundScript>()
+            .entities
+            .contains_key(&pusher)
+        {
+            return;
+        }
+        let tick = world.resource::<crate::step::StepRequest>().tick;
+        campaign_damage::apply(
+            world,
+            tick,
+            &crate::script_player::Hit {
+                victim,
+                attacker: None,
+                amount: 99999,
+                flags: 0,
+                means: "MOD_CRUSH",
+                weapon: 0,
+                point,
+                dir: [0.0, 0.0, -1.0],
+                direction_present: true,
+                hitloc: 0,
+                inflictor: None,
+                commit: None,
+            },
+            Some(Value::Object(pusher)),
+        );
+        return;
+    }
     if crate::script_player::god_mode(&FrameWorld::from_world(world), victim) {
         return;
     }
@@ -555,6 +592,16 @@ pub(crate) fn settle_deaths(world: &mut World) {
         }
         if callback == KILLED {
             let attacker = args.get(1).cloned().unwrap_or(Value::Undefined);
+            if world.resource::<RoundScript>().profile == asset_core::RuntimeProfile::Campaign {
+                let cause = args.get(3).cloned().unwrap_or(Value::Undefined);
+                let weapon = args
+                    .get(4)
+                    .filter(|v| **v != Value::string("none"))
+                    .cloned()
+                    .unwrap_or(Value::Undefined);
+                raise(world, victim, "death", vec![attacker, cause, weapon]);
+                continue;
+            }
             raise(world, victim.clone(), "death", vec![attacker]);
         }
         if run_now(world, callback, victim, args, now).is_err() {
@@ -1220,6 +1267,7 @@ pub struct PlayerSlot {
     pub radar_mode: crate::RadarMode,
     pub radar_blocked: bool,
     pub(crate) link: Option<PlayerLink>,
+    pub(crate) campaign_damage: campaign_damage::PlayerDamage,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1266,6 +1314,7 @@ impl PlayerSlot {
             radar_mode: crate::RadarMode::Normal,
             radar_blocked: false,
             link: None,
+            campaign_damage: Default::default(),
         }
     }
 }
@@ -1409,14 +1458,16 @@ pub(crate) fn disconnect_player(world: &mut World, client: u32) {
     else {
         return;
     };
-    let now = now_ms(world);
-    let _ = run_now(
-        world,
-        DISCONNECT,
-        Value::Object(slot.object),
-        Vec::new(),
-        now,
-    );
+    if world.resource::<RoundScript>().profile == asset_core::RuntimeProfile::Multiplayer {
+        let now = now_ms(world);
+        let _ = run_now(
+            world,
+            DISCONNECT,
+            Value::Object(slot.object),
+            Vec::new(),
+            now,
+        );
+    }
     world
         .resource_mut::<crate::PersistentDataStore>()
         .unbind(crate::ClientId(client));
@@ -1452,6 +1503,13 @@ pub(crate) fn sync_players(world: &mut World) {
     let now = i64::from(request.tick.0) * i64::from(crate::MATCH_TICK_MS);
     let runtime = world.resource::<RoundScript>();
     if runtime.program.is_none() || runtime.fault.is_some() || !runtime.started {
+        return;
+    }
+    if runtime.profile == asset_core::RuntimeProfile::Campaign {
+        let clients: Vec<u32> = runtime.players.keys().copied().collect();
+        for client in clients {
+            deliver_answers(world, client);
+        }
         return;
     }
     let clients: Vec<(u32, bool)> = {
@@ -1535,6 +1593,9 @@ fn client_name(name: &[u8]) -> String {
 }
 
 pub(crate) fn load_field(world: &mut World, client: u32, name: &str) -> Option<Value> {
+    if let Some(value) = campaign_damage::load_field(world, client, name) {
+        return Some(value);
+    }
     let id = ClientId(client);
     if name == "sessionstate" {
         let runtime = world.resource::<RoundScript>();
@@ -1617,6 +1678,9 @@ pub(crate) fn store_field(
     name: &str,
     value: &Value,
 ) -> Result<bool, String> {
+    if campaign_damage::store_field(world, client, name, value)? {
+        return Ok(true);
+    }
     let id = ClientId(client);
     let int = |value: &Value| match value {
         Value::Int(n) => Ok(*n),

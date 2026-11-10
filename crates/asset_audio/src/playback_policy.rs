@@ -171,8 +171,17 @@ impl LoopingPolicy {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct MasterSlavePolicy {
+    pub master: bool,
+    pub slave: bool,
+    pub percentage: Option<f32>,
+}
+
 #[derive(Clone, Debug)]
 pub struct AliasPlaybackPolicy {
+    pub master_slave: Option<MasterSlavePolicy>,
+    pub reverb_flags: Option<u32>,
     pub namespace: FamilyId,
     looping: LoopingPolicy,
     pub channel: Option<ChannelKey>,

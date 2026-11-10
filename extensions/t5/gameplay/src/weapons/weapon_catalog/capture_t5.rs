@@ -152,6 +152,7 @@ impl NativeWeaponCapture for WeaponCatalog {
                     ext_t5_fastfile::size::WEAPON_DEF_PARENT_WEAPON_NAME_OFF,
                 )
             }),
+            clip_model: None,
             world_model: geometry
                 .world_model_name
                 .and_then(|ptr| stream.cstr(ptr).ok())

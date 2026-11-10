@@ -81,6 +81,7 @@ impl HeadlessSession {
                 .collect(),
             future_weapons: tape.future_weapons,
             stop_on_death: tape.stop_on_death,
+            allow_menu_responses: false,
             scoreboard_window_ms: tape.scoreboard_window_ms,
         };
         let actors = program

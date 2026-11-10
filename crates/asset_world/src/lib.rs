@@ -46,3 +46,6 @@ pub use world_mesh::*;
 
 mod brush_pose;
 pub use brush_pose::brush_model_pose;
+
+mod path_nodes;
+pub use path_nodes::capture_path_nodes;

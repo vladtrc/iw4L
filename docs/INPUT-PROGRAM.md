@@ -43,6 +43,13 @@ With a positive quantum, times are consecutive quantum offsets starting at quant
 absolute command units (65536 per turn), including the prepared delta-angle
 basis; they are not mouse deltas. Weapon IDs must already be resolved. Optional `future_weapons: [id,...]` declares known catalog weapons that can be acquired during the take; it grants nothing. Actual possession is checked before each authority tick issues commands. A zero weapon means no selection request, which is useful during pickup/replacement.
 
+Optional `allow_menu_responses: true` permits replies from the real menu input
+channel while the tape owns actor commands, including after command completion.
+It defaults to false, changes the program hash, and records each consumed reply
+as tick/menu/response in `menu_responses`. Movement and inventory actions remain
+exclusive to the tape; this option grants neither inventory nor a mission state.
+
+
 The simulation is the exclusive input owner for that actor. Render input and
 prediction stop contributing. Actor actions fail the take. Ownership remains
 after completion or failure until the match is torn down; reload the map for

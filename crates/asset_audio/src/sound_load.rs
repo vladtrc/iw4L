@@ -170,7 +170,11 @@ struct SoundSource {
     absent: Absent,
 }
 
-fn sound_sources(games: &GamesRoot, map: &Path) -> (Vec<SoundSource>, Vec<SoundSource>) {
+fn sound_sources(
+    games: &GamesRoot,
+    map: &Path,
+    profile: asset_core::RuntimeProfile,
+) -> (Vec<SoundSource>, Vec<SoundSource>) {
     let runtime = |name: &'static str, merge, absent| SoundSource {
         namespace: FamilyId::IW4,
         name,
@@ -185,16 +189,28 @@ fn sound_sources(games: &GamesRoot, map: &Path) -> (Vec<SoundSource>, Vec<SoundS
         merge: Merge::Missing,
         absent: Absent::Skip,
     };
-    let before_map = vec![
-        runtime("code_post_gfx_mp", Merge::Override, Absent::Skip),
-        runtime("localized_code_post_gfx_mp", Merge::Override, Absent::Skip),
-        runtime("patch_mp", Merge::Override, Absent::Skip),
-        runtime("common_mp", Merge::Override, Absent::Gap),
-        runtime("localized_common_mp", Merge::Override, Absent::Gap),
-    ];
+    let before_map = if profile == asset_core::RuntimeProfile::Campaign {
+        vec![
+            runtime("code_post_gfx", Merge::Override, Absent::Gap),
+            runtime("localized_code_post_gfx", Merge::Override, Absent::Skip),
+            runtime("common", Merge::Override, Absent::Gap),
+            runtime("localized_common", Merge::Override, Absent::Skip),
+            runtime("patch", Merge::Override, Absent::Skip),
+        ]
+    } else {
+        vec![
+            runtime("code_post_gfx_mp", Merge::Override, Absent::Skip),
+            runtime("localized_code_post_gfx_mp", Merge::Override, Absent::Skip),
+            runtime("patch_mp", Merge::Override, Absent::Skip),
+            runtime("common_mp", Merge::Override, Absent::Gap),
+            runtime("localized_common_mp", Merge::Override, Absent::Gap),
+        ]
+    };
     let after_map = crate::audio_families()
         .iter()
-        .filter(|(id, _)| *id != FamilyId::IW4)
+        .filter(|(id, _)| {
+            profile == asset_core::RuntimeProfile::Multiplayer && *id != FamilyId::IW4
+        })
         .flat_map(|(id, policy)| {
             let version = asset_core::families()
                 .get(id)
@@ -229,9 +245,18 @@ pub fn gather_sound_sources(games: &GamesRoot, map: &Path) -> SoundSources {
 pub fn gather_sound_sources_filtered(
     games: &GamesRoot,
     map: &Path,
+    enabled: impl FnMut(FamilyId) -> bool,
+) -> SoundSources {
+    gather_sound_sources_for_profile(games, map, asset_core::RuntimeProfile::Multiplayer, enabled)
+}
+
+pub fn gather_sound_sources_for_profile(
+    games: &GamesRoot,
+    map: &Path,
+    profile: asset_core::RuntimeProfile,
     mut enabled: impl FnMut(FamilyId) -> bool,
 ) -> SoundSources {
-    let (before, after) = sound_sources(games, map);
+    let (before, after) = sound_sources(games, map, profile);
     let mut sources = SoundSources {
         before_map: SoundCatalog::default(),
         after_map: Vec::new(),

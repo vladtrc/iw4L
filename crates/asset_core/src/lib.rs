@@ -18,3 +18,9 @@ pub use ident::{
     TechniqueSetIndex, TechniqueSetSpace, TracerIndex, TracerSpace, WalkLocalMaterialIndex,
     WorldWeaponIndex, WorldWeaponSpace, XAnimIndex, XAnimSpace, ZoneOwner, bound_zone_names,
 };
+
+mod runtime_profile;
+pub use runtime_profile::RuntimeProfile;
+
+mod path_node;
+pub use path_node::{PathLink, PathNode};

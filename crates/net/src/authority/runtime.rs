@@ -784,6 +784,13 @@ fn fanout_loopback(
         .adopt_events(&tick.effects.player_cards);
     queues.pending_gamenotify.adopt_prints(&tick.effects.prints);
     queues.pending_svc.adopt_sounds(&tick.effects.local_sounds);
+    for (client, _) in &tick.snapshot.meta.clients {
+        for update in &tick.effects.objective_updates {
+            reliable
+                .queue_mut(*client)
+                .push(crate::ReliableRow::Objective(update.clone()));
+        }
+    }
     crate::svc_script_audio::fanout_script_audio(
         &mut reliable,
         tick.snapshot.meta.clients.iter().map(|(id, _)| *id),

@@ -25,6 +25,7 @@ pub struct ModelLightingRequest {
     pub owner: ModelLightingOwner,
     pub origin: [f32; 3],
     pub lookup_fallback: u8,
+    pub hero_lighting: bool,
 }
 
 #[derive(Resource, Debug, Default)]

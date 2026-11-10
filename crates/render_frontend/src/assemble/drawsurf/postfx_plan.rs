@@ -36,7 +36,7 @@ pub const GLOW_SETUP_MATERIAL: &str = "glow_consistent_setup_color2";
 pub const GLOW_APPLY_MATERIAL: &str = "glow_apply_bloom";
 pub const GLOW_MATERIALS: &[&str] = &[GLOW_SETUP_MATERIAL, GLOW_APPLY_MATERIAL];
 
-pub const BLOOD_MATERIAL: &str = "splatter_alt";
+pub const BLOOD_MATERIALS: &[&str] = &["splatter_alt", "splatter_alt_sp"];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PostFxAdmissionRefusal {
@@ -206,9 +206,11 @@ pub(crate) fn build_runtime_blood(
     prepared: &PreparedMaterialTable,
     programs: &RuntimeProgramRegistry,
     shaders: &[Handle<bevy::shader::Shader>],
+    profile: asset_core::RuntimeProfile,
 ) -> Result<RuntimeBloodMaterial, PostFxAdmissionRefusal> {
-    let film = admit_unlit_2d(catalog, prepared, programs, shaders, BLOOD_MATERIAL, false)?;
-    let (material, _, _) = postfx_material_location(catalog, BLOOD_MATERIAL)?;
+    let material_name = asset_game::BloodOverlayAssets::for_profile(profile).material;
+    let film = admit_unlit_2d(catalog, prepared, programs, shaders, material_name, false)?;
+    let (material, _, _) = postfx_material_location(catalog, material_name)?;
     let texture_slots = film
         .port
         .abi()

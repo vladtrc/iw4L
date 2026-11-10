@@ -30,7 +30,14 @@ pub(crate) fn update_script_music(
     }
     for event in events.read() {
         match &event.0 {
-            sim::ScriptAudioCommand::ChannelVolumes { .. }
+            sim::ScriptAudioCommand::EntitySound { .. }
+            | sim::ScriptAudioCommand::EqBands { .. }
+            | sim::ScriptAudioCommand::Eq { .. }
+            | sim::ScriptAudioCommand::DeactivateEq { .. }
+            | sim::ScriptAudioCommand::EqLerp { .. }
+            | sim::ScriptAudioCommand::Reverb { .. }
+            | sim::ScriptAudioCommand::DeactivateReverb { .. }
+            | sim::ScriptAudioCommand::ChannelVolumes { .. }
             | sim::ScriptAudioCommand::DeactivateChannelVolumes { .. } => {}
             sim::ScriptAudioCommand::MusicPlay(alias) => {
                 if playback.pending.is_some() || playback.active.is_some() {
@@ -69,6 +76,7 @@ pub(crate) fn update_script_music(
     };
     let (namespace, name) = namespace_alias(&alias);
     let handle = cues.trigger(CueTrigger {
+        force_master: false,
         event: None,
         bank: bank.0.clone(),
         namespace,

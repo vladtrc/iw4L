@@ -32,12 +32,6 @@ pub async fn load_prepared_match_with_atlas(
     let mut image_trees = games_root()
         .map(|root| asset_transport::NamespaceTrees::discover(&root))
         .unwrap_or_else(|_| asset_transport::NamespaceTrees::default());
-    if let Ok(path) = &common_mp {
-        image_trees.adopt_zone(path);
-    }
-    if let Ok(path) = &zone_ff {
-        image_trees.adopt_zone(path);
-    }
     let atlas_worlds::AtlasLoad {
         space: atlas_space,
         regions: atlas_regions,
@@ -50,10 +44,6 @@ pub async fn load_prepared_match_with_atlas(
     if let Some(error) = atlas_refusal {
         return MatchLoadOutcome::Refused(error);
     }
-    for (_, _, path) in &atlas_zones {
-        image_trees.adopt_zone(path);
-    }
-    image_trees.retain(|ns| families.enabled(ns.as_str()));
     let zone_name = zone_ff
         .as_ref()
         .ok()
@@ -83,12 +73,58 @@ pub async fn load_prepared_match_with_atlas(
         })
     };
 
+    let opened_map = map_open.await;
+    if progress.is_canceled() {
+        drop(opened_map);
+        diag::info!(
+            World,
+            "match walk: canceled before the map walk — load retargeted"
+        );
+        return MatchLoadOutcome::Canceled;
+    }
+    let profile = match &opened_map {
+        Ok((_, image)) => match image.runtime_profile() {
+            Ok(profile) => profile,
+            Err(error) => return MatchLoadOutcome::Refused(error),
+        },
+        Err(error) => return MatchLoadOutcome::Refused(error.clone()),
+    };
+    let common_mp = if profile == asset_core::RuntimeProfile::Campaign {
+        let path = &opened_map.as_ref().unwrap().0;
+        find_zone_for_tree(path, profile.common_zone()).map(|found| found.path)
+    } else {
+        common_mp
+    };
+    let runtime_common = match &common_mp {
+        Ok(path) => path,
+        Err(error) => return MatchLoadOutcome::Refused(error.clone()),
+    };
+    image_trees.adopt_zone(runtime_common);
+    if let Ok(path) = &zone_ff {
+        image_trees.adopt_zone(path);
+    }
+    for (_, _, path) in &atlas_zones {
+        image_trees.adopt_zone(path);
+    }
+    image_trees.retain(|ns| families.enabled(ns.as_str()));
+    diag::info!(
+        World,
+        "runtime profile: {} common={}",
+        profile.token(),
+        runtime_common.display()
+    );
+    if profile == asset_core::RuntimeProfile::Campaign && !atlas_zones.is_empty() {
+        return MatchLoadOutcome::Refused(
+            "Campaign worlds cannot be composed as multiplayer atlas regions".into(),
+        );
+    }
     let mut donor_report = Vec::new();
     let key = CommonKey::for_match(
         zone_ff.as_ref().ok().map(PathBuf::as_path),
         common_mp.as_ref().ok().map(PathBuf::as_path),
         &mut donor_report,
         families,
+        profile,
     );
     let waiting = progress.begin_scoped(StageId::CommonAssets, "shared common", None);
     let (common, reach) = ensure_common(key).await;
@@ -105,6 +141,7 @@ pub async fn load_prepared_match_with_atlas(
 
     let cloning = std::time::Instant::now();
     let CommonProducts {
+        campaign_hud,
         scripts: mut iw4_scripts,
         material_seed,
         mut map_payloads,
@@ -130,7 +167,7 @@ pub async fn load_prepared_match_with_atlas(
         seed_fx,
         seed_impact_fx,
         material_donors,
-        strings,
+        mut strings,
         counts:
             CommonCounts {
                 startup_count,
@@ -167,15 +204,6 @@ pub async fn load_prepared_match_with_atlas(
         load_jobs::open(JobKind::ImageDecode).namespace("iw4"),
     );
 
-    let opened_map = map_open.await;
-    if progress.is_canceled() {
-        drop(opened_map);
-        diag::info!(
-            World,
-            "match walk: canceled before the map walk — load retargeted"
-        );
-        return MatchLoadOutcome::Canceled;
-    }
     let atlas_walks;
     let mut atlas_report = Vec::new();
     let (loaded, map_namespace) = match opened_map {
@@ -229,6 +257,7 @@ pub async fn load_prepared_match_with_atlas(
         ));
     };
     let LoadedWorld {
+        weapon_assets,
         scripts: map_scripts,
         mut world,
         mut materials,
@@ -329,6 +358,28 @@ pub async fn load_prepared_match_with_atlas(
         s1_common_bytes.saturating_add(s1_map_bytes),
         asset_transport::process_resident_bytes().unwrap_or(0),
     ));
+
+    if profile == asset_core::RuntimeProfile::Campaign {
+        let before = weapons.len();
+        weapons.overlay_authored(weapon_assets.weapons);
+        let world_added = world_weapons.absorb(weapon_assets.world_models);
+        projectile_meshes.absorb(weapon_assets.projectiles);
+        common_tracers.absorb_definitions(weapon_assets.tracers);
+        report.push(format!("campaign weapon publication: common={before} merged={} map_world_models_added={world_added}", weapons.len()));
+        let clips: Vec<_> = weapons
+            .native_script_aliases()
+            .filter_map(|(name, id)| {
+                weapons
+                    .clip_model_of(id)
+                    .map(|model| format!("{name}={model}"))
+            })
+            .collect();
+        report.push(format!(
+            "campaign weapon clip models: {} ({})",
+            clips.len(),
+            clips.join(", ")
+        ));
+    }
 
     let common_xanim_count = xanims.len();
     let map_xanim_count = map_xanims.len();
@@ -711,9 +762,22 @@ pub async fn load_prepared_match_with_atlas(
         &player_anim_sources,
         &xanims,
     );
-    weapons.resolve_fpv_soldiers(&fpv_meshes, &soldiers);
     let assembly_started = std::time::Instant::now();
-    let assemblies = weapons.resolve_fpv_assemblies(&fpv_meshes, &xanims);
+    let assemblies = if profile == asset_core::RuntimeProfile::Campaign {
+        let census =
+            weapons.resolve_script_viewmodels(&fpv_meshes, &xanims, &scripts.script_viewmodels());
+        report.push(format!(
+            "campaign viewmodels prepared: {}",
+            weapons
+                .script_viewmodel_names()
+                .collect::<Vec<_>>()
+                .join(" ")
+        ));
+        census
+    } else {
+        weapons.resolve_fpv_soldiers(&fpv_meshes, &soldiers);
+        weapons.resolve_fpv_assemblies(&fpv_meshes, &xanims)
+    };
     report.push(format!(
         "FPV assemblies: built={} kit sides linked={} refused={} clip track tables={} elapsed_ms={:.1}",
         assemblies.built,
@@ -847,7 +911,17 @@ pub async fn load_prepared_match_with_atlas(
             row.husk.edge_kind()
         ));
     }
+    if profile == asset_core::RuntimeProfile::Campaign
+        && let Ok(path) = &zone_ff
+    {
+        match load_localize_catalog_in_lane(path) {
+            Ok(localize) => strings.absorb_in_namespace(asset_core::FamilyId::IW4, localize),
+            Err(error) => report.push(format!("campaign map localization: {error}")),
+        }
+    }
     let mut prepared = PreparedMatch {
+        campaign_hud,
+        profile,
         ui_images: common.ui_images.clone(),
         scripts,
         fx,

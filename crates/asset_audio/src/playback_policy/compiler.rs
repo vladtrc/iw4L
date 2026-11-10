@@ -57,6 +57,15 @@ pub(super) fn compile(
         GroupSelection::Ungrouped => GroupGainPolicy::Ungrouped,
     };
     Some(AliasPlaybackPolicy {
+        master_slave: (namespace == FamilyId::IW4)
+            .then_some(row.flags)
+            .flatten()
+            .map(|flags| MasterSlavePolicy {
+                master: flags & asset_iw4::snd_alias::SND_ALIAS_FLAG_MASTER != 0,
+                slave: flags & asset_iw4::snd_alias::SND_ALIAS_FLAG_SLAVE != 0,
+                percentage: row.slave_percentage,
+            }),
+        reverb_flags: (namespace == FamilyId::IW4).then_some(row.flags).flatten(),
         namespace,
         looping: LoopingPolicy::compile(row.is_looping()),
         composition: CueCompositionPolicy::compile(

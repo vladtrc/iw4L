@@ -307,6 +307,10 @@ impl ScorebarRenderer<'_> {
             self.hide();
             return;
         };
+        if snap.meta.objectives.campaign_mode {
+            self.hide();
+            return;
+        }
         let Some(local_meta) = snap.meta.for_client(presentation.client_id()) else {
             self.hide();
             return;

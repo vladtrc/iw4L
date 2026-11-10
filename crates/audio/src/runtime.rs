@@ -233,6 +233,24 @@ impl AudioRuntime {
         }
     }
 
+    pub(crate) fn set_slave_fade_time(&self, milliseconds: u32) {
+        self.shared.slaves.set_fade_ms(milliseconds);
+    }
+
+    pub(crate) fn set_eq(&self, target: &crate::eq::EqTarget) {
+        self.shared.eq.publish(target);
+    }
+
+    pub(crate) fn set_room_mix(&self, target: crate::room_mix::RoomTarget) {
+        self.shared.room.publish(target);
+    }
+
+    pub(crate) fn reset_match_effects(&self) {
+        self.shared.slaves.reset();
+        self.shared.room.reset();
+        self.shared.eq.reset();
+    }
+
     pub(crate) fn stop_scope(&self, scope: AudioScope) {
         self.inbox.stop_scope(scope, &self.cue_cancellation);
         if let Some(worker) = &self.worker {
@@ -342,6 +360,7 @@ impl AudioRuntime {
 
     fn trigger_with_fade(&self, request: CueTrigger, fade: Option<u64>) -> CueHandle {
         let CueTrigger {
+            force_master,
             event,
             bank,
             namespace,
@@ -389,6 +408,7 @@ impl AudioRuntime {
             pitch_scale,
             volume_scale,
             execution: CueIntent {
+                force_master,
                 event,
                 origin_inches,
                 emitter,
@@ -1014,9 +1034,11 @@ impl AudioControl {
                     instance.set_status(InstanceStatus::Virtual);
                     return true;
                 }
+                let mut media = logical.request.media.clone();
+                media.eq_entity = logical.request.admission.emitter;
                 let assignment = Assignment {
                     voice: RenderVoiceId(next_voice),
-                    media: logical.request.media.clone(),
+                    media,
                     instance: instance.clone(),
                     start_frame: now.max(logical.request.frame),
                     start_cursor: logical.cursor,
@@ -1082,6 +1104,7 @@ impl AudioControl {
                         pitch_scale: 1.0,
                         volume_scale: 1.0,
                         execution: CueIntent {
+                            force_master: false,
                             event: None,
                             origin_inches: source.origin_inches,
                             emitter: cue.emitter,

@@ -9,6 +9,8 @@ mod entry;
 mod expand;
 mod fragment;
 mod glow;
+mod hero;
+pub use hero::{HeroOnlyLight, add_hero_only_lights};
 mod isvalid;
 mod light_probe;
 mod lit_tech;
@@ -32,10 +34,11 @@ mod viewmodel_origin;
 
 pub use accumulate::{
     LIGHT_GRID_COLORS_ACCUM_COUNT, LIGHT_GRID_COLORS_BYTE_COUNT, LIGHT_GRID_COMPRESS_R_OFFSETS,
-    LIGHT_GRID_PACK_BIAS, LIGHT_GRID_TWEAK_ACCUM_CLAMP, LightGridCompressedColor,
-    light_grid_accumulate_colors, light_grid_add_colors, light_grid_apply_contrast_tweaks,
-    light_grid_apply_intensity_tweaks, light_grid_compress_colors, light_grid_expand_colors,
-    light_grid_pack_colors, light_grid_tweak_fixed_from_float,
+    LIGHT_GRID_PACK_BIAS, LIGHT_GRID_TWEAK_ACCUM_CLAMP, LightGridCompressedColor, LightGridTweaks,
+    light_grid_accumulate_colors, light_grid_accumulate_colors_with_tweaks, light_grid_add_colors,
+    light_grid_apply_contrast_tweaks, light_grid_apply_intensity_tweaks,
+    light_grid_compress_colors, light_grid_expand_colors, light_grid_pack_colors,
+    light_grid_tweak_fixed_from_float,
 };
 pub use atapoint::{
     LIGHT_GRID_ATPOINT_EMPTY_PRIMARY, LIGHT_GRID_COLORS_STRIDE, LIGHT_GRID_FIXED_WEIGHT_SCALE,

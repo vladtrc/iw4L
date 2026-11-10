@@ -33,7 +33,10 @@ pub struct PendingFpvNotetracks {
 }
 
 #[derive(Resource, Default)]
-pub struct FpvHeldSettled(pub Option<u32>);
+pub struct FpvHeldSettled {
+    pub weapon: Option<u32>,
+    pub viewmodel: Option<String>,
+}
 
 #[derive(Resource, Default)]
 pub struct FpvHeldLife(pub Option<u32>);
@@ -160,7 +163,7 @@ impl FpvPoseGenerator<'_> {
         else {
             *self.active = None;
             return FpvPoseKind::Refuse(std::borrow::Cow::<'static, str>::Owned(format!(
-                "FPV eye-pose failed for `{gun_xmodel}` (need viewhands+gun skels with tag_view)",
+                "FPV rig unavailable for `{gun_xmodel}`",
                 gun_xmodel = (self.equipped.gun_xmodel.clone())
             )));
         };
@@ -178,11 +181,17 @@ impl FpvPoseGenerator<'_> {
         } else {
             prepared.pose_hand(0, &right, Vec3::ZERO)
         };
-        let Some(right_pose) = pose else {
-            return FpvPoseKind::Refuse(std::borrow::Cow::<'static, str>::Owned(format!(
-                "FPV eye-pose failed for `{gun_xmodel}` (need viewhands+gun skels with tag_view)",
-                gun_xmodel = (self.equipped.gun_xmodel.clone())
-            )));
+        let right_pose = match pose {
+            Ok(pose) => pose,
+            Err(cause) => {
+                return FpvPoseKind::Refuse(
+                    format!(
+                        "FPV pose failed for `{}`: {cause}",
+                        self.equipped.gun_xmodel
+                    )
+                    .into(),
+                );
+            }
         };
         let lens = right_pose.lens;
         let left_pose = if dual_drawn && !combined {
@@ -197,11 +206,17 @@ impl FpvPoseGenerator<'_> {
                     ))
                 })
                 .unwrap_or(Vec3::ZERO);
-            let Some(pose) = prepared.pose_hand(1, &left, offset) else {
-                return FpvPoseKind::Refuse(std::borrow::Cow::<'static, str>::Owned(format!(
-                    "FPV eye-pose failed for `{gun_xmodel}` (need viewhands+gun skels with tag_view)",
-                    gun_xmodel = (self.equipped.gun_xmodel.clone())
-                )));
+            let pose = match prepared.pose_hand(1, &left, offset) {
+                Ok(pose) => pose,
+                Err(cause) => {
+                    return FpvPoseKind::Refuse(
+                        format!(
+                            "FPV left pose failed for `{}`: {cause}",
+                            self.equipped.gun_xmodel
+                        )
+                        .into(),
+                    );
+                }
             };
             Some(pose)
         } else {

@@ -306,7 +306,7 @@ impl SoldierPresentation {
         self: &Arc<Self>,
         hands: Option<(FamilyId, &str)>,
         secondary: bool,
-    ) -> Result<SoldierFpvPresentation, String> {
+    ) -> Result<FpvHandsPresentation, String> {
         let hands = match &self.kit_hands {
             Err(error) => return Err(error.clone()),
             Ok(Some(hands)) => hands.clone(),
@@ -321,22 +321,63 @@ impl SoldierPresentation {
         if secondary && !hands.mounts.secondary {
             return Err("soldier hands require tag_weapon1 for a secondary gun".into());
         }
-        Ok(SoldierFpvPresentation {
-            soldier: Arc::clone(self),
+        Ok(FpvHandsPresentation {
+            meshes: Arc::clone(&self.meshes),
             hands,
         })
     }
 }
 
 #[derive(Clone, Debug)]
-pub struct SoldierFpvPresentation {
-    soldier: Arc<SoldierPresentation>,
+pub struct FpvHandsPresentation {
+    meshes: Arc<FpvMeshCatalog>,
     hands: SoldierHands,
 }
 
-impl SoldierFpvPresentation {
-    pub fn soldier(&self) -> &Arc<SoldierPresentation> {
-        &self.soldier
+impl FpvHandsPresentation {
+    pub fn from_viewmodel(
+        meshes: &Arc<FpvMeshCatalog>,
+        family: FamilyId,
+        name: &str,
+    ) -> Result<Self, String> {
+        if meshes.identity() == 0 {
+            return Err("viewmodel meshes are not published".into());
+        }
+        let index = meshes
+            .index_by_name(family, name)
+            .ok_or_else(|| format!("viewmodel `{name}` missing"))?;
+        let entry = meshes.get_at(index).ok_or("viewmodel mesh missing")?;
+        let mounts = HandMounts {
+            posed: entry.skel.pose.is_some(),
+            weapon: entry
+                .skel
+                .bone_names
+                .iter()
+                .any(|bone| bone == "tag_weapon"),
+            secondary: entry
+                .skel
+                .bone_names
+                .iter()
+                .any(|bone| bone == "tag_weapon1"),
+        };
+        if !mounts.posed || !mounts.weapon {
+            return Err(format!("viewmodel `{name}` requires a pose and tag_weapon"));
+        }
+        Ok(Self {
+            meshes: Arc::clone(meshes),
+            hands: SoldierHands {
+                choice: FpvHands::FromScript {
+                    namespace: family,
+                    name: name.to_owned(),
+                },
+                model: FpvMeshIndex::from_order(index),
+                mounts,
+            },
+        })
+    }
+
+    pub fn supports_secondary(&self) -> bool {
+        self.hands.mounts.secondary
     }
 
     pub fn hands(&self) -> &SoldierHands {
@@ -344,7 +385,7 @@ impl SoldierFpvPresentation {
     }
 
     pub fn mesh_identity(&self) -> u64 {
-        self.soldier.meshes.identity()
+        self.meshes.identity()
     }
 }
 

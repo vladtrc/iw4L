@@ -745,6 +745,7 @@ impl DynEntDrawPublisher<'_, '_> {
                     owner: ModelLightingOwner::DynEnt(row.entity),
                     origin: row.lighting_origin,
                     lookup_fallback,
+                    hero_lighting: false,
                 })
             });
             let caster_bound = row.radius.map(|radius| render_scene::XModelCasterBound {

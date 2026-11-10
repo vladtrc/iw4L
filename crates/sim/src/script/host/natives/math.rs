@@ -71,6 +71,7 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         "cos" => |d| d.to_radians().cos(),
         "sin" => |d| d.to_radians().sin(),
         "tan" => |d| d.to_radians().tan(),
+        "squared" => |value| value * value,
         "angleclamp180" => |a| {
             let a = a - 360.0 * (a / 360.0).floor();
             if a > 180.0 { a - 360.0 } else { a }
@@ -113,6 +114,34 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
     });
     registry.register(Function, "min", |_, _, args| {
         Ok(Value::Float(float(args, 0)?.min(float(args, 1)?)))
+    });
+    registry.register(Function, "clamp", |_, _, args| {
+        let upper = float(args, 2)?;
+        let lower = float(args, 1)?;
+        let value = float(args, 0)?;
+        let bounded = if value - upper < 0.0 { value } else { upper };
+        Ok(Value::Float(if lower - value < 0.0 {
+            bounded
+        } else {
+            lower
+        }))
+    });
+    registry.register(Function, "vectorlerp", |_, _, args| {
+        if args.len() != 3 {
+            return Err("vectorlerp expects three arguments".into());
+        }
+        let start = vector(args, 0)?;
+        let end = vector(args, 1)?;
+        let fraction = float(args, 2)?;
+        Ok(Value::Vector(std::array::from_fn(|axis| {
+            start[axis] + (end[axis] - start[axis]) * fraction
+        })))
+    });
+    registry.register(Function, "isarray", |_, _, args| {
+        Ok(Value::Int(i32::from(matches!(
+            arg(args, 0)?,
+            Value::Array(_)
+        ))))
     });
     registry.register(Function, "distance", |_, _, args| {
         Ok(Value::Float(

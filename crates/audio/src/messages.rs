@@ -19,6 +19,7 @@ pub struct PlayAlias {
 pub enum AliasCommand {
     PlayMusic(PlayAlias),
     Play(PlayAlias),
+    PlayAsMaster(PlayAlias),
     PlayPitched {
         sound: PlayAlias,
         pitch: f32,

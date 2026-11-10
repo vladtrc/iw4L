@@ -52,7 +52,7 @@ pub(crate) fn run_frame(
     expire_transient_events_system(ecs);
     crate::script::apply_disconnects(ecs);
     crate::script::advance_mechanics(ecs);
-    crate::script::advance_scheduler(ecs);
+    crate::script::advance_scheduler(ecs, msec.clamp(1, 200) as f32 / 1000.0);
     if ecs.resource::<crate::script::RoundScript>().fault.is_none() {
         apply_script_signals_system(ecs);
         apply_actions_system(ecs);
@@ -65,8 +65,11 @@ pub(crate) fn run_frame(
         dispatch_touches_system(ecs);
         crate::script::sync_engine_events(ecs);
         finalize_system(ecs);
+        crate::script::host::look_at::update(ecs);
         crate::script::host::natives::iw4::deliver_local_presentation_dvars(ecs);
         apply_input_scoreboard(ecs);
+        crate::campaign_reload::check_death(ecs, tick);
+        crate::script::host::players::campaign_damage::feedback(ecs);
         publish_snapshot_system(ecs);
     }
     let request = ecs
@@ -75,6 +78,7 @@ pub(crate) fn run_frame(
     if let Some(fault) = ecs.resource::<crate::script::RoundScript>().fault.as_ref() {
         return Err(fault.clone());
     }
+    crate::campaign_checkpoint::process_pending(ecs);
     Ok(request
         .output
         .expect("simulation frame did not publish a snapshot"))
@@ -287,6 +291,7 @@ fn run_players_system(ecs: &mut World) {
     let tick = ecs.resource::<StepRequest>().tick;
     let level_time = crate::level_time_ms(tick);
     let input = ecs.resource::<StepRequest>().input.clone();
+    let campaign_speed = crate::script::host::natives::iw4::saved::movement_speed(ecs);
     let mut world = frame_world(ecs);
     world.enter_kernel_phase(crate::gentity::KernelPhase::RunPlayers);
 
@@ -320,6 +325,11 @@ fn run_players_system(ecs: &mut World) {
                 continue;
             }
 
+            if let Some(speed) = campaign_speed
+                && let Some(ps) = world.player_mut(*id)
+            {
+                ps.speed = speed;
+            }
             let old_buttons = world
                 .old_buttons_mut()
                 .iter()
@@ -742,6 +752,7 @@ fn publish_snapshot_system(ecs: &mut World) {
         local_sounds: world.take_pending_local_sounds(),
         player_cards: world.take_pending_player_cards(),
         script_audio: world.take_pending_script_audio(),
+        objective_updates: world.take_objective_updates(),
         kicks: Vec::new(),
     };
 
@@ -920,6 +931,8 @@ fn action_needs_player_row(action: &ClientAction) -> bool {
     !matches!(
         action,
         ClientAction::JoinMatch
+            | ClientAction::InputCommand { .. }
+            | ClientAction::SoundDone { .. }
             | ClientAction::LeaveMatch
             | ClientAction::SetName { .. }
             | ClientAction::SetProfile { .. }
@@ -933,6 +946,13 @@ fn action_needs_player_row(action: &ClientAction) -> bool {
 
 fn apply_action(world: &mut FrameWorld, tick: Tick, id: ClientId, action: &ClientAction) -> bool {
     match *action {
+        ClientAction::SoundDone {
+            entity,
+            alias_index,
+        } => crate::script::host::audio::waits::acknowledge(world.ecs(), id, entity, alias_index),
+        ClientAction::InputCommand { command } => {
+            crate::script::host::commands::execute(world.ecs(), id.0, command)
+        }
         ClientAction::JoinMatch => {
             let meta = world.client_meta_mut(id);
             if meta.lifecycle == ClientLifecycle::Connecting {

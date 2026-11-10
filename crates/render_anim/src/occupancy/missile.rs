@@ -508,6 +508,7 @@ impl MissileDrawPublisher<'_, '_> {
                 owner: row.lighting_owner,
                 origin: row.lighting_origin,
                 lookup_fallback,
+                hero_lighting: false,
             }));
             let surfaces_idx = append_missile_surfaces(staging, &row.surfaces, &materials);
             if surfaces_idx.is_empty() {

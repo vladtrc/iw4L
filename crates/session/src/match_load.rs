@@ -50,12 +50,7 @@ fn start_match_load(
     if retiring.as_ref().is_some_and(|retiring| retiring.busy()) {
         return;
     }
-    if let Some(error) = request
-        .zone_ff
-        .as_ref()
-        .err()
-        .or_else(|| request.common_mp.as_ref().err())
-    {
+    if let Some(error) = request.zone_ff.as_ref().err() {
         failed.write(MapLoadFailed {
             match_key: request.match_key,
             zone: request.zone.clone(),
@@ -127,10 +122,12 @@ fn start_match_load(
                 })?;
                 prepared.sound = Some(match (games, sound_path) {
                     (Some(games), Ok(path)) => {
-                        let sources =
-                            asset_audio::gather_sound_sources_filtered(&games, &path, |ns| {
-                                families.enabled(ns.as_str())
-                            });
+                        let sources = asset_audio::gather_sound_sources_for_profile(
+                            &games,
+                            &path,
+                            prepared.profile,
+                            |ns| families.enabled(ns.as_str()),
+                        );
                         let map = prepared
                             .sound
                             .take()

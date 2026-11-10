@@ -16,6 +16,7 @@ type LoadWeaponDefOutput = Result<(
     [Option<Ptr>; 16],
     Option<Ptr>,
     Option<Ptr>,
+    Option<Ptr>, // clip model name
     WeaponSoundNames,
     Option<Ptr>,
     Option<Ptr>,
@@ -50,6 +51,7 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
         world_model_names,
         projectile_model_name,
         rocket_model_name,
+        clip_model_name,
         sound_names,
         sz_xanims_right,
         sz_xanims_left,
@@ -63,13 +65,14 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
                 [None; 16],
                 None,
                 None,
+                None,
                 WeaponSoundNames::default(),
                 None,
                 None,
             )
         }
         _ if s.begin_body(p.at(s.layout(4, 8)))? => {
-            let (body, gun0, hand0, world0, proj0, rocket0, sounds, anim_r, anim_l) =
+            let (body, gun0, hand0, world0, proj0, rocket0, clip0, sounds, anim_r, anim_l) =
                 load_weapon_def(s, links, ai_vs_ai_knots, ai_vs_player_knots)?;
             (
                 Some(body),
@@ -78,6 +81,7 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
                 world0,
                 proj0,
                 rocket0,
+                clip0,
                 sounds,
                 anim_r,
                 anim_l,
@@ -88,6 +92,7 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
             [None; 16],
             None,
             [None; 16],
+            None,
             None,
             None,
             WeaponSoundNames::default(),
@@ -410,6 +415,7 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
         world_model_names,
         projectile_model_name,
         rocket_model_name,
+        clip_model_name,
         sz_xanims,
         sz_xanims_right,
         sz_xanims_left,
@@ -596,6 +602,17 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
         parallel_bounce: body_facts.parallel_bounce,
         perpendicular_bounce: body_facts.perpendicular_bounce,
         location_damage_mult: body_facts.location_damage_mult,
+        item_ammo: weap_def
+            .map(|body| {
+                Ok([
+                    s.i32_at(body, s.layout(0x3dc, 0x538))?,
+                    s.i32_at(p, s.layout(0x58, 0x78))?,
+                    s.i32_at(body, s.layout(0x3e0, 0x53c))?,
+                    s.i32_at(body, s.layout(0x3e4, 0x540))?,
+                    s.i32_at(body, s.layout(0x228, 0x370))?,
+                ])
+            })
+            .transpose()?,
         start_ammo: body_facts.start_ammo,
         min_damage: body_facts.min_damage,
         min_player_damage: body_facts.min_player_damage,
@@ -939,7 +956,7 @@ fn load_weapon_def(
     }
 
     let world0 = follow_xmodel_array(s, links, p, s.layout(472, 736))?;
-    asset_ptr_at(s, links, AssetType::XModel, p.at(s.layout(476, 744)))?;
+    let clip0 = follow_xmodel_ptr(s, links, p.at(s.layout(476, 744)))?;
     let rocket0 = follow_xmodel_ptr(s, links, p.at(s.layout(480, 752)))?;
     asset_ptr_at(s, links, AssetType::XModel, p.at(s.layout(484, 760)))?;
     asset_ptr_at(s, links, AssetType::XModel, p.at(s.layout(488, 768)))?;
@@ -1005,6 +1022,7 @@ fn load_weapon_def(
         world0,
         projectile0,
         rocket0,
+        clip0,
         sound_names,
         sz_xanims_right,
         sz_xanims_left,

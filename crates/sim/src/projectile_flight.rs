@@ -240,6 +240,7 @@ pub fn projectile_step(
                         trace_iw4::surface_type_from_flags(surface_flags)
                     }
                     ColliderId::Player { .. } => 0,
+                    ColliderId::EntityBody { .. } => weapon_iw4::SURF_TYPE_FLESH as u8,
                 };
                 let change = sub(outgoing, incoming);
                 events.push(ProjectileFlightEvent::Bounce {

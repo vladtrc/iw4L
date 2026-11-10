@@ -917,7 +917,7 @@ pub fn apply_dpvs_cull(
     cull.cell_vis_world = camera_world;
     cull.cell_vis.clone_from(&words);
     cull.cell_vis_all = vis_all;
-    let views = portal_visibility
+    let mut views: Vec<_> = portal_visibility
         .iter()
         .map(|report| {
             let dpvs = if report.world == 0 {
@@ -946,6 +946,18 @@ pub fn apply_dpvs_cull(
             }
         })
         .collect();
+    if !portaled {
+        views.push(render_scene::PublishedCellView {
+            view: 0,
+            world: camera_world,
+            shared,
+            eye,
+            words: words.clone(),
+            cell_count,
+            planes: pvs.frustum_planes.clone(),
+            vis_all,
+        });
+    }
     *published_vis = render_scene::PublishedCellVis {
         world: camera_world,
         views,

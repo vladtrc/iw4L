@@ -1,12 +1,14 @@
 pub mod args;
 pub mod arrays;
 pub mod client_effects;
+pub(crate) mod commands;
 pub mod controls;
 pub mod entities;
 pub mod entity_damage;
 pub mod guidance;
 pub mod hud;
 pub(crate) mod iw4_gametype;
+pub(crate) mod look_at;
 pub mod mechanics;
 pub mod natives;
 pub mod objectives;
@@ -30,3 +32,14 @@ pub(crate) mod rumble;
 pub(crate) mod trace;
 
 pub(crate) mod match_data;
+
+pub(crate) mod path_nodes;
+
+pub(crate) mod spawners;
+
+pub(crate) mod drones;
+pub(crate) mod sentients;
+
+pub(crate) mod animations;
+
+pub(crate) mod actors;

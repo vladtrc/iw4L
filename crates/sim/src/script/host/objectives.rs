@@ -8,6 +8,8 @@ use gamemode_iw4::Team;
 
 const MAX_OBJECTIVES: i32 = 32;
 
+mod campaign;
+
 pub(crate) fn prepare_team_scores(world: &mut World, allies: i32, axis: i32) -> Result<(), String> {
     let mut runtime = world
         .get_resource_mut::<RoundScript>()
@@ -34,6 +36,26 @@ pub(crate) fn prepare_team_scores(world: &mut World, allies: i32, axis: i32) -> 
 }
 
 const ENGINE_SERVER_INFO: &[&str] = &[
+    "snd_slavefadetime",
+    "objectivealpha",
+    "con_typewritercolorbase",
+    "compass",
+    "ammocounterhide",
+    "hud_showstance",
+    "cg_paused",
+    "hud_missionfailed",
+    "friendlynamefontsize",
+    "friendlynamefontobjective",
+    "friendlynamefontcolor",
+    "friendlynamefontglowcolor",
+    "hostilenamefontcolor",
+    "hostilenamefontglowcolor",
+    "cg_fovscale",
+    "r_lightgridenabletweaks",
+    "r_lightgridintensity",
+    "r_lightgridcontrast",
+    "r_lightgridusetweakedvalues",
+    "r_herolighting",
     "ui_bomb_timer",
     "mapname",
     "g_gametype",
@@ -53,6 +75,7 @@ pub(crate) struct ScriptObjective {
     team: Team,
     icon: String,
     viewer: Option<u32>,
+    campaign: crate::CampaignObjective,
 }
 
 impl ScriptObjective {
@@ -96,6 +119,9 @@ fn place(world: &mut World, index: u8, target: &Value) -> Result<(), String> {
 pub(crate) fn register(registry: &mut NativeRegistry) {
     use Namespace::Function;
     registry.register(Function, "objective_add", |world, _, args| {
+        if campaign::active(world) {
+            return campaign::add(world, args);
+        }
         let index = index(args)?;
         let state = state(args, 1)?;
         *objective(world, index) = ScriptObjective {
@@ -112,6 +138,13 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
     });
     registry.register(Function, "objective_delete", |world, _, args| {
         let index = index(args)?;
+        if campaign::active(world) {
+            let mut row = objective(world, index);
+            let pointer = std::mem::take(&mut row.campaign.pointer_text);
+            *row = ScriptObjective::default();
+            row.campaign.pointer_text = pointer;
+            return Ok(Value::Undefined);
+        }
         world
             .resource_mut::<RoundScript>()
             .engine
@@ -120,22 +153,34 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         Ok(Value::Undefined)
     });
     registry.register(Function, "objective_state", |world, _, args| {
+        if campaign::active(world) {
+            return campaign::set_state(world, args, true);
+        }
         let index = index(args)?;
         objective(world, index).state = state(args, 1)?;
         Ok(Value::Undefined)
     });
     registry.register(Function, "objective_icon", |world, _, args| {
+        if campaign::active(world) {
+            return campaign::icon(world, args);
+        }
         let index = index(args)?;
         objective(world, index).icon = string(args, 1)?;
         Ok(Value::Undefined)
     });
     registry.register(Function, "objective_position", |world, _, args| {
+        if campaign::active(world) {
+            return campaign::position(world, args, false);
+        }
         let index = index(args)?;
         let origin = vector(args, 1)?;
         place(world, index, &Value::Vector(origin))?;
         Ok(Value::Undefined)
     });
     registry.register(Function, "objective_onentity", |world, _, args| {
+        if campaign::active(world) {
+            return campaign::on_entity(world, args);
+        }
         let index = index(args)?;
         let target = arg(args, 1)?.clone();
         if !matches!(target, Value::Object(_)) {
@@ -166,6 +211,7 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         objective.viewer = None;
         Ok(Value::Undefined)
     });
+    campaign::register(registry);
 }
 
 pub(crate) fn publish(world: &mut World) {
@@ -179,7 +225,22 @@ pub(crate) fn publish(world: &mut World) {
         .map(|(index, row)| (*index, row.clone()))
         .collect();
     let mut compass = Vec::with_capacity(rows.len());
+    let is_campaign = campaign::active(world);
+    let mut campaign = Vec::new();
     for (index, row) in rows {
+        if is_campaign {
+            let mut data = row.campaign;
+            data.index = index;
+            data.state = row.state;
+            data.entity = row.entity.as_ref().and_then(|value| {
+                world
+                    .resource::<RoundScript>()
+                    .entity(value)
+                    .and_then(|(_, entity)| u16::try_from(entity.number).ok())
+            });
+            campaign.push(data);
+            continue;
+        }
         let origin = match &row.entity {
             Some(Value::Object(id)) if world.resource::<RoundScript>().live(id) => {
                 match super::players::entity_field(world, *id, "origin") {
@@ -301,6 +362,8 @@ pub(crate) fn publish(world: &mut World) {
     frame.objectives = ObjectiveMatch {
         scores,
         compass,
+        campaign,
+        campaign_mode: is_campaign,
         vehicles,
         vehicle_targets,
         server_info,

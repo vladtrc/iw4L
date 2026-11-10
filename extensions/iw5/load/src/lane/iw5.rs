@@ -357,6 +357,7 @@ impl ZoneLane for Iw5Lane {
                 scripts.as_ref(),
                 path,
                 LoadedWorld {
+                    weapon_assets: Default::default(),
                     sound: map_sound,
                     world: PreparedWorld {
                         exp_fog,
@@ -549,6 +550,7 @@ impl ZoneLane for Iw5Lane {
                     scripts.as_ref(),
                     path,
                     LoadedWorld {
+                        weapon_assets: Default::default(),
                         sound: map_sound,
                         materials: map_materials,
                         world: PreparedWorld {
@@ -600,6 +602,7 @@ impl ZoneLane for Iw5Lane {
                     scripts.as_ref(),
                     path,
                     LoadedWorld {
+                        weapon_assets: Default::default(),
                         sound: map_sound,
                         world: PreparedWorld {
                             fx: std::mem::take(&mut map_fx),
@@ -628,10 +631,11 @@ impl ZoneLane for Iw5Lane {
         }
     }
 
-    fn load_common_mp(
+    fn load_common(
         &self,
         path: &Path,
         image: &ZoneImage,
+        _profile: asset_core::RuntimeProfile,
         progress: &LoadProgress,
         decode_color_maps: bool,
         material_seed: asset_material::MaterialCatalog,
@@ -814,13 +818,14 @@ impl ZoneLane for Iw5Lane {
         }
         let memory = sink.materials.image_memory();
         report.push(format!(
-            "startup material walk: zone={zone_name} assets={} materials={} images={} decoded={} fpv=0 weapons=0 (materials-only sink; not load_common_mp)",
+            "startup material walk: zone={zone_name} assets={} materials={} images={} decoded={} fpv=0 weapons=0 (materials-only sink; not load_common)",
             sink.walked,
             sink.materials.materials.len(),
             memory.images,
             memory.decoded_images,
         ));
         MaterialPopulation {
+            xanims: Default::default(),
             walked: sink.walked,
             light_defs: Vec::new(),
             materials: sink.materials,

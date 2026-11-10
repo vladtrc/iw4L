@@ -98,6 +98,7 @@ impl WeaponBuild {
     ) -> Self {
         let mut gun_by_def: HashMap<(u8, u32), String> = HashMap::new();
         let mut hand_by_def: HashMap<(u8, u32), String> = HashMap::new();
+        let mut clip_by_def: HashMap<(u8, u32), String> = HashMap::new();
         let mut world_by_def: HashMap<(u8, u32), String> = HashMap::new();
         let mut camo_by_def: HashMap<(u8, u32), WeaponCamoModels> = HashMap::new();
         let mut projectile_by_def: HashMap<(u8, u32), String> = HashMap::new();
@@ -111,6 +112,9 @@ impl WeaponBuild {
         let mut left_by_def: HashMap<(u8, u32), [Option<String>; WEAPON_ANIM_SLOTS]> =
             HashMap::new();
         for entry in &entries {
+            if let (Some(key), Some(clip)) = (entry.weap_def, entry.clip_model.as_ref()) {
+                clip_by_def.entry(key).or_insert_with(|| clip.clone());
+            }
             if let (Some(key), Some(gun)) = (entry.weap_def, entry.gun_xmodel.as_ref()) {
                 gun_by_def.entry(key).or_insert_with(|| gun.clone());
             }
@@ -159,6 +163,11 @@ impl WeaponBuild {
             }
         }
         for entry in &mut entries {
+            if entry.clip_model.is_none()
+                && let Some(key) = entry.weap_def
+            {
+                entry.clip_model = clip_by_def.get(&key).cloned();
+            }
             if entry.gun_xmodel.is_none()
                 && let Some(key) = entry.weap_def
             {
@@ -240,6 +249,9 @@ impl WeaponBuild {
                     }
                     if existing.hand_xmodel.is_none() {
                         existing.hand_xmodel = entry.hand_xmodel;
+                    }
+                    if existing.clip_model.is_none() {
+                        existing.clip_model = entry.clip_model;
                     }
                     if existing.world_model.is_none() {
                         existing.world_model = entry.world_model;
@@ -371,6 +383,7 @@ impl WeaponBuild {
                 fpv_soldiers: [None, None],
                 fpv_mount_plan: None,
                 fpv_assemblies: [None, None],
+                clip_model: entry.clip_model,
                 world_model: entry.world_model,
                 world_model_edge: AssetEdge::Absent,
                 camo_models: entry.camo_models,
@@ -450,6 +463,7 @@ impl WeaponBuild {
             });
         }
         let mut registry = WeaponRegistry {
+            script_viewmodels: None,
             rows,
             world_catalog_identity: 0,
             fpv_catalog_identity: 0,

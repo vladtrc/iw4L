@@ -238,7 +238,9 @@ fn play_alias_messages(
                 runtime.stop_emitter_cues(*snd_ent);
                 continue;
             }
-            AliasCommand::Play(event) => (event, 1.0, SoundClass::World),
+            AliasCommand::Play(event) | AliasCommand::PlayAsMaster(event) => {
+                (event, 1.0, SoundClass::World)
+            }
             AliasCommand::PlayMusic(event) => (event, 1.0, SoundClass::Music),
             AliasCommand::PlayPitched { sound, pitch } => (sound, *pitch, SoundClass::World),
             AliasCommand::Stop {
@@ -263,6 +265,7 @@ fn play_alias_messages(
             &mut pending,
             &mut decisions,
             crate::cue_execution::CueTrigger {
+                force_master: matches!(command, AliasCommand::PlayAsMaster(_)),
                 event: event.event,
                 bank: Arc::clone(&bank.0),
                 namespace: event.namespace,
@@ -326,6 +329,7 @@ fn play_weapon_sound_messages(
             &mut pending,
             &mut decisions,
             crate::cue_execution::CueTrigger {
+                force_master: false,
                 event: event.event,
                 bank: Arc::clone(&bank.0),
                 namespace: event.namespace,
@@ -373,6 +377,7 @@ fn play_bound_weapon_sounds(
             &mut pending,
             &mut decisions,
             crate::cue_execution::CueTrigger {
+                force_master: false,
                 event: event.event,
                 bank: Arc::clone(&bank.0),
                 namespace,
@@ -458,6 +463,7 @@ fn play_surface_alias_chain(
         pending,
         decisions,
         crate::cue_execution::CueTrigger {
+            force_master: false,
             event: sound.event,
             bank: Arc::clone(bank),
             namespace: FamilyId::IW4,

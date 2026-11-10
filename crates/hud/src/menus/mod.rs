@@ -228,6 +228,7 @@ pub(crate) struct MenuOutputs<'w> {
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct ScriptMenuRuntime<'w, 's> {
     catalog: Option<Res<'w, MenuCatalog>>,
+    campaign: Option<Res<'w, asset_game::CampaignHudCatalog>>,
     strings: Option<Res<'w, PreparedLocalizedStrings>>,
     teams: Option<Res<'w, SessionTeamSettings>>,
     transitions: MessageReader<'w, 's, StateTransitionEvent<frame::MatchScope>>,
@@ -285,7 +286,15 @@ impl ScriptMenuRuntime<'_, '_> {
             self.binding.command = None;
             *menus = ScriptMenus::default();
         }
-        let Some(catalog) = self.catalog.as_deref() else {
+        let catalog = if matches!(*input.screen, AppScreen::InGame | AppScreen::ClassSelect) {
+            self.campaign
+                .as_ref()
+                .map(|catalog| catalog.0.as_ref())
+                .or(self.catalog.as_deref())
+        } else {
+            self.catalog.as_deref()
+        };
+        let Some(catalog) = catalog else {
             return;
         };
         let snapshot = presentation.snapshot();

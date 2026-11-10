@@ -161,6 +161,22 @@ impl Parser {
             };
             match op {
                 Op::Constant(value) => values.push(value),
+                Op::Vector => {
+                    let mut vector = [0.0; 3];
+                    for component in vector.iter_mut().rev() {
+                        let value = pop(&mut values)?;
+                        *component = super::runtime::scalar(&value).ok_or_else(|| {
+                            Fault::at(
+                                &location,
+                                format!(
+                                    "vector component cannot be {}",
+                                    super::runtime::type_name(&value)
+                                ),
+                            )
+                        })?;
+                    }
+                    values.push(Value::Vector(vector));
+                }
                 Op::Unary(op) => {
                     let value = pop(&mut values)?;
                     values.push(
@@ -393,7 +409,7 @@ pub(super) fn compile(
         for (location, op) in &mut function.code {
             let (id, argc) = match op {
                 Op::Call(Callee::Unlinked(id), argc, _)
-                | Op::Spawn(Callee::Unlinked(id), argc, _) => (*id, *argc),
+                | Op::Spawn(Callee::Unlinked(id), argc, _, _) => (*id, *argc),
                 Op::FunctionRef(id) => (*id, 0),
                 _ => continue,
             };

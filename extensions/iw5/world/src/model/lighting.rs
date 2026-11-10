@@ -32,6 +32,7 @@ pub fn capture_light_grid(
         .ok()?
         .to_vec();
     Some(OwnedLightGrid {
+        hero_lights: Vec::new(),
         mins: grid.mins,
         maxs: grid.maxs,
         row_axis: grid.row_axis as usize,

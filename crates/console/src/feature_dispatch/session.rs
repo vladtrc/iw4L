@@ -52,6 +52,37 @@ pub(crate) fn route_session_commands(
 ) {
     for cmd in events.read() {
         match cmd.name.as_str() {
+            "checkpoint_load" => {
+                let result = if !cmd.args.is_empty() {
+                    Err("usage: checkpoint_load".into())
+                } else if *target.role != frame::RuntimeRole::Listen
+                    || target
+                        .bridge
+                        .as_ref()
+                        .is_some_and(|bridge| bridge.state().in_match())
+                {
+                    Err("checkpoint load requires a local campaign session".into())
+                } else if let (Some(zone), Some(authority)) =
+                    (target.restart_zone(), authority.as_ref())
+                {
+                    authority
+                        .0
+                        .prepare_campaign_checkpoint_load()
+                        .and_then(|checkpoint| {
+                            transition.request_campaign_checkpoint(zone, checkpoint)
+                        })
+                } else {
+                    Err("checkpoint load needs the active campaign host".into())
+                };
+                match result {
+                    Ok(()) => echo
+                        .write("checkpoint_load: loading the last committed campaign checkpoint"),
+                    Err(error) => {
+                        dispatch.release();
+                        echo.write(format!("checkpoint_load: {error}"));
+                    }
+                }
+            }
             "round_restart" => {
                 let result = if !cmd.args.is_empty() {
                     Err("usage: round_restart".into())

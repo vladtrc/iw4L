@@ -474,6 +474,7 @@ impl AssetLinkSink for SoundCatalog {
                     .f32_at(row, s.layout(SND_ALIAS_DIST_MAX, 72))
                     .unwrap_or(0.0),
                 flags,
+                slave_percentage: s.f32_at(row, s.layout(SND_ALIAS_SLAVE_PERCENTAGE, 84)).ok(),
                 looping: flags
                     .map(SndAliasFlags::from_word)
                     .map(SndAliasFlags::looping),

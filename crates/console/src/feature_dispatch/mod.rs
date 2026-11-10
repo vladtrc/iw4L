@@ -276,6 +276,10 @@ pub fn register_feature_commands(registry: &mut crate::ConsoleRegistry, maps: &[
             "map_restart — a new match on the current map; the map is loaded again, the common set is kept",
         ),
         (
+            "checkpoint_load",
+            "checkpoint_load — reload the local campaign's last committed memory checkpoint",
+        ),
+        (
             "disconnect",
             "disconnect — leave the session: tear the world down, leave the room, back to the main menu",
         ),

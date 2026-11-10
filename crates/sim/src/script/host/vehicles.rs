@@ -388,9 +388,15 @@ fn vehicle_array(world: &mut World, prefix: Option<&str>) -> Result<Value, Strin
         Some(prefix) => runtime
             .entities
             .iter()
-            .filter(|(_, entity)| {
-                entity.classname.starts_with(prefix)
-                    && (prefix != "script_vehicle" || entity.kind != EntityKind::Vehicle)
+            .filter(|(id, entity)| {
+                if prefix == "script_vehicle"
+                    && runtime.profile == asset_core::RuntimeProfile::Campaign
+                {
+                    runtime.live(id) && entity.kind == EntityKind::VehicleSpawner
+                } else {
+                    entity.classname.starts_with(prefix)
+                        && (prefix != "script_vehicle" || entity.kind != EntityKind::Vehicle)
+                }
             })
             .map(|(id, _)| Value::Object(*id))
             .collect(),
@@ -415,7 +421,12 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
                 .count() as i32,
         ))
     });
-    registry.register(Function, "vehicle_getspawnerarray", |world, _, _| {
+    registry.register(Function, "vehicle_getspawnerarray", |world, _, args| {
+        if !args.is_empty()
+            && world.resource::<RoundScript>().profile == asset_core::RuntimeProfile::Campaign
+        {
+            return Err("Vehicle_GetSpawnerArray cannot take arguments".into());
+        }
         vehicle_array(world, Some("script_vehicle"))
     });
     registry.register(Method, "getvehicleowner", |world, receiver, _| {

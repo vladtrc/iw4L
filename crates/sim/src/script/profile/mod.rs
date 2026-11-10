@@ -1,4 +1,5 @@
 pub mod catalog;
+mod iw4_campaign_catalog;
 pub mod iw4_catalog;
 pub mod iw4_startup;
 

@@ -41,7 +41,7 @@ pub use ammo::{
     low_ammo_warning_pulse_frac, vec4_lerp, weaponstate_skips_low_ammo_warning,
 };
 pub use blood::{
-    HEALTH_FRAC_PM_TYPE_NONE, HUD_BLOOD_OVERLAY_LERP_RATE_DEFAULT, MSEC_TO_SEC,
+    CampaignPainVision, HEALTH_FRAC_PM_TYPE_NONE, HUD_BLOOD_OVERLAY_LERP_RATE_DEFAULT, MSEC_TO_SEC,
     PAIN_VISION_LERP_OUT_RATE_DEFAULT, PAIN_VISION_TRIGGER_HEALTH_DEFAULT, SPLATTER_GRID_HEIGHT,
     SPLATTER_GRID_WIDTH, SPLATTER_HEALTH_INTENSITY_SCALE, blood_overlay_lerp, get_health_fraction,
     pain_vision_lerp_intensity, pain_vision_must_clear, pain_vision_wants_armed,

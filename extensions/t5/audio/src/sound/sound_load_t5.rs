@@ -309,6 +309,7 @@ impl T5SoundCapture {
             Some(raw) => raw as f32 / 255.0,
         };
         CapturedAlias {
+            slave_percentage: None,
             secondary: optional_name(s, row, sz::SND_ALIAS_SECONDARY_OFF),
             chain: None,
             mixer_group: None,

@@ -321,6 +321,9 @@ fn paint_owner(
     args: OwnerDrawArgs<'_>,
     frame: &mut ChromeFrame,
 ) -> OwnerDrawPaint {
+    if state.hide_ammo && matches!(args.item.owner_draw, OWNERDRAW_CLIP | OWNERDRAW_CLIP_LEFT) {
+        return OwnerDrawPaint::Painted;
+    }
     match args.item.owner_draw {
         145 => paint_heading_tape(state, &args, frame),
         190 if state.ps.e_flags & 0x20000 == 0 => OwnerDrawPaint::Painted,
@@ -741,7 +744,14 @@ impl WeaponHudDisplay<'_> {
             weapons.as_ref(),
             self.strings.as_deref(),
         );
-        let hide_ammo = ammo_hud_hidden(ps);
+        let hide_ammo = ammo_hud_hidden(ps)
+            || presentation.snapshot().is_some_and(|snapshot| {
+                snapshot
+                    .meta
+                    .script_dvars(presentation.client_id())
+                    .int("ammocounterhide")
+                    .is_some_and(|value| value != 0)
+            });
         let frag_ammo = weapons
             .as_ref()
             .map(|w| offhand_ammo(ps, w, ps.offhand_primary))

@@ -246,6 +246,7 @@ pub(crate) fn apply_script_blast(
             })
         });
         let hit = crate::script_player::Hit {
+            direction_present: true,
             victim: target,
             attacker: blast.attacker,
             amount,
@@ -332,6 +333,7 @@ pub(crate) fn apply_script_hit(world: &mut FrameWorld, tick: Tick, hit: &crate::
         amount: hit.amount,
         flags: hit.flags,
         means: hit.means,
+        direction_present: true,
         weapon: hit.weapon,
         point: hit.origin,
         dir: if len > 0.0 {
@@ -672,7 +674,9 @@ pub(crate) fn apply_damage_attempt(
         return DamageOutcome::Refused("damage targets a previous life");
     }
     let mut amount = intent.amount;
-    if intent.hitloc != crate::shield::HITLOC
+    if world.ecs().resource::<crate::script::RoundScript>().profile
+        != asset_core::RuntimeProfile::Campaign
+        && intent.hitloc != crate::shield::HITLOC
         && !matches!(intent.source, crate::DamageSource::Melee)
     {
         let scale = world

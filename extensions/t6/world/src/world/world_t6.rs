@@ -959,6 +959,7 @@ pub fn light_grid(
         return Err("T6 light grid color index invalid".into());
     }
     Ok(asset_model::OwnedLightGrid {
+        hero_lights: Vec::new(),
         mins,
         maxs,
         row_axis,

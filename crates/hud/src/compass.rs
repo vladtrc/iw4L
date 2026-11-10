@@ -315,6 +315,16 @@ impl CompassRenderer<'_> {
         hud_input: Option<Res<frame::HudInputView>>,
     ) {
         contacts.receive(&presentation);
+        if presentation.snapshot().is_some_and(|snapshot| {
+            snapshot
+                .meta
+                .script_dvars(presentation.client_id())
+                .int("compass")
+                == Some(0)
+        }) {
+            self.hide();
+            return;
+        }
         let killed_by_showing = (crate::scorebar::milliseconds() as i32)
             .wrapping_sub(local_vars.int("ui_show_killedBy"))
             < 4000;

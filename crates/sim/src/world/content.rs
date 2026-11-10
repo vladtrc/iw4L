@@ -190,6 +190,7 @@ struct ContentData {
     weapons: Arc<crate::SimWeaponContent>,
     script_sound_aliases: Option<std::collections::BTreeMap<String, Option<bool>>>,
     script_fx: std::collections::BTreeSet<String>,
+    script_viewmodels: std::collections::BTreeSet<String>,
     collision_complete: bool,
     clip_brushes: Vec<SimBrush>,
     clip_bsp: SimClipBsp,
@@ -239,6 +240,7 @@ impl SimContentBuilder {
                 weapons,
                 script_sound_aliases: Default::default(),
                 script_fx: Default::default(),
+                script_viewmodels: Default::default(),
                 collision_complete: false,
                 clip_brushes: Default::default(),
                 clip_bsp: Default::default(),
@@ -263,6 +265,10 @@ impl SimContentBuilder {
                 player_anim_script: Default::default(),
             },
         }
+    }
+
+    pub fn set_script_viewmodels(&mut self, names: impl IntoIterator<Item = String>) {
+        self.data.script_viewmodels = names.into_iter().collect();
     }
 
     pub fn uses_weapons(&self, weapons: &Arc<crate::SimWeaponContent>) -> bool {
@@ -454,6 +460,10 @@ impl SimContent {
     pub(crate) fn xanims(&self) -> &Arc<crate::MantleXAnimBind> {
         &self.data.xanims
     }
+    pub(super) fn has_script_viewmodel(&self, name: &str) -> bool {
+        self.data.script_viewmodels.contains(name)
+    }
+
     pub(super) fn vehicle_turrets(&self) -> &std::collections::BTreeMap<String, String> {
         &self.data.vehicle_turrets
     }

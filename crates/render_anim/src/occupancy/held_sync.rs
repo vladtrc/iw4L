@@ -42,7 +42,7 @@ pub fn sync_fpv_to_held_weapon(
         }
         pending.0 = None;
         session.0 = None;
-        settled.0 = None;
+        settled.weapon = None;
     };
 
     let mut ended_local = false;
@@ -59,7 +59,7 @@ pub fn sync_fpv_to_held_weapon(
         }
     }
     if ended_local && !started_local {
-        if session_vm.0.is_some() || pending_fpv.0.is_some() || settled.0.is_some() {
+        if session_vm.0.is_some() || pending_fpv.0.is_some() || settled.weapon.is_some() {
             clear_fpv(
                 &mut commands,
                 &mut pending_fpv,
@@ -77,7 +77,7 @@ pub fn sync_fpv_to_held_weapon(
         .is_some_and(|s| s.meta.phase == sim::MatchPhase::Intermission)
         && !view.in_killcam()
     {
-        if session_vm.0.is_some() || pending_fpv.0.is_some() || settled.0.is_some() {
+        if session_vm.0.is_some() || pending_fpv.0.is_some() || settled.weapon.is_some() {
             clear_fpv(
                 &mut commands,
                 &mut pending_fpv,
@@ -91,7 +91,7 @@ pub fn sync_fpv_to_held_weapon(
     }
 
     let Some(ps) = presented.viewweapon_player(local.0) else {
-        if session_vm.0.is_some() || pending_fpv.0.is_some() || settled.0.is_some() {
+        if session_vm.0.is_some() || pending_fpv.0.is_some() || settled.weapon.is_some() {
             clear_fpv(
                 &mut commands,
                 &mut pending_fpv,
@@ -104,7 +104,9 @@ pub fn sync_fpv_to_held_weapon(
         held_life.0 = None;
         return;
     };
-    if started_local && (session_vm.0.is_some() || pending_fpv.0.is_some() || settled.0.is_some()) {
+    if started_local
+        && (session_vm.0.is_some() || pending_fpv.0.is_some() || settled.weapon.is_some())
+    {
         clear_fpv(
             &mut commands,
             &mut pending_fpv,
@@ -113,6 +115,20 @@ pub fn sync_fpv_to_held_weapon(
             &existing_fpv,
         );
     }
+    let selected_viewmodel = presented
+        .snapshot()
+        .and_then(|snap| snap.meta.for_client(local.0))
+        .and_then(|meta| meta.viewmodel.clone());
+    if settled.viewmodel != selected_viewmodel {
+        clear_fpv(
+            &mut commands,
+            &mut pending_fpv,
+            &mut session_vm,
+            &mut settled,
+            &existing_fpv,
+        );
+        settled.viewmodel = selected_viewmodel;
+    }
     let held = prepared
         .table()
         .map_or(get_viewmodel_weapon_index(ps), |t| {
@@ -120,7 +136,7 @@ pub fn sync_fpv_to_held_weapon(
         });
 
     if held == 0 {
-        if session_vm.0.is_some() || pending_fpv.0.is_some() || settled.0 != Some(0) {
+        if session_vm.0.is_some() || pending_fpv.0.is_some() || settled.weapon != Some(0) {
             clear_fpv(
                 &mut commands,
                 &mut pending_fpv,
@@ -128,7 +144,7 @@ pub fn sync_fpv_to_held_weapon(
                 &mut settled,
                 &existing_fpv,
             );
-            settled.0 = Some(0);
+            settled.weapon = Some(0);
             let state = FpvState::ClearedNoWeapon;
             if let Some(report) = report.as_deref_mut() {
                 report.sim_gap = state.label().to_owned();
@@ -148,11 +164,11 @@ pub fn sync_fpv_to_held_weapon(
     if session_vm.0.as_ref().is_some_and(|session| {
         session.weapon_id == held && session.parent_weapon == ps.weapon_primary
     }) {
-        settled.0 = Some(held);
+        settled.weapon = Some(held);
         return;
     }
 
-    if settled.0 == Some(held) && session_vm.0.is_none() && pending_fpv.0.is_none() {
+    if settled.weapon == Some(held) && session_vm.0.is_none() && pending_fpv.0.is_none() {
         return;
     }
 
@@ -183,7 +199,7 @@ pub fn sync_fpv_to_held_weapon(
                 weapon_id: held,
                 parent_weapon: ps.weapon_primary,
             });
-            settled.0 = None;
+            settled.weapon = None;
             FpvState::Queued
         }
         None => {
@@ -192,7 +208,7 @@ pub fn sync_fpv_to_held_weapon(
             }
             session_vm.0 = None;
             pending_fpv.0 = None;
-            settled.0 = Some(held);
+            settled.weapon = Some(held);
             FpvState::Blocked(Cow::<'static, str>::Owned(format!(
                 "gunXModel[0] unresolved for weapon {weapon_id}",
                 weapon_id = held

@@ -304,63 +304,93 @@ pub(super) fn stamp_combat_fx(
 ) {
     combat.namespace = ns;
     stamp_fx_edge(
-        slots.view_flash,
+        slots.view_flash.filter(|_| !slots.closed),
         ns,
         fx,
         &mut combat.view_flash,
         &mut combat.view_flash_hint,
     );
     stamp_fx_edge(
-        slots.world_flash,
+        slots.world_flash.filter(|_| !slots.closed),
         ns,
         fx,
         &mut combat.world_flash,
         &mut combat.world_flash_hint,
     );
     stamp_fx_edge(
-        slots.view_shell_eject,
+        slots.view_shell_eject.filter(|_| !slots.closed),
         ns,
         fx,
         &mut combat.view_shell_eject,
         &mut combat.view_shell_eject_hint,
     );
     stamp_fx_edge(
-        slots.world_shell_eject,
+        slots.world_shell_eject.filter(|_| !slots.closed),
         ns,
         fx,
         &mut combat.world_shell_eject,
         &mut combat.world_shell_eject_hint,
     );
     stamp_fx_edge(
-        slots.view_last_shot_eject,
+        slots.view_last_shot_eject.filter(|_| !slots.closed),
         ns,
         fx,
         &mut combat.view_last_shot_eject,
         &mut combat.view_last_shot_eject_hint,
     );
     stamp_fx_edge(
-        slots.world_last_shot_eject,
+        slots.world_last_shot_eject.filter(|_| !slots.closed),
         ns,
         fx,
         &mut combat.world_last_shot_eject,
         &mut combat.world_last_shot_eject_hint,
     );
     stamp_fx_edge(
-        slots.explosion,
+        slots.explosion.filter(|_| !slots.closed),
         ns,
         fx,
         &mut combat.explosion,
         &mut combat.explosion_hint,
     );
-    let tracer = slots
-        .tracer
-        .and_then(|s| tracers.index_at_slot(s))
+    if slots.closed {
+        for (slot, edge) in [
+            (slots.view_flash, &mut combat.view_flash),
+            (slots.world_flash, &mut combat.world_flash),
+            (slots.view_shell_eject, &mut combat.view_shell_eject),
+            (slots.world_shell_eject, &mut combat.world_shell_eject),
+            (slots.view_last_shot_eject, &mut combat.view_last_shot_eject),
+            (
+                slots.world_last_shot_eject,
+                &mut combat.world_last_shot_eject,
+            ),
+            (slots.explosion, &mut combat.explosion),
+        ] {
+            if slot.is_some() && edge.is_absent() {
+                *edge = AssetEdge::Unresolved(AssetEdgeReason::CatalogMiss);
+            }
+        }
+    }
+    let tracer = combat
+        .tracer_hint
+        .as_deref()
+        .and_then(|name| tracers.index_named(ns, name))
+        .or_else(|| {
+            if !slots.closed && combat.tracer_hint.is_none() {
+                slots.tracer.and_then(|s| tracers.index_at_slot(s))
+            } else {
+                None
+            }
+        })
         .and_then(|index| Some((index, tracers.def_at(index)?)));
-    combat.tracer_hint = tracer.map(|(_, def)| def.name.clone());
-    combat.tracer = match (slots.tracer, tracer) {
-        (None, _) => AssetEdge::Absent,
+    combat.tracer_hint = combat
+        .tracer_hint
+        .clone()
+        .or_else(|| tracer.map(|(_, def)| def.name.clone()));
+    let authored = slots.tracer.is_some() || combat.tracer_hint.is_some();
+    combat.tracer = match (authored, tracer) {
         (_, Some((index, _))) => AssetEdge::bind_order(index, tracers.zone_of(index)),
-        (Some(_), None) => AssetEdge::Unresolved(AssetEdgeReason::CatalogMiss),
+        (false, None) => AssetEdge::Absent,
+        (true, None) => AssetEdge::Unresolved(AssetEdgeReason::CatalogMiss),
     };
     combat.last_shot_eject_pair_authored = slots.last_shot_pair_authored();
 }

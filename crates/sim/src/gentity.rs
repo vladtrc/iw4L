@@ -657,8 +657,10 @@ pub fn init_script_mover_state(number: i32, origin: [f32; 3], angles: [f32; 3]) 
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ScriptMoverGentity {
+    pub body: Option<crate::EntityBodyBounds>,
     pub id: ScriptModelId,
     pub killcam_camera: Option<playerstate_iw4::KillCamMode>,
+    pub thermal_draw: bool,
     pub state: EntityState,
 
     pub box_mid: [f32; 3],
@@ -677,8 +679,10 @@ pub struct ScriptMoverGentity {
 impl Default for ScriptMoverGentity {
     fn default() -> Self {
         Self {
+            body: None,
             id: ScriptModelId::from_wire(0),
             killcam_camera: None,
+            thermal_draw: false,
             state: EntityState::default(),
             box_mid: [0.0; 3],
             box_half: [0.0; 3],

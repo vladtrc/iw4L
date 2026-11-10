@@ -8,6 +8,7 @@ pub struct TickEffects {
     pub local_sounds: Vec<crate::PendingLocalSound>,
     pub player_cards: Vec<crate::PendingPlayerCardEvent>,
     pub script_audio: Vec<crate::ScriptAudioCommand>,
+    pub objective_updates: Vec<crate::ObjectiveUpdate>,
     pub kicks: Vec<(ClientId, String)>,
 }
 

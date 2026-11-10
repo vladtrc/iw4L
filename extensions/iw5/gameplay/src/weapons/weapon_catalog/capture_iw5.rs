@@ -138,6 +138,7 @@ impl NativeWeaponCapture for WeaponCatalog {
             projectile_fx: WeaponProjectileFx::default(),
             gun_xmodel,
             hand_xmodel,
+            clip_model: None,
             world_model,
             camo_models: {
                 let read = |names: &[Option<ext_iw5_fastfile::Ptr>]| {

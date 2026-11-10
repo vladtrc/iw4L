@@ -479,6 +479,7 @@ impl ItemDrawPublisher<'_, '_> {
                 owner: ModelLightingOwner::Item(row.entnum),
                 origin: row.lighting_origin,
                 lookup_fallback,
+                hero_lighting: false,
             }));
             let object_id = XMODEL_OBJECT_ID_ITEM_BASE.saturating_add(row.index as u16);
             self.owners.push(ItemOwnerDraw {

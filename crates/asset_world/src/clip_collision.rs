@@ -35,7 +35,7 @@ pub struct ClipMapMaterial {
     pub content_flags: u32,
 }
 
-pub const COLLISION_ADAPTER_VERSION: u32 = 1;
+pub const COLLISION_ADAPTER_VERSION: u32 = 2;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CollisionCoverage {
@@ -916,12 +916,12 @@ fn extract_cmodels(
     out.cmodels.reserve(g.cmodel_count);
     for i in 0..g.cmodel_count {
         let cm = cmodels_ptr.at(i * sz::CMODEL);
-        let mins = [
+        let midpoint = [
             s.f32_at(cm, 0).map_err(|_| ClipCollisionError::Truncated)?,
             s.f32_at(cm, 4).map_err(|_| ClipCollisionError::Truncated)?,
             s.f32_at(cm, 8).map_err(|_| ClipCollisionError::Truncated)?,
         ];
-        let maxs = [
+        let half_size = [
             s.f32_at(cm, 12)
                 .map_err(|_| ClipCollisionError::Truncated)?,
             s.f32_at(cm, 16)
@@ -932,6 +932,17 @@ fn extract_cmodels(
         let radius = s
             .f32_at(cm, 24)
             .map_err(|_| ClipCollisionError::Truncated)?;
+
+        if half_size
+            .iter()
+            .any(|value| !value.is_finite() || *value < 0.0)
+        {
+            return Err(ClipCollisionError::InvalidSemantics(
+                "collision model half-size",
+            ));
+        }
+        let mins = std::array::from_fn(|axis| midpoint[axis] - half_size[axis]);
+        let maxs = std::array::from_fn(|axis| midpoint[axis] + half_size[axis]);
 
         let lb_index = s
             .i32_at(cm, 64)

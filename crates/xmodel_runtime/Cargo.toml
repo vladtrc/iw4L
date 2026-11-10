@@ -8,6 +8,7 @@ description = "Pure retained XModel DObj pose and collision runtime shared by au
 [dependencies]
 anim_iw4.workspace = true
 glam.workspace = true
+math_iw4.workspace = true
 
 [lints]
 workspace = true

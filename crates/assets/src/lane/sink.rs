@@ -74,6 +74,11 @@ pub(super) struct DeferredModel {
 #[derive(Default)]
 pub(crate) struct ZoneWalkSink {
     pub(super) region_only: bool,
+    pub(super) capture_weapons: bool,
+    pub weapons: WeaponCatalog,
+    pub world_weapons: WorldWeaponBuild,
+    pub projectile_meshes: asset_model::ProjectileMeshBuild,
+    pub stats_tables: BTreeMap<String, asset_game::CapturedStringTable>,
     pub(super) deferred_models: Vec<DeferredModel>,
     pub(super) deferred_aliases: Vec<(Ptr, Ptr)>,
     pub scripts: crate::ScriptSources,
@@ -109,6 +114,7 @@ pub(crate) struct ZoneWalkSink {
 
 #[derive(Default)]
 pub(crate) struct CommonWalkSink {
+    pub runtime_profile: asset_core::RuntimeProfile,
     pub scripts: crate::ScriptSources,
     pub scene_models: asset_world::MapXModelSceneCatalog,
     pub shared_surfaces: asset_model::SharedXModelSurfaces,
@@ -168,12 +174,16 @@ impl ZoneWalkSink {
         self.xanims.set_capture_zone(zone);
         self.map_xmodels.set_capture_zone(zone);
         self.fpv_meshes.set_capture_zone(zone);
+        self.world_weapons.set_capture_zone(zone);
     }
 
     pub(crate) fn set_capture_ns(&mut self, ns: asset_core::FamilyId) {
         self.materials.set_capture_ns(ns);
         self.xanims.set_capture_ns(ns);
         self.fpv_meshes.set_capture_ns(ns);
+        self.weapons.set_capture_ns(ns);
+        self.world_weapons.set_capture_ns(ns);
+        self.projectile_meshes.set_capture_ns(ns);
         self.tracers.set_capture_ns(ns);
         self.fx.set_capture_ns(ns);
         self.fx_models.set_capture_ns(ns);
@@ -237,6 +247,9 @@ impl AssetSink for ZoneWalkSink {
         self.bodies.set_strings(strings);
         self.fpv_meshes.set_strings(strings);
         self.xanims.set_strings(strings);
+        self.weapons.set_strings(strings);
+        self.world_weapons.set_strings(strings);
+        self.projectile_meshes.set_strings(strings);
     }
 
     fn begin_assets(&mut self, count: usize) {
@@ -284,6 +297,14 @@ impl AssetLinkSink for ZoneWalkSink {
             }
         }
         self.materials.loaded(stream, ty, slot, insert_slot)?;
+        if self.capture_weapons {
+            if ty == AssetType::Weapon {
+                self.weapons.capture(stream);
+            }
+            if ty == AssetType::Vehicle {
+                self.weapons.capture_vehicle(stream);
+            }
+        }
         if ty == AssetType::Fx {
             self.fx.note_loaded(slot, insert_slot.map(Into::into));
         }
@@ -308,6 +329,11 @@ impl AssetLinkSink for ZoneWalkSink {
                 &self.phys_presets,
             );
             self.fpv_meshes.capture(stream, &self.materials);
+            if self.capture_weapons {
+                self.world_weapons.capture(stream, &self.materials);
+                self.projectile_meshes
+                    .capture_unclassified(stream, &self.materials);
+            }
             self.bodies.capture(stream, &self.materials);
             self.models.capture(stream);
             self.fx_models.capture(stream, &self.materials);
@@ -357,6 +383,9 @@ impl AssetLinkSink for ZoneWalkSink {
     ) -> fastfile_iw4::Result<()> {
         if let Some(table) = iw4_string_table(s, header) {
             self.scripts.capture_table(&table);
+            if self.capture_weapons && is_cac_table(&table.name) {
+                self.stats_tables.insert(table.name.clone(), table);
+            }
         }
         Ok(())
     }
@@ -617,7 +646,9 @@ impl AssetLinkSink for CommonWalkSink {
         }
         self.player_anim_sources
             .capture(self.materials.capture_ns(), name, data, zlib_compressed);
-        if let Some(table) = asset_game::capture_pen_table(name, data, zlib_compressed) {
+        if let Some(table) =
+            asset_game::capture_pen_table(self.runtime_profile, name, data, zlib_compressed)
+        {
             self.pen_table = Some(table);
         }
         if let Some(table) = asset_game::capture_lochit_table(name, data, zlib_compressed) {
@@ -706,6 +737,7 @@ impl AssetLinkSink for CommonWalkSink {
 
 #[derive(Default)]
 pub(crate) struct MaterialPopulationSink {
+    pub xanims: XAnimBuild,
     pub walked: usize,
     pub stage: Option<StageHandle>,
     pub materials: MaterialCatalog,
@@ -738,10 +770,12 @@ impl MaterialPopulationSink {
 
     pub(crate) fn set_capture_zone(&mut self, zone: ZoneOwner) {
         self.materials.set_capture_zone(zone);
+        self.xanims.set_capture_zone(zone);
     }
 
     pub(crate) fn set_capture_ns(&mut self, ns: asset_core::FamilyId) {
         self.materials.set_capture_ns(ns);
+        self.xanims.set_capture_ns(ns);
     }
 
     fn keep_stats_table(&mut self, table: Option<asset_game::CapturedStringTable>) {
@@ -758,7 +792,9 @@ impl AssetSink for MaterialPopulationSink {
         }
     }
 
-    fn set_script_strings(&mut self, _strings: ScriptStrings) {}
+    fn set_script_strings(&mut self, strings: ScriptStrings) {
+        self.xanims.set_strings(strings);
+    }
 
     fn load_asset(
         &mut self,
@@ -804,6 +840,14 @@ impl AssetLinkSink for MaterialPopulationSink {
 
     fn linked_asset_name(&self, slot: Ptr) -> Option<&str> {
         self.materials.linked_asset_name(slot)
+    }
+
+    fn capture_xanim(
+        &mut self,
+        s: &ZoneStream<'_>,
+        geometry: XAnimPartsGeometry,
+    ) -> fastfile_iw4::Result<()> {
+        self.xanims.capture_xanim(s, geometry)
     }
 
     fn capture_raw_file(

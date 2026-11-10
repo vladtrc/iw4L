@@ -109,6 +109,7 @@ impl Plugin for ConsolePlugin {
             .init_resource::<crate::game_folders::FolderPicks>()
             .init_resource::<crate::saved_position::SavedPosition>()
             .init_resource::<sim::LocalPlayerProfile>()
+            .init_resource::<sim::LocalKeyBindings>()
             .init_resource::<crate::local_profile::ProfilePersistence>()
             .init_resource::<crate::local_account::AccountPersistence>()
             .init_resource::<sim::LocalPlayerData>()
@@ -119,12 +120,17 @@ impl Plugin for ConsolePlugin {
                 (
                     setup_console,
                     crate::user_settings::load_user_settings,
+                    crate::local_input::sync,
                     crate::local_profile::load,
                     crate::local_account::load,
                 )
                     .chain(),
             )
             .add_systems(PreUpdate, feed_console_keyboard.before(InputSystems))
+            .add_systems(
+                PreUpdate,
+                crate::local_input::sync.before(publish_client_action_input),
+            )
             .init_resource::<frame::ActivePad>()
             .init_resource::<frame::InputDevices>()
             .init_resource::<frame::UiPointerFree>()
@@ -2114,12 +2120,24 @@ fn dispatch_console_command(
         let sync = !command.background
             && matches!(
                 command.name.as_str(),
-                "map" | "map_restart" | "disconnect" | "demo" | "play" | "spawn"
+                "map"
+                    | "map_restart"
+                    | "checkpoint_load"
+                    | "disconnect"
+                    | "demo"
+                    | "play"
+                    | "spawn"
             );
         if command.background
             && matches!(
                 command.name.as_str(),
-                "map" | "map_restart" | "disconnect" | "demo" | "play" | "spawn"
+                "map"
+                    | "map_restart"
+                    | "checkpoint_load"
+                    | "disconnect"
+                    | "demo"
+                    | "play"
+                    | "spawn"
             )
         {
             diag::info!(Console, "{} &: async — FIFO not blocked", command.name);

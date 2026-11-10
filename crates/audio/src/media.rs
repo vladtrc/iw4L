@@ -198,6 +198,10 @@ impl CueRelease {
 
 #[derive(Clone)]
 pub(crate) struct RenderMedia {
+    pub master_slave: Option<crate::master::MasterVoice>,
+    pub eq_channel: Option<u8>,
+    pub eq_entity: Option<u32>,
+    pub room: Option<crate::room_mix::RoomVoice>,
     pcm: PcmBuffer,
     pub pan: Option<LivePan>,
     pub output_gain: [f32; 2],
@@ -422,6 +426,10 @@ impl RenderMedia {
     pub(crate) fn from_buffer(pcm: PcmBuffer) -> Self {
         Self {
             pcm,
+            master_slave: None,
+            room: None,
+            eq_channel: None,
+            eq_entity: None,
             pan: None,
             output_gain: [1.0; 2],
             gain: None,

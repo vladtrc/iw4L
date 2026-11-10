@@ -5,7 +5,7 @@ use weapon_iw4::WeaponCombatFacts;
 mod scene;
 pub(crate) use scene::digest as scene_geometry_digest;
 
-pub const CONTENT_DIGEST_SCHEME: u64 = 23;
+pub const CONTENT_DIGEST_SCHEME: u64 = 25;
 
 #[derive(Clone, Copy)]
 struct Digest(u64);
@@ -96,6 +96,7 @@ fn hash_combat(h: &mut Digest, combat: &[WeaponCombatFacts]) {
             weapon_iw4::EmptyReloadPolicy::Authored => 1,
         });
         h.i32(row.clip_size);
+        h.bool(row.clip_only);
         h.i32(row.start_ammo);
         h.i32(row.max_ammo);
         h.i32(row.ammo_index);
@@ -184,6 +185,32 @@ fn hash_weapon_admission(h: &mut Digest, runnable: &[bool], transition_groups: &
     h.u64(transition_groups.len() as u64);
     for &group in transition_groups {
         h.u32(group);
+    }
+}
+
+fn hash_weapon_script_facts(h: &mut Digest, content: &crate::SimWeaponContent) {
+    h.u64(content.weapon_thermal_scopes.len() as u64);
+    for &thermal in &content.weapon_thermal_scopes {
+        h.bool(thermal);
+    }
+    h.u64(content.weapon_items.len() as u64);
+    for item in &content.weapon_items {
+        h.bool(item.is_some());
+        if let Some(item) = item {
+            h.u32(item.alternate);
+            let ammo = item.ammo;
+            for value in [
+                ammo.clip_size,
+                ammo.total_min,
+                ammo.total_max,
+                ammo.clip_percent_min,
+                ammo.clip_percent_max,
+            ] {
+                h.i32(value);
+            }
+            h.bool(ammo.shared_ammo);
+            h.bool(ammo.allow_dual_wield);
+        }
     }
 }
 
@@ -369,6 +396,7 @@ pub fn content_digest(
     let mut h = Digest::new();
     h.u64(CONTENT_DIGEST_SCHEME);
     hash_combat(&mut h, &weapon_content.weapon_combat);
+    hash_weapon_script_facts(&mut h, weapon_content);
     hash_penetration(&mut h, &weapon_content.bullet_pen);
     hash_weapon_admission(
         &mut h,
@@ -421,6 +449,7 @@ pub fn content_components(
 
     let mut weapons = component(b'W');
     hash_combat(&mut weapons, &weapon_content.weapon_combat);
+    hash_weapon_script_facts(&mut weapons, weapon_content);
     hash_penetration(&mut weapons, &weapon_content.bullet_pen);
     hash_weapon_admission(
         &mut weapons,
@@ -467,7 +496,11 @@ fn hash_unlocks(
     }
 }
 
-fn hash_ranks(h: &mut Digest, ranks: &gamemode_iw4::progression::RankProgression) {
+fn hash_ranks(h: &mut Digest, ranks: &Option<gamemode_iw4::progression::RankProgression>) {
+    let Some(ranks) = ranks else {
+        h.u64(0);
+        return;
+    };
     h.u64(ranks.thresholds().len() as u64);
     for &(rank, xp) in ranks.thresholds() {
         h.u32(rank);

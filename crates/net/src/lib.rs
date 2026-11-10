@@ -13,9 +13,11 @@ pub mod schedule;
 pub mod session_core;
 pub mod signon;
 pub mod svc_gamenotify;
+mod svc_objective;
 pub mod svc_playercard;
 pub mod svc_scores;
 mod svc_script_audio;
+pub use svc_objective::SvcObjective;
 pub mod svc_sound;
 mod time_scale;
 pub mod transport;
@@ -160,6 +162,6 @@ pub use transport::wire::{WireError, WireReader, WireWriter};
 
 pub use svc_script_audio::SvcScriptAudio;
 
-pub const PROTOCOL_VERSION: u32 = 126;
+pub const PROTOCOL_VERSION: u32 = 141;
 
 pub use transport::meta_wire::encode_actions;

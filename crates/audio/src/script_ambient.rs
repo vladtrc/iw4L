@@ -86,6 +86,7 @@ impl ScriptAmbientPlayer<'_> {
         let (namespace, name) = namespace_alias(alias);
         let handle = self.cues.trigger_faded(
             CueTrigger {
+                force_master: false,
                 event: None,
                 bank: bank.0.clone(),
                 namespace,
@@ -94,7 +95,7 @@ impl ScriptAmbientPlayer<'_> {
                 origin_inches: None,
                 emitter: None,
                 class: SoundClass::Ambience,
-                pitch_scale: 1.0,
+                pitch_scale: (f32::from(plan.rate_percent) / 100.0).max(0.01),
                 volume_scale: 1.0,
                 fallbacks: Vec::new(),
             },

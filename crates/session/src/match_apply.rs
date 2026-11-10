@@ -1,3 +1,4 @@
+mod animation_trees;
 use asset_game::WeaponRegistry;
 use asset_world::{ClipCollision, SpawnPoint};
 use assets::{
@@ -19,6 +20,7 @@ use render_frontend::adapters::anim::dyn_ent::{DynEntPhysClip, DynEntPhysWorld};
 use render_frontend::prepare::scene::camera::SimCamera;
 use render_frontend::prepare::scene::world::{WorldScene, world_scene_from_draw};
 use render_fx::{PreparedFxCatalog, PreparedFxModels, PreparedImpactFx, PreparedTracers};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::loadout::{AuthoritativeClassProjection, ClassRow, project_class};
@@ -70,6 +72,7 @@ pub struct MatchInstallAuthority<'w> {
     input_gate: Res<'w, AuthorityInputGate>,
     cheats: Option<Res<'w, sim::HostCheats>>,
     profile: Option<Res<'w, sim::LocalPlayerProfile>>,
+    bindings: Option<Res<'w, sim::LocalKeyBindings>>,
     previous: Option<Res<'w, AuthorityWorld>>,
     account: Option<Res<'w, crate::LocalAccount>>,
     local: Option<Res<'w, net::LocalPresentClient>>,
@@ -131,6 +134,7 @@ impl PreparedMatchSource<'_, '_> {
             input_gate,
             cheats,
             profile,
+            bindings,
             previous,
             account,
             local,
@@ -264,6 +268,7 @@ impl PreparedMatchSource<'_, '_> {
             let mut install = bevy::ecs::world::CommandQueue::default();
             install.push(audio::stage_prepared_match_audio);
             let MatchInstallPlan {
+                campaign_hud,
                 ui_images,
                 capabilities,
                 scripts,
@@ -302,68 +307,78 @@ impl PreparedMatchSource<'_, '_> {
                 model_spawns,
             } = plan;
             let spawn_count = prepared_map.spawns.len();
-
-            let mut local_player_data = player_data.clone();
-            let definitions = script_level
-                .schemas
-                .get("mp/playerdata.def")
-                .ok_or_else(|| {
-                    InstallRefusal::new("Local progression: player data schema is missing")
-                })?;
-            let ranks = weapons
-                .registry()
-                .rank_progression()
-                .map_err(|error| InstallRefusal::new(format!("Local progression: {error}")))?;
-            local_player_data
-                .install(
-                    definitions,
-                    ranks,
-                    account
-                        .as_ref()
-                        .and_then(|account| account.snapshot.as_ref()),
-                )
-                .map_err(|error| InstallRefusal::new(format!("Local progression: {error:?}")))?;
-            local_player_data.install_unlock_data(
-                account_defaults.clone(),
-                script_level
-                    .tables
-                    .get("mp/allchallengestable.csv")
-                    .cloned(),
-            );
-            for name in ["mp/ranktable.csv", "mp/rankicontable.csv"] {
-                if let Some(table) = script_level.tables.get(name) {
-                    local_player_data.install_rank_table(name, table.clone());
-                }
+            let runtime_profile = script_level.profile;
+            stage_resource(&mut install, frame::MatchRuntimeProfile(runtime_profile));
+            if let Some(catalog) = campaign_hud {
+                stage_resource(&mut install, catalog);
             }
-            diag::info!(
-                Sim,
-                "local progression prepared before admission: rank={}",
+
+            if runtime_profile == asset_core::RuntimeProfile::Multiplayer {
+                let mut local_player_data = player_data.clone();
+                let definitions =
+                    script_level
+                        .schemas
+                        .get("mp/playerdata.def")
+                        .ok_or_else(|| {
+                            InstallRefusal::new("Local progression: player data schema is missing")
+                        })?;
+                let ranks = weapons
+                    .registry()
+                    .rank_progression()
+                    .map_err(|error| InstallRefusal::new(format!("Local progression: {error}")))?;
                 local_player_data
-                    .progression
-                    .as_ref()
-                    .expect("installed progression")
-                    .rank
-            );
-            let rank_tables = [
-                weapons.registry().shared_rank_table(),
-                weapons.registry().shared_rank_icons(),
-            ]
-            .map(|table| table.expect("validated rank presentation").clone());
-            install.push(move |world: &mut World| {
-                world
-                    .resource_mut::<crate::scope_control::InstallAnnouncement>()
-                    .0
-                    .push(move |world: &mut World| {
-                        if let Some(mut catalog) =
-                            world.get_resource_mut::<asset_game::MenuCatalog>()
-                        {
-                            for table in rank_tables {
-                                catalog.insert_string_table(table);
+                    .install(
+                        definitions,
+                        ranks,
+                        account
+                            .as_ref()
+                            .and_then(|account| account.snapshot.as_ref()),
+                    )
+                    .map_err(|error| {
+                        InstallRefusal::new(format!("Local progression: {error:?}"))
+                    })?;
+                local_player_data.install_unlock_data(
+                    account_defaults.clone(),
+                    script_level
+                        .tables
+                        .get("mp/allchallengestable.csv")
+                        .cloned(),
+                );
+                for name in ["mp/ranktable.csv", "mp/rankicontable.csv"] {
+                    if let Some(table) = script_level.tables.get(name) {
+                        local_player_data.install_rank_table(name, table.clone());
+                    }
+                }
+                diag::info!(
+                    Sim,
+                    "local progression prepared before admission: rank={}",
+                    local_player_data
+                        .progression
+                        .as_ref()
+                        .expect("installed progression")
+                        .rank
+                );
+                let rank_tables = [
+                    weapons.registry().shared_rank_table(),
+                    weapons.registry().shared_rank_icons(),
+                ]
+                .map(|table| table.expect("validated rank presentation").clone());
+                install.push(move |world: &mut World| {
+                    world
+                        .resource_mut::<crate::scope_control::InstallAnnouncement>()
+                        .0
+                        .push(move |world: &mut World| {
+                            if let Some(mut catalog) =
+                                world.get_resource_mut::<asset_game::MenuCatalog>()
+                            {
+                                for table in rank_tables {
+                                    catalog.insert_string_table(table);
+                                }
                             }
-                        }
-                        world.insert_resource(local_player_data);
-                    });
-            });
+                            world.insert_resource(local_player_data);
+                        });
+                });
+            }
 
             let facts = std::mem::take(&mut prepared_map.facts);
             let airstrike_height = facts.airstrike_height;
@@ -402,6 +417,7 @@ impl PreparedMatchSource<'_, '_> {
             let mut input_gate = *input_gate;
             let (mut content, sim_weapons) =
                 prepare_simulation_content(SimulationContentSources {
+                    profile: runtime_profile,
                     weapons: &weapons,
                     world_weapons: &world_weapons,
                     lochit_table,
@@ -429,6 +445,9 @@ impl PreparedMatchSource<'_, '_> {
                     .or_else(|| profile.as_deref().copied())
                     .unwrap_or(sim::LocalPlayerProfile::default());
                 sim.set_local_player_profile(profile);
+                if let Some(bindings) = bindings.as_deref() {
+                    sim.set_local_key_bindings(bindings.clone());
+                }
             }
             install_team_voice_prefixes(
                 &mut content,
@@ -517,7 +536,19 @@ impl PreparedMatchSource<'_, '_> {
                 &mut input_gate,
                 kind,
                 allow_debug_actions,
+                runtime_profile,
             )?;
+            let mut script_level = script_level;
+            if runtime_profile == asset_core::RuntimeProfile::Campaign {
+                script_level.campaign_player = Some(
+                    local
+                        .as_ref()
+                        .ok_or_else(|| {
+                            InstallRefusal::new("Campaign requires its local player seat")
+                        })?
+                        .0,
+                );
+            }
             let script_facts =
                 script_install_facts(&zone, gametype, &scripts, script_entries.len());
             if *policy.role == frame::RuntimeRole::Listen {
@@ -529,7 +560,8 @@ impl PreparedMatchSource<'_, '_> {
                 script_level,
             )
             .map_err(|e| script_refusal(&zone, gametype, "install", &e))?;
-            if *policy.role == frame::RuntimeRole::Listen
+            if runtime_profile == asset_core::RuntimeProfile::Multiplayer
+                && *policy.role == frame::RuntimeRole::Listen
                 && let (Some(account), Some(local)) = (account.as_ref(), local.as_ref())
             {
                 account
@@ -546,9 +578,11 @@ impl PreparedMatchSource<'_, '_> {
                 sim.set_gsc_dvar(name, value);
             }
             stage_resource(&mut install, net::ArchiveBudget::from_dvars(&script_dvars));
-            for entry in script_entries {
-                sim.start_gsc(&entry, sim::script::Value::level(), Vec::new())
-                    .map_err(|e| script_refusal(&zone, gametype, "entry", &e))?;
+            if self.swap.campaign_checkpoint().is_none() {
+                for entry in script_entries {
+                    sim.start_gsc(&entry, sim::script::Value::level(), Vec::new())
+                        .map_err(|e| script_refusal(&zone, gametype, "entry", &e))?;
+                }
             }
             let load_hold = AuthorityLoadHold(true);
             sim.world_objects_mut()
@@ -561,6 +595,25 @@ impl PreparedMatchSource<'_, '_> {
                             "brush model entity allocation refused: {error:?}"
                         ))
                     })?;
+            }
+            if let Some(checkpoint) = self.swap.campaign_checkpoint() {
+                let tick = sim
+                    .install_campaign_checkpoint_load(checkpoint)
+                    .map_err(|error| {
+                        InstallRefusal::new(format!("Campaign checkpoint load: {error}"))
+                    })?;
+                diag::info!(Sim, "campaign checkpoint: installing saved tick {}", tick.0);
+                install.push(move |world: &mut World| {
+                    world
+                        .resource_mut::<crate::scope_control::InstallAnnouncement>()
+                        .0
+                        .push(move |world: &mut World| {
+                            world.insert_resource(net::AuthorityClock {
+                                tick: tick.0,
+                                time_ms: net::ServerTime::from_tick(tick).ms(),
+                            });
+                        });
+                });
             }
             stamp_script_mover_numbers(&mut scene, &sim);
             if !model_spawns.is_empty() {
@@ -681,7 +734,11 @@ impl PreparedMatchSource<'_, '_> {
                     probe.world_report = world_report;
                 }
                 diag::script_boundary("installed", &script_facts);
-                diag::info!(Sim, "match: {} ({}) — world installed ({} dm spawn points); class select waits for admission", kind.display_name(), kind.token(), spawn_count);
+                if runtime_profile == asset_core::RuntimeProfile::Campaign {
+                    diag::info!(Sim, "campaign: {installed_zone} — world and initial player installed; local presentation waits for admission");
+                } else {
+                    diag::info!(Sim, "match: {} ({}) — world installed ({} dm spawn points); class select waits for admission", kind.display_name(), kind.token(), spawn_count);
+                }
                 perf::instant!("match_installed", "iw4l.sim", |ctx| { let (zone, has_world,): (&str, i64,) = (&installed_zone, 1,);
     ctx.arg("zone", zone);
             ctx.arg("has_world", has_world);
@@ -754,6 +811,7 @@ pub fn apply_prepared_match(
 /// commit half of `apply_prepared_match` has nothing to install until preflight
 /// hands one over.
 struct MatchInstallPlan {
+    campaign_hud: Option<asset_game::CampaignHudCatalog>,
     capabilities: assets::PreparedCapabilities,
     ui_images: asset_material::UiImagePublication,
     scripts: sim::script::Program,
@@ -885,6 +943,25 @@ struct MatchPreflight<'a> {
     overrides: &'a [(String, String)],
 }
 
+struct Sources(assets::ScriptSources);
+impl sim::script::SourceResolver for Sources {
+    fn read(&self, module: &str) -> Result<String, String> {
+        self.0
+            .read(module)
+            .map(|bytes| sim::script::decode_source(&bytes))
+    }
+    fn read_bytes(&self, module: &str) -> Result<Vec<u8>, String> {
+        self.0.read(module)
+    }
+    fn origin(&self, module: &str) -> sim::script::SourceOrigin {
+        match self.0.origin(module) {
+            Some(assets::ScriptSourceOrigin::Packaged) => sim::script::SourceOrigin::Packaged,
+            Some(assets::ScriptSourceOrigin::BuiltIn) => sim::script::SourceOrigin::BuiltIn,
+            None => sim::script::SourceOrigin::External,
+        }
+    }
+}
+
 fn preflight_match_install(
     mut prepared: assets::PreparedMatch,
     options: MatchPreflight<'_>,
@@ -908,10 +985,48 @@ fn preflight_match_install(
         ));
     }
     let capabilities = assets::PreparedCapabilities::prepare(&prepared);
+    let profile = prepared.profile;
+    let sources = Sources(std::mem::take(&mut prepared.scripts));
+    let mut campaign_anim_trees = Arc::new(BTreeMap::new());
+    let campaign_scripts = if profile == asset_core::RuntimeProfile::Campaign {
+        if role != frame::RuntimeRole::Listen {
+            return Err(InstallRefusal::new(
+                "Campaign currently requires a local listen authority",
+            ));
+        }
+        let entities = sim::script::parse_entity_string(sources.0.entities().unwrap_or(""));
+        let startup = sim::script::Iw4Startup::campaign(zone, &entities, &sources.0.path_nodes());
+        let roots: Vec<_> = startup.roots.iter().map(String::as_str).collect();
+        let program =
+            sim::script::Program::load(&sources, &roots, &sim::script::Catalog::iw4_campaign())
+                .map_err(|error| script_refusal(zone, "campaign", "compile", &error))?;
+        startup
+            .validate_hooks(&program)
+            .map_err(|error| script_refusal(zone, "campaign", "compile", &error))?;
+        diag::info!(
+            Sim,
+            "campaign scripts: compiled map={zone} modules={} functions={} natives={}",
+            program.modules().len(),
+            program.function_count(),
+            program.native_count()
+        );
+        campaign_anim_trees = animation_trees::prepare(&program, &sources, &prepared.xanims)?;
+        let unbound = sim::script::NativeRegistry::default().unbound_program(&program);
+        diag::info!(
+            Sim,
+            "campaign native coverage: bound={} unavailable={} names={}",
+            program.native_count() - unbound.len(),
+            unbound.len(),
+            unbound.join(" ")
+        );
+        Some(program)
+    } else {
+        None
+    };
     capabilities.validate(role).map_err(InstallRefusal::new)?;
     let killstreaks = assets::prepared::PreparedKillstreaks(
-        prepared
-            .scripts
+        sources
+            .0
             .tables()
             .get("mp/killstreaktable.csv")
             .map_or_else(Vec::new, |table| {
@@ -1045,36 +1160,20 @@ fn preflight_match_install(
         }
     }
     let strings = std::mem::take(&mut prepared.strings);
-    struct Sources(assets::ScriptSources);
-    impl sim::script::SourceResolver for Sources {
-        fn read(&self, module: &str) -> Result<String, String> {
-            self.0
-                .read(module)
-                .map(|bytes| sim::script::decode_source(&bytes))
-        }
-        fn read_bytes(&self, module: &str) -> Result<Vec<u8>, String> {
-            self.0.read(module)
-        }
-        fn origin(&self, module: &str) -> sim::script::SourceOrigin {
-            match self.0.origin(module) {
-                Some(assets::ScriptSourceOrigin::Packaged) => sim::script::SourceOrigin::Packaged,
-                Some(assets::ScriptSourceOrigin::BuiltIn) => sim::script::SourceOrigin::BuiltIn,
-                None => sim::script::SourceOrigin::External,
-            }
-        }
-    }
-    let sources = Sources(std::mem::take(&mut prepared.scripts));
-    let gametype = kind
-        .script_tokens()
-        .iter()
-        .copied()
-        .find(|token| {
-            sources
-                .0
-                .read(&format!("maps/mp/gametypes/{token}"))
-                .is_ok()
-        })
-        .unwrap_or(kind.token());
+    let gametype = if profile == asset_core::RuntimeProfile::Campaign {
+        "campaign"
+    } else {
+        kind.script_tokens()
+            .iter()
+            .copied()
+            .find(|token| {
+                sources
+                    .0
+                    .read(&format!("maps/mp/gametypes/{token}"))
+                    .is_ok()
+            })
+            .unwrap_or(kind.token())
+    };
     let account_defaults =
         sources
             .0
@@ -1103,6 +1202,10 @@ fn preflight_match_install(
         }
     };
     let mut script_level = sim::script::LevelData {
+        anim_trees: campaign_anim_trees,
+        profile,
+        campaign_player: None,
+        path_nodes: sources.0.path_nodes(),
         absent_effects,
         player_data_defaults: account_defaults.clone(),
         schemas: sources.0.schemas().clone(),
@@ -1153,33 +1256,42 @@ fn preflight_match_install(
             }
         }
     }
-    let shared_ranks = weapons.registry().shared_rank_table().map_err(|error| {
-        InstallRefusal::new(format!("Invalid shared rank progression: {error}"))
-    })?;
-    script_level.tables.insert(
-        "mp/ranktable.csv".into(),
-        sim::script::StringTable {
-            columns: shared_ranks.columns,
-            rows: shared_ranks.rows,
-            cells: shared_ranks.cells.clone(),
-        },
-    );
-    let shared_icons = weapons
-        .registry()
-        .shared_rank_icons()
-        .map_err(|error| InstallRefusal::new(format!("Invalid shared rank icons: {error}")))?;
-    script_level.tables.insert(
-        "mp/rankicontable.csv".into(),
-        sim::script::StringTable {
-            columns: shared_icons.columns,
-            rows: shared_icons.rows,
-            cells: shared_icons.cells.clone(),
-        },
-    );
-    let startup = sim::script::Iw4Startup::new(&sources, gametype, zone);
+    if profile == asset_core::RuntimeProfile::Multiplayer {
+        let shared_ranks = weapons.registry().shared_rank_table().map_err(|error| {
+            InstallRefusal::new(format!("Invalid shared rank progression: {error}"))
+        })?;
+        script_level.tables.insert(
+            "mp/ranktable.csv".into(),
+            sim::script::StringTable {
+                columns: shared_ranks.columns,
+                rows: shared_ranks.rows,
+                cells: shared_ranks.cells.clone(),
+            },
+        );
+        let shared_icons = weapons
+            .registry()
+            .shared_rank_icons()
+            .map_err(|error| InstallRefusal::new(format!("Invalid shared rank icons: {error}")))?;
+        script_level.tables.insert(
+            "mp/rankicontable.csv".into(),
+            sim::script::StringTable {
+                columns: shared_icons.columns,
+                rows: shared_icons.rows,
+                cells: shared_icons.cells.clone(),
+            },
+        );
+    }
+    let startup = if profile == asset_core::RuntimeProfile::Campaign {
+        sim::script::Iw4Startup::campaign(zone, &script_level.entities, &script_level.path_nodes)
+    } else {
+        sim::script::Iw4Startup::new(&sources, gametype, zone)
+    };
     let roots: Vec<&str> = startup.roots.iter().map(String::as_str).collect();
-    let scripts = sim::script::Program::load(&sources, &roots, &sim::script::Catalog::iw4())
-        .map_err(|e| script_refusal(zone, gametype, "compile", &e))?;
+    let scripts = match campaign_scripts {
+        Some(program) => program,
+        None => sim::script::Program::load(&sources, &roots, &sim::script::Catalog::iw4())
+            .map_err(|e| script_refusal(zone, gametype, "compile", &e))?,
+    };
     let config = sources
         .0
         .config(MATCH_CONFIG)
@@ -1266,6 +1378,7 @@ fn preflight_match_install(
         ));
     }
     Ok(MatchInstallPlan {
+        campaign_hud: prepared.campaign_hud,
         capabilities,
         ui_images: prepared.ui_images,
         script_sound_aliases: prepared.script_sound_aliases,
@@ -1745,6 +1858,7 @@ pub fn sim_clip_map(
 }
 
 struct SimulationContentSources<'a> {
+    pub profile: asset_core::RuntimeProfile,
     pub weapons: &'a PreparedWeapons,
     pub world_weapons: &'a assets::PreparedWorldWeapons,
     pub lochit_table: Option<[f32; weapon_iw4::HITLOC_COUNT]>,
@@ -1763,6 +1877,7 @@ fn prepare_simulation_content(
     sources: SimulationContentSources<'_>,
 ) -> Result<(sim::SimContentBuilder, weapon_content::PreparedSimWeapons), InstallRefusal> {
     let SimulationContentSources {
+        profile,
         weapons,
         world_weapons,
         lochit_table,
@@ -1783,6 +1898,7 @@ fn prepare_simulation_content(
         objective_weapons,
         pen_table,
         pen_table_loaded,
+        profile,
     )
     .map_err(|error| InstallRefusal::new(format!("Invalid simulation weapons: {error:?}")))?;
     let mut content = sim::SimContentBuilder::for_match(Arc::clone(sim_weapons.content()));
@@ -1791,6 +1907,12 @@ fn prepare_simulation_content(
         .map_err(|error| InstallRefusal::new(format!("Invalid map content: {error}")))?;
     content.set_script_sound_aliases(script_sound_aliases);
     content.set_script_fx(script_fx);
+    content.set_script_viewmodels(
+        weapons
+            .registry()
+            .script_viewmodel_names()
+            .map(str::to_owned),
+    );
     content.set_player_kit_collisions(
         player_kit_collision(soldiers.side(false).ok().map(Arc::as_ref))?,
         player_kit_collision(soldiers.side(true).ok().map(Arc::as_ref))?,
@@ -1965,7 +2087,24 @@ impl MatchPlayerBootstrap<'_> {
         input_gate: &mut AuthorityInputGate,
         kind: gamemode_iw4::GameModeKind,
         allow_debug_actions: bool,
+        profile: asset_core::RuntimeProfile,
     ) -> Result<(&'static str, Vec<Option<String>>), InstallRefusal> {
+        if profile == asset_core::RuntimeProfile::Campaign {
+            sim.bootstrap(sim::MatchBootstrap {
+                allow_debug_actions,
+                score_limit: 0,
+                time_limit_ms: 0,
+                ..Default::default()
+            })
+            .map_err(|error| InstallRefusal::new(format!("Campaign bootstrap: {error}")))?;
+            sim_cam.enabled = false;
+            sim_cam.freeze_fly = false;
+            input_gate.local_cmds_enabled = false;
+            return Ok((
+                "campaign player awaits local presentation admission",
+                Vec::new(),
+            ));
+        }
         let count = map.clip.brushes.len();
         let spawns: Vec<sim::AuthoredSpawnPoint> = map
             .spawns
@@ -2223,6 +2362,7 @@ pub fn prepare_simulation(
             },
         )?;
         let (mut content, sim_weapons) = prepare_simulation_content(SimulationContentSources {
+            profile: plan.script_level.profile,
             weapons: &plan.weapons,
             world_weapons: &plan.world_weapons,
             lochit_table: plan.lochit_table,

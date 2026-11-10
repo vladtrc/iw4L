@@ -1,5 +1,5 @@
 use super::{CallSite, Parser};
-use crate::script::{Binary, Callee, Fault, Namespace, Op, Unary, Value};
+use crate::script::{Binary, Callee, Fault, Namespace, Op, ThreadMode, Unary, Value};
 
 impl Parser {
     pub(super) fn number(&self, text: &str) -> Option<Result<Value, Fault>> {
@@ -32,9 +32,11 @@ impl Parser {
     pub(super) fn expression(&mut self, min: u8) -> Result<(), Fault> {
         let location = self.location();
         if self.eat("call") {
-            self.invocation(false, false)?;
+            self.invocation(false, None)?;
         } else if self.eat("thread") {
-            self.invocation(false, true)?;
+            self.invocation(false, Some(ThreadMode::Detached))?;
+        } else if self.eat("childthread") {
+            self.invocation(false, Some(ThreadMode::Child))?;
         } else if self.eat("%") {
             let name = self.ident()?.to_ascii_lowercase();
             let tree = self
@@ -75,7 +77,7 @@ impl Parser {
                 self.expect("]")?;
                 self.expect("]")?;
                 let argc = self.arguments()?;
-                self.emit(Op::Indirect(argc, false, false));
+                self.emit(Op::Indirect(argc, false, None));
             } else {
                 self.expect("]")?;
                 self.emit(Op::Array);
@@ -159,9 +161,11 @@ impl Parser {
                 self.expect("]")?;
                 self.emit(Op::LoadIndex);
             } else if self.eat("call") {
-                self.invocation(true, false)?;
+                self.invocation(true, None)?;
             } else if self.eat("thread") {
-                self.invocation(true, true)?;
+                self.invocation(true, Some(ThreadMode::Detached))?;
+            } else if self.eat("childthread") {
+                self.invocation(true, Some(ThreadMode::Child))?;
             } else {
                 let receiver_call = !self.tokens[self.pos].string
                     && self.tokens[self.pos]
@@ -176,7 +180,7 @@ impl Parser {
                 if receiver_call
                     || (self.is("[") && self.tokens.get(self.pos + 1).is_some_and(|t| t.is("[")))
                 {
-                    self.invocation(true, false)?;
+                    self.invocation(true, None)?;
                 } else {
                     break;
                 }
