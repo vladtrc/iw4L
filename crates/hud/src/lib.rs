@@ -21,6 +21,7 @@ mod killcam_skip;
 mod killfeed;
 mod mantle_hint;
 mod menus;
+mod objective_markers;
 mod overhead_names;
 mod playercard;
 mod plugin;

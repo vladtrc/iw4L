@@ -49,6 +49,7 @@ pub(super) struct EventJournal {
     entity_events: Vec<EntityEventRecord>,
     next_entity_event: EventSequence,
     pellet_fx: Vec<crate::PelletFxRecord>,
+    last_pellet_fx: Vec<crate::PelletFxRecord>,
 }
 
 impl Default for EventJournal {
@@ -59,6 +60,7 @@ impl Default for EventJournal {
             entity_events: Vec::new(),
             next_entity_event: EventSequence(1),
             pellet_fx: Vec::new(),
+            last_pellet_fx: Vec::new(),
         }
     }
 }
@@ -74,7 +76,7 @@ impl EventJournal {
                 .saturating_mul(crate::MATCH_TICK_MS)
                 <= crate::gentity::GENTITY_TEMP_EVENT_LIFETIME_MS as u32
         });
-        self.pellet_fx.clear();
+        self.last_pellet_fx = std::mem::take(&mut self.pellet_fx);
     }
     pub(super) fn push(
         &mut self,
@@ -133,6 +135,10 @@ impl EventJournal {
 
     pub(super) fn pellet_fx(&self) -> &[crate::PelletFxRecord] {
         &self.pellet_fx
+    }
+
+    pub(super) fn last_pellet_fx(&self) -> &[crate::PelletFxRecord] {
+        &self.last_pellet_fx
     }
 
     pub(super) fn push_pellet_fx(&mut self, record: crate::PelletFxRecord) {

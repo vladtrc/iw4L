@@ -58,8 +58,18 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
             entity_change(world, receiver, args, EntityEventKind::PLAY_RUMBLE_ON_ENT)
         },
     );
+    registry.register(
+        Namespace::Method,
+        "playrumblelooponentity",
+        |world, receiver, args| {
+            entity_change(world, receiver, args, EntityEventKind::PLAY_RUMBLE_ON_ENT)
+        },
+    );
     registry.register(Namespace::Method, "stoprumble", |world, receiver, args| {
         entity_change(world, receiver, args, EntityEventKind::STOP_RUMBLE)
+    });
+    registry.register(Namespace::Method, "vibrate", |_world, _receiver, _args| {
+        Ok(Value::Undefined)
     });
     registry.register(
         Namespace::Function,
@@ -83,4 +93,36 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
             Ok(Value::Undefined)
         },
     );
+    registry.register(
+        Namespace::Function,
+        "playrumblelooponposition",
+        |world, _, args| {
+            if args.len() != 2 {
+                return Err("playRumbleLoopOnPosition requires a name and position".into());
+            }
+            let index = alias_index(world, args)?;
+            let origin = vector(args, 1)?;
+            if origin.iter().any(|v| !v.is_finite()) {
+                return Err("rumble position must be finite".into());
+            }
+            emit(
+                world,
+                EntityEventKind::PLAY_RUMBLE_ON_POS,
+                i32::from(trace_iw4::ENTITYNUM_WORLD),
+                origin,
+                index,
+            );
+            Ok(Value::Undefined)
+        },
+    );
+    registry.register(Namespace::Function, "stopallrumbles", |world, _, _| {
+        emit(
+            world,
+            EntityEventKind::STOP_RUMBLE,
+            i32::from(trace_iw4::ENTITYNUM_WORLD),
+            [0.0; 3],
+            0,
+        );
+        Ok(Value::Undefined)
+    });
 }

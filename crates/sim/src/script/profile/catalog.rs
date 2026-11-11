@@ -50,6 +50,13 @@ impl Catalog {
     pub fn iw4() -> Self {
         Self::from_list(crate::script::Realm::Iw4, super::iw4_catalog::IW4)
     }
+    pub fn iw4_sp() -> Self {
+        let mut catalog = Self::iw4();
+        for builtin in super::iw4_sp_catalog::IW4_SP {
+            catalog.insert(builtin.clone());
+        }
+        catalog
+    }
     pub fn t5() -> Self {
         Self::from_list(crate::script::Realm::T5, super::t5_catalog::T5)
     }

@@ -2,6 +2,7 @@ use bevy_ecs::prelude::Resource;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use crate::script::Value;
 use crate::script::error::Fault;
 use crate::script::ir::{Function, IR_VERSION};
 use crate::script::profile::catalog::{Builtin, Catalog};
@@ -42,6 +43,13 @@ impl Program {
     ) -> Result<Self, Fault> {
         super::compiler::compile(resolver, roots, catalog)
     }
+    pub fn unresolved(
+        resolver: &impl SourceResolver,
+        roots: &[&str],
+        catalog: &Catalog,
+    ) -> Result<BTreeMap<String, std::collections::BTreeSet<String>>, Fault> {
+        super::compiler::unresolved(resolver, roots, catalog)
+    }
     pub fn modules(&self) -> &[ModuleIdentity] {
         &self.modules
     }
@@ -53,6 +61,22 @@ impl Program {
     }
     pub fn function_count(&self) -> usize {
         self.functions.len()
+    }
+    pub fn uses_native(&self, name: &str) -> bool {
+        self.natives.iter().any(|native| native.name == name)
+    }
+    pub fn animations(&self) -> BTreeMap<String, std::collections::BTreeSet<String>> {
+        let mut out: BTreeMap<String, std::collections::BTreeSet<String>> = BTreeMap::new();
+        for function in &self.functions {
+            for (_, op) in &function.code {
+                if let super::ir::Op::Constant(Value::Animation { tree, name }) = op {
+                    out.entry(tree.to_string())
+                        .or_default()
+                        .insert(name.to_string());
+                }
+            }
+        }
+        out
     }
     pub fn native_count(&self) -> usize {
         self.natives.len()

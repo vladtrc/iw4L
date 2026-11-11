@@ -69,6 +69,7 @@ pub(crate) enum Op {
     Call(Callee, usize, bool),
     Spawn(Callee, usize, bool),
     Indirect(usize, bool, bool),
+    ChildThread,
     Array,
     ArrayKeys,
     EnsureLocalArray(u32),

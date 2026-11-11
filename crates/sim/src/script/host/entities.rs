@@ -25,6 +25,10 @@ pub struct LevelData {
     pub keys: BTreeMap<String, KeyType>,
     pub schemas: BTreeMap<String, Arc<structured_data_iw4::DefinitionSet>>,
     pub player_data_defaults: Option<crate::PlayerDataDefaults>,
+    pub videos: BTreeMap<String, i32>,
+    pub turret_ai_scripts: BTreeMap<String, String>,
+    pub anim: super::script_anim::AnimLibrary,
+    pub path_nodes: Vec<asset_core::PathNode>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -121,6 +125,7 @@ pub(crate) struct EngineState {
     pub team_radar_blocked: std::collections::BTreeSet<String>,
     pub game_end_time: i32,
     pub slow_motion: Option<crate::ScriptSlowMotion>,
+    pub cinematic: Option<crate::ScriptCinematic>,
     pub ambient: Option<crate::ScriptAmbient>,
     pub ac130_ambient: Option<crate::ScriptAmbient>,
     pub players_ignore_radius_damage: bool,
@@ -163,6 +168,7 @@ pub(crate) enum EntityKind {
     Item(i32),
     Missile(crate::ProjectileId),
     Vehicle,
+    Actor,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -204,6 +210,7 @@ pub(crate) struct ScriptEntity {
     pub can_radius_damage: bool,
     pub part_ops: Vec<(Arc<str>, bool)>,
     pub anim_op: Option<Option<Arc<str>>>,
+    pub anim: Option<Box<super::script_anim::EntityAnim>>,
     pub loop_sound: Option<Arc<str>>,
     pub usable: Option<Usable>,
     pub trigger_policy: super::triggers::TriggerPolicy,
@@ -225,7 +232,7 @@ pub(crate) enum HudAudience {
     Client(u32),
 }
 
-fn vector(text: &str) -> [f32; 3] {
+pub(crate) fn vector(text: &str) -> [f32; 3] {
     let mut parts = text
         .split_ascii_whitespace()
         .map(|p| super::natives::iw4::atof(p) as f32);
@@ -276,19 +283,32 @@ impl RoundScript {
                 return Err("exceeded maximum number of script hud elements".into());
             }
             -1
+        } else if classname.starts_with("info_vehicle_node")
+            || (self.campaign.active
+                && (classname.starts_with("trigger_") || classname == "info_volume"))
+        {
+            -1
         } else {
             if self
                 .entities
                 .values()
-                .filter(|e| e.kind != EntityKind::HudElem)
+                .filter(|e| e.kind != EntityKind::HudElem && e.number >= 0)
                 .count()
                 >= MAX_SCRIPT_ENTITIES
             {
                 return Err("no free entities".into());
             }
-            let number = self.next_entity_number;
-            self.next_entity_number += 1;
-            number
+            if self.next_entity_number < i32::from(trace_iw4::ENTITYNUM_WORLD) {
+                let number = self.next_entity_number;
+                self.next_entity_number += 1;
+                number
+            } else {
+                let used: std::collections::HashSet<i32> =
+                    self.entities.values().map(|e| e.number).collect();
+                (playerstate_iw4::GENTITY_SPAWN_BASE..i32::from(trace_iw4::ENTITYNUM_WORLD))
+                    .find(|n| !used.contains(n))
+                    .ok_or("no free entities")?
+            }
         };
         let id = self.new_object()?;
         self.entities.insert(
@@ -314,6 +334,7 @@ impl RoundScript {
                 can_radius_damage: true,
                 part_ops: Vec::new(),
                 anim_op: None,
+                anim: None,
                 loop_sound: None,
                 usable: None,
                 trigger_policy: Default::default(),
@@ -321,7 +342,7 @@ impl RoundScript {
         );
         if kind != EntityKind::HudElem {
             self.set_object_field(id, "classname", Value::string(classname));
-            let code = if classname.starts_with("script_vehicle") {
+            let code = if is_vehicle_class(classname) {
                 "script_vehicle"
             } else {
                 classname
@@ -358,6 +379,7 @@ impl RoundScript {
                 can_radius_damage: true,
                 part_ops: Vec::new(),
                 anim_op: None,
+                anim: None,
                 loop_sound: None,
                 usable: None,
                 trigger_policy: Default::default(),
@@ -394,7 +416,10 @@ impl RoundScript {
                 presence,
                 matches!(
                     entity.kind,
-                    EntityKind::Spawned | EntityKind::Vehicle | EntityKind::Missile(_)
+                    EntityKind::Spawned
+                        | EntityKind::Vehicle
+                        | EntityKind::Actor
+                        | EntityKind::Missile(_)
                 ),
             ));
         }
@@ -470,7 +495,12 @@ impl RoundScript {
                 values.insert(ArrayKey::Integer(index), Value::Object(id));
                 id
             } else {
-                self.create_entity(EntityKind::Map, classname)?
+                let id = self
+                    .create_entity(EntityKind::Map, classname)
+                    .map_err(|error| map_entity_census(entities, &error))?;
+                self.set_object_field(id, "spawnflags", Value::Int(0));
+                self.set_object_field(id, "angles", Value::Vector([0.0; 3]));
+                id
             };
             let mut radius = None;
             let mut height = None;
@@ -535,5 +565,33 @@ impl RoundScript {
     }
 }
 
+pub(crate) fn is_vehicle_class(classname: &str) -> bool {
+    classname.starts_with("script_vehicle") && classname != "script_vehicle_collmap"
+}
+
 pub(crate) const MAX_SCRIPT_ENTITIES: usize = 2048 - 64;
+
+fn map_entity_census(entities: &[Vec<(String, String)>], error: &str) -> String {
+    let mut counts = BTreeMap::<&str, usize>::new();
+    for pairs in entities {
+        let classname = pairs
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("classname"))
+            .map_or("", |(_, v)| v.as_str());
+        if !(classname.starts_with("node_")
+            || classname.starts_with("info_vehicle_node")
+            || classname == "script_struct")
+        {
+            *counts.entry(classname).or_default() += 1;
+        }
+    }
+    let mut counts: Vec<_> = counts.into_iter().collect();
+    counts.sort_by(|a, b| b.1.cmp(&a.1));
+    let total: usize = counts.iter().map(|(_, n)| n).sum();
+    let census: Vec<String> = counts.iter().map(|(c, n)| format!("{c}={n}")).collect();
+    format!(
+        "{error} ({total} map entities, cap {MAX_SCRIPT_ENTITIES}: {})",
+        census.join(" ")
+    )
+}
 pub(crate) const MAX_HUD_ELEMS: usize = 1024;

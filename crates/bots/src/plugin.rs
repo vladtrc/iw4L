@@ -128,6 +128,10 @@ impl Plugin for BotsPlugin {
                     .in_set(ClientSet::Load),
             )
             .add_systems(
+                Update,
+                nav::campaign::install_actor_nav.after(ClientSet::Load),
+            )
+            .add_systems(
                 FixedUpdate,
                 (
                     evict_bots_claiming_local_client.in_set(frame::InMatch),

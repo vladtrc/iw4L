@@ -30,12 +30,17 @@ pub(crate) fn compile(
     let aliases: Vec<_> = weapons.native_script_aliases().chain(aliases).collect();
     let mut refused = Vec::new();
     let groups = weapons.configuration_transition_groups();
+    let campaign = asset_transport::campaign_zone_set();
     let rows = weapons.published_weapons().map(|weapon| {
         let id = weapon.wire_id();
-        let execution = weapons
-            .configuration_admission(id)
-            .map_err(|reason| format!("{reason:?}"))
-            .and_then(|()| compile_combat(weapons, weapon, rules, global_location, &mut refused));
+        let execution = match weapons.configuration_admission(id) {
+            Ok(()) => compile_combat(weapons, weapon, rules, global_location, &mut refused),
+            Err(reason) if id != 0 => {
+                refused.push(format!("{}({reason:?})", weapons.name_of(id)));
+                Err(format!("{reason:?}"))
+            }
+            Err(reason) => Err(format!("{reason:?}")),
+        };
         let setup = weapons.describe_configuration(id).and_then(|selection| {
             let family = selection.family.as_ref()?;
             Some(sim::WeaponSetup {
@@ -78,7 +83,11 @@ pub(crate) fn compile(
             penetration: weapons
                 .penetration_facts_of(id)
                 .unwrap_or(weapon_iw4::BulletPenFacts::default()),
-            script_name: weapons.script_name_of(id),
+            script_name: if campaign {
+                weapons.name_of(id).to_owned()
+            } else {
+                weapons.script_name_of(id)
+            },
             setup,
             world_model: (
                 weapons.world_model_of(id).unwrap_or("").to_owned(),
@@ -91,11 +100,17 @@ pub(crate) fn compile(
             equipment: weapons
                 .equipment_facts_of(id)
                 .unwrap_or(sim::EquipmentRuntimeFacts::default()),
+            ai_accuracy: weapons.ai_accuracy_of(id).copied().unwrap_or_default(),
+            silenced: weapons.silenced_of(id),
+            thermal_scope: weapons.thermal_scope_of(id),
         }
     });
-    let ranks = weapons
-        .rank_progression()
-        .map_err(|_| sim::SimWeaponContentRefusal::InvalidProgression)?;
+    let ranks = if campaign {
+        gamemode_iw4::progression::RankProgression::capture(&CampaignRanks)
+    } else {
+        weapons.rank_progression()
+    }
+    .map_err(|_| sim::SimWeaponContentRefusal::InvalidProgression)?;
     let content =
         sim::SimWeaponContent::compile(rows, aliases, pen_table, pen_table_loaded, ranks)?;
     if !refused.is_empty() {
@@ -110,6 +125,17 @@ pub(crate) fn compile(
         revision: weapons.revision(),
         content,
     })
+}
+
+struct CampaignRanks;
+
+impl gamemode_iw4::progression::ProgressionTable for CampaignRanks {
+    fn rows(&self) -> usize {
+        1
+    }
+    fn cell(&self, _: usize, _: usize) -> &str {
+        "0"
+    }
 }
 
 fn compile_combat(

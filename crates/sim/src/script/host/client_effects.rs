@@ -60,15 +60,18 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         if args.len() > 2 || !to.is_finite() || to < 0.0 || !seconds.is_finite() || seconds < 0.0 {
             return Err("setBlurForPlayer requires a nonnegative blur and transition time".into());
         }
-        let now = crate::level_time_ms(world.resource::<crate::step::StepRequest>().tick);
-        edit_view(world, client, |view| {
-            view.blur = Some(crate::ScriptBlur {
-                from: view.blur.map_or(0.0, |blur| blur.sample(now)),
-                to,
-                set_ms: now,
-                duration_ms: (seconds * 1000.0).round() as i32,
-            });
-        });
+        blur(world, client, to, (seconds * 1000.0).round() as i32);
+        Ok(Value::Undefined)
+    });
+    registry.register(Function, "setblur", |world, _, args| {
+        let to = float(args, 0)?;
+        let seconds = float(args, 1)?;
+        if !to.is_finite() || to < 0.0 || !seconds.is_finite() || seconds < 0.0 {
+            return Err("setBlur requires a nonnegative blur and transition time".into());
+        }
+        for client in FrameWorld::from_world(world).client_ids_sorted() {
+            blur(world, client.0, to, (seconds * 1000.0).round() as i32);
+        }
         Ok(Value::Undefined)
     });
     super::rumble::register(registry);
@@ -153,6 +156,18 @@ fn depth_of_field(args: &[Value]) -> Result<crate::ScriptDepthOfField, String> {
         near_blur,
         far_blur,
     })
+}
+
+pub(crate) fn blur(world: &mut World, client: u32, to: f32, duration_ms: i32) {
+    let now = crate::level_time_ms(world.resource::<crate::step::StepRequest>().tick);
+    edit_view(world, client, |view| {
+        view.blur = Some(crate::ScriptBlur {
+            from: view.blur.map_or(0.0, |blur| blur.sample(now)),
+            to,
+            set_ms: now,
+            duration_ms,
+        });
+    });
 }
 
 fn edit_view(world: &mut World, client: u32, edit: impl FnOnce(&mut crate::ViewEffects)) {

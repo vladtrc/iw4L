@@ -7,6 +7,8 @@ use sim::{ClientId, SimBrush};
 use crate::observation::ModeObjective;
 use crate::query::{HullTrace, QueryResult, QuerySubsystem, SightSample, WalkSample, WorldQuery};
 
+pub(crate) mod campaign;
+
 pub const NAV_SCHEMA: u32 = 9;
 pub const GRID_IN: f32 = 48.0;
 pub const SNAP_IN: f32 = 256.0;

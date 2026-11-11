@@ -130,6 +130,7 @@ impl Plugin for HudPlugin {
                             update_targetmap,
                             crate::damage_direction::update.in_set(frame::InMatch),
                             crate::menus::update_script_menus,
+                            crate::menus::sync_campaign_pause,
                             crate::connection_notice::update.in_set(frame::InMatch),
                             hud_stage_close::<7>,
                         )

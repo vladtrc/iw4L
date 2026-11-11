@@ -1,3 +1,5 @@
+pub(crate) mod campaign;
+
 use crate::damage::{DamageAttempt, DamageOutcome, DeathCommit};
 use crate::frame::FrameWorld;
 use crate::identities::DamageSource;
@@ -869,6 +871,7 @@ pub(crate) fn constrain_cmd(
     if controls.jump_disabled {
         cmd.buttons &= !buttons::JUMP;
     }
+    campaign::deny_stances(controls.denied, &mut cmd.buttons);
     if controls.weapons_disabled {
         cmd.buttons &= !(buttons::ATTACK | buttons::THROW | buttons::ADS | buttons::MELEE_CHARGE);
     }
