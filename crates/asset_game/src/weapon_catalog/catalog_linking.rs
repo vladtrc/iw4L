@@ -9,6 +9,11 @@ impl WeaponCatalog {
         self.capture_ns = Some(ns);
     }
 
+    pub fn retain(&mut self, mut keep: impl FnMut(crate::AssetNamespace, &str) -> bool) {
+        self.entries
+            .retain(|entry| keep(entry.namespace, &entry.name));
+    }
+
     pub fn capture_vehicle(&mut self, stream: &ZoneStream<'_>) {
         let Some((Some(name), turret)) = stream.vehicle() else {
             return;

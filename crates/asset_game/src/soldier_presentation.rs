@@ -316,11 +316,20 @@ impl SoldierPresentation {
         self: &Arc<Self>,
         hands: Option<(FamilyId, &str)>,
         secondary: bool,
+        level_hands: Option<&str>,
     ) -> Result<SoldierFpvPresentation, String> {
-        let hands = match &self.kit_hands {
-            Err(error) => return Err(error.clone()),
-            Ok(Some(hands)) => hands.clone(),
-            Ok(None) => {
+        let level = level_hands.and_then(|name| {
+            self.bind_hands(FpvHands::FromWeaponDef {
+                namespace: self.family,
+                name: name.to_owned(),
+            })
+            .ok()
+        });
+        let hands = match (&self.kit_hands, level) {
+            (Err(error), _) => return Err(error.clone()),
+            (_, Some(hands)) => hands,
+            (Ok(Some(hands)), None) => hands.clone(),
+            (Ok(None), None) => {
                 let (family, name) = hands.ok_or("soldier weapon hands missing")?;
                 self.bind_hands(FpvHands::FromWeaponDef {
                     namespace: family,

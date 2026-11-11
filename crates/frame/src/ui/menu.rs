@@ -82,7 +82,12 @@ pub enum UiMenuKey {
 pub struct AssetFamilies(pub u8);
 
 impl AssetFamilies {
+    pub const IW4: Self = Self(ContentFlags::IW4.0);
     pub const ALL: Self = Self(ContentFlags::KNOWN.0);
+
+    pub fn iw4() -> Self {
+        Self::IW4
+    }
     pub const SETTINGS: [(&'static str, &'static str, u8); 3] = [
         ("iw5", "sv_assets_iw5", ContentFlags::IW5.0),
         ("t5", "sv_assets_t5", ContentFlags::T5.0),

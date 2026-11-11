@@ -368,6 +368,7 @@ impl ZoneLane for Iw5Lane {
                     spawns: dm_spawns,
                     bodies: BodyMeshBuild::default(),
                     fpv_meshes,
+                    world_weapons: Default::default(),
                     xanims: XAnimBuild::default(),
                     report,
                     gaps: vec![LaneGap {
@@ -578,6 +579,7 @@ impl ZoneLane for Iw5Lane {
                         spawns: dm_spawns,
                         bodies,
                         fpv_meshes,
+                        world_weapons: Default::default(),
                         xanims: map_xanims,
                         facts: crate::MapFacts {
                             script_sound: script_sound.clone(),
@@ -613,6 +615,7 @@ impl ZoneLane for Iw5Lane {
                         spawns: dm_spawns,
                         bodies,
                         fpv_meshes,
+                        world_weapons: Default::default(),
                         xanims: map_xanims,
                         report,
                         gaps: vec![LaneGap {

@@ -85,6 +85,15 @@ fn compile_named_tree(
     Ok(Arc::new(definition))
 }
 
+pub fn compile_script_tree(
+    atr: &[u8],
+    names: &HashSet<String>,
+) -> Result<Arc<CompiledAnimTreeDefinition>, AtrCompileError> {
+    let mut ignored = 0usize;
+    let children = parse_atr(atr, names, &mut ignored)?;
+    Ok(Arc::new(flatten_tree(children, ignored, names.len())?))
+}
+
 fn harvest_script_anim_names(script: &[u8], names: &mut HashSet<String>) {
     let mut parser = AtrParser::new(script);
     loop {
@@ -146,6 +155,13 @@ fn parse_internal(
             loop {
                 let token = parser.parse(true);
                 if parser.hit_eof && token.is_empty() {
+                    if let Some(work) = current.take() {
+                        if !work.ignore {
+                            children.push(work.into_leaf());
+                        } else {
+                            *ignored += 1;
+                        }
+                    }
                     finish_parent(&mut children, include_parent, loop_sync);
                     return Ok((children, true));
                 }

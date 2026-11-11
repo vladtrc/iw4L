@@ -97,7 +97,16 @@ impl FpvHands {
                 .names_in(map_ns)
                 .filter(|n| crate::is_arms_model(n))
                 .collect();
-            if let Some(name) = crate::arms_for_body(&kit.body, &arm_names) {
+            let default = game_default_hands_name(map_ns);
+            let only = kit
+                .body
+                .starts_with("body_")
+                .then(|| match arm_names.as_slice() {
+                    [only] => Some(only.to_string()),
+                    names => names.contains(&default).then(|| default.to_owned()),
+                });
+            let only = only.flatten();
+            if let Some(name) = crate::arms_for_body(&kit.body, &arm_names).or(only) {
                 if catalog.contains(map_ns, &name) {
                     return Self::FromKit {
                         namespace: map_ns,
