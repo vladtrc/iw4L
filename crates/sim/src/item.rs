@@ -374,6 +374,46 @@ pub(crate) fn drop_weapon(
     Some(number)
 }
 
+pub(crate) fn place_weapon(
+    world: &mut FrameWorld,
+    tick: Tick,
+    weapon: u32,
+    origin: [f32; 3],
+    angles: [f32; 3],
+) -> Option<i32> {
+    let facts = world.combat_facts_for(weapon)?;
+    let clip = facts.clip_size.max(0);
+    let stock = (facts.start_ammo - clip).max(0);
+    let pos = Trajectory {
+        tr_type: TR_GRAVITY,
+        tr_time: crate::corpse::level_time_ms(tick),
+        tr_duration: 0,
+        tr_delta: [0.0; 3],
+        tr_base: origin,
+    };
+    let apos = Trajectory {
+        tr_type: TR_STATIONARY,
+        tr_time: 0,
+        tr_duration: 0,
+        tr_delta: [0.0; 3],
+        tr_base: angles,
+    };
+    let number = push_dropped_item(
+        world,
+        weapon,
+        origin,
+        pos,
+        apos,
+        ENTITYNUM_NONE,
+        clip,
+        0,
+        stock,
+        true,
+        false,
+    );
+    (number != ENTITYNUM_NONE).then_some(number)
+}
+
 pub(crate) fn drop_scavenger_item(
     world: &mut FrameWorld,
     tick: Tick,

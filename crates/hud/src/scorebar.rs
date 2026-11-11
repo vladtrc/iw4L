@@ -299,7 +299,7 @@ pub(crate) fn update_scorebar(
     if !surface.is_ready() {
         return;
     }
-    if view.is_some_and(|v| v.in_killcam()) {
+    if view.is_some_and(|v| v.in_killcam()) || asset_transport::campaign_zone_set() {
         hide(&mut pass);
         return;
     }

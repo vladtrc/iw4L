@@ -2080,10 +2080,20 @@ fn publish_weapon_fire(
     ),
     mut cursor: ResMut<FxJournalCursor>,
     mut combat: ResMut<CombatFxDump>,
+    (players, mut demand): (
+        Query<(), With<render_anim::RemoteFxBolts>>,
+        ResMut<render_anim::ScriptModelBoltDemand>,
+    ),
 ) {
     let weapons = weapons
         .as_deref()
         .and_then(|weapons| weapons.for_event(fire.event.world).ok());
+    if fire.event.payload.event_parm >= 0
+        && !players.contains(fire.entity)
+        && let Ok(entnum) = u16::try_from(fire.event.payload.number)
+    {
+        demand.insert(entnum);
+    }
     pending.write(WeaponFireFx(*fire));
     let eyes = match *view {
         ViewSubject::Seat {
@@ -2236,6 +2246,7 @@ fn drain_weapon_fire_fx(
         ResMut<super::flame::FlameStreams>,
     ),
     fx_world: FxSceneAccess,
+    poses: Option<Res<crate::adapters::anim::dobj_pose::HostDObjPoseFrame>>,
 ) {
     let (view, settings) = view_settings;
     for fire in pending.read().map(|record| record.0) {
@@ -2299,10 +2310,23 @@ fn drain_weapon_fire_fx(
             .ok()
             .filter(|(runtime, _)| runtime.in_next_snap())
             .map(|(_, bolts)| bolts);
+        let script_bolt = || {
+            let entnum = u32::try_from(fire.event.payload.number).ok()?;
+            let bone = u16::try_from(fire.event.payload.event_parm).ok()?;
+            let resolved = poses.as_deref()?.resolve_live_bolt(entnum, bone)?;
+            Some(fx::FxBoltTarget {
+                dobj: entnum,
+                bone,
+                centity_teleport: resolved.centity_teleport,
+                orientation: resolved.orientation?,
+            })
+        };
         let flash_target = if player_view {
             fpv_bolts.flash[hand]
-        } else {
+        } else if world_bolts.contains(fire.entity) {
             remote_bolts.and_then(|bolts| bolts.flash)
+        } else {
+            script_bolt()
         };
         let brass_target = if player_view {
             fpv_bolts.brass[hand]

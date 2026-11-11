@@ -101,6 +101,7 @@ impl WeaponBuild {
         &mut self,
         fpv: &crate::FpvMeshCatalog,
         soldiers: &crate::SoldierPresentations,
+        level_hands: Option<&str>,
     ) {
         self.registry.alternate_fpv.clear();
         for row in &mut self.registry.rows {
@@ -128,7 +129,11 @@ impl WeaponBuild {
                         .side(side == 1)
                         .map_err(str::to_owned)
                         .and_then(|soldier| {
-                            soldier.connect_weapon(hands, row.secondary_gun_xmodel.is_some())
+                            soldier.connect_weapon(
+                                hands,
+                                row.secondary_gun_xmodel.is_some(),
+                                level_hands,
+                            )
                         }),
                 )
             });

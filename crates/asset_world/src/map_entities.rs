@@ -357,7 +357,11 @@ pub fn dm_spawn_points(s: &ZoneStream<'_>) -> Vec<SpawnPoint> {
     let Some(text) = entity_string(s) else {
         return Vec::new();
     };
-    parse_spawn_points(text, MP_SPAWN_CLASSNAMES)
+    let spawns = parse_spawn_points(text, MP_SPAWN_CLASSNAMES);
+    if !spawns.is_empty() {
+        return spawns;
+    }
+    parse_spawn_points(text, &["info_player_start"])
 }
 
 pub fn minimap_corners(s: &ZoneStream<'_>) -> Option<MinimapCorners> {

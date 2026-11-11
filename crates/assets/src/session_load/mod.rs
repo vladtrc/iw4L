@@ -36,12 +36,12 @@ use common_cache::*;
 use common_walks::*;
 use match_walk::*;
 
-pub use common_cache::{CommonKey, CommonSet, ShellCommon, load_shell_common};
+pub use common_cache::{CommonKey, CommonSet, ShellCommon, forget_common, load_shell_common};
 pub use common_walks::{
     MatchMaterialSeed, apply_match_material_map, load_match_material_catalog,
     load_match_material_seed,
 };
-pub use resident_map::load_prepared_match;
+pub use resident_map::{clear_resident_map, load_prepared_match};
 
 static PROCESS_CPUS: std::sync::OnceLock<Vec<usize>> = std::sync::OnceLock::new();
 
@@ -187,6 +187,7 @@ pub struct PreparedMatch {
     pub sound: Option<Result<asset_audio::SoundCatalog, String>>,
     pub sound_gaps: usize,
     pub script_sound_aliases: Option<std::collections::BTreeMap<String, Option<bool>>>,
+    pub script_sound_length: Option<asset_audio::ScriptSoundLength>,
 }
 
 pub enum MatchLoadOutcome {

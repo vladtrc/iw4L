@@ -26,6 +26,13 @@ impl Parser {
             Ok(first.to_ascii_lowercase())
         }
     }
+    pub(super) fn child_invocation(&mut self, method: bool) -> Result<(), Fault> {
+        self.invocation(method, true)?;
+        let (location, spawn) = self.code.pop().unwrap();
+        self.code.push((location.clone(), Op::ChildThread));
+        self.code.push((location, spawn));
+        Ok(())
+    }
     pub(super) fn invocation(&mut self, method: bool, spawn: bool) -> Result<(), Fault> {
         let location = self.location();
         if self.eat("[") {

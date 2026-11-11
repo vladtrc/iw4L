@@ -10,6 +10,8 @@ use crate::world::ClientId;
 use bevy_ecs::prelude::World;
 use glam::Vec3;
 
+pub(crate) mod campaign;
+
 const TURN_RATE_DEG_PER_S: f32 = 360.0;
 const SCAN_RATE_DEG_PER_S: f32 = 30.0;
 const ON_TARGET_DEGREES: f32 = 2.0;
@@ -378,19 +380,27 @@ fn acquire(world: &mut World, object: u64, turret: &Turret, from: [f32; 3]) -> O
         .filter(|(_, slot)| &*slot.sessionstate == "playing")
         .map(|(client, slot)| (*client, slot.object))
         .collect();
+    let mut targets: Vec<(u64, Vec3)> = {
+        let frame = FrameWorld::from_world(world);
+        candidates
+            .into_iter()
+            .filter_map(|(client, player)| {
+                let ps = frame.player(ClientId(client))?;
+                (ps.health > 0).then(|| {
+                    (
+                        player,
+                        Vec3::from_array(ps.origin) + Vec3::Z * TARGET_HEIGHT,
+                    )
+                })
+            })
+            .collect()
+    };
+    targets.extend(campaign::sentient_targets(world, turret));
     let mut best: Option<(f32, u64, Vec3)> = None;
-    for (client, player) in candidates {
-        let alive = {
-            let frame = FrameWorld::from_world(world);
-            frame
-                .player(ClientId(client))
-                .and_then(|ps| (ps.health > 0).then_some(ps.origin))
-        };
-        let Some(origin) = alive else { continue };
+    for (player, at) in targets {
         if !hostile(world, turret, player) {
             continue;
         }
-        let at = Vec3::from_array(origin) + Vec3::Z * TARGET_HEIGHT;
         let delta = at - Vec3::from_array(from);
         let distance = delta.length();
         if distance > range || best.is_some_and(|(d, ..)| d <= distance) {
@@ -408,6 +418,9 @@ fn acquire(world: &mut World, object: u64, turret: &Turret, from: [f32; 3]) -> O
 }
 
 pub(crate) fn advance(world: &mut World) {
+    campaign::player_turrets(world);
+    campaign::gunner_turrets(world);
+    campaign::scripted_fire(world);
     let objects: Vec<u64> = world
         .resource::<RoundScript>()
         .engine
@@ -438,6 +451,11 @@ pub(crate) fn advance(world: &mut World) {
         let active = !turret.carried && &*turret.mode != "sentry_offline";
         let found = if active {
             acquire(world, object, &turret, from)
+        } else {
+            None
+        };
+        let found = if active {
+            campaign::suppression(world, object, from, found)
         } else {
             None
         };
@@ -522,7 +540,8 @@ fn shoot(world: &mut World, object: u64) {
             .and_then(|o| runtime.player_client(o))
             .map(ClientId)
     };
-    fire_bullet(world, object, from, turret.aim, turret.weapon, attacker);
+    let aim = campaign::spread(world, object, campaign::AI_SPREAD, from, turret.aim);
+    fire_bullet(world, object, from, aim, turret.weapon, attacker);
 }
 
 pub(crate) fn fire_bullet(
@@ -533,6 +552,7 @@ pub(crate) fn fire_bullet(
     weapon: u32,
     attacker: Option<ClientId>,
 ) {
+    campaign::fire_event(world, object, from, weapon);
     let range = weapon_range(world, weapon);
     let end = (Vec3::from_array(from) + Vec3::from_array(dir) * range).to_array();
     let ignore = ignore_self(world, object);

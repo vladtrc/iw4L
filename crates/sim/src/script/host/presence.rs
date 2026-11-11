@@ -31,6 +31,7 @@ struct Wanted {
     solid: bool,
     part_ops: Vec<(Arc<str>, bool)>,
     anim_op: Option<Option<Arc<str>>>,
+    tree: Option<Option<xmodel_runtime::XAnimTreeSnapshot>>,
 }
 
 fn near(a: [f32; 3], b: [f32; 3]) -> bool {
@@ -105,7 +106,48 @@ pub(crate) fn spawn_presence(world: &mut World, origin: [f32; 3]) -> Result<Scri
 /// native or field store made earlier in the same tick.
 pub(crate) fn settled(world: &mut World) -> FrameWorld<'_> {
     settle_collision(world);
+    settle_models(world);
     FrameWorld::from_world(world)
+}
+
+fn settle_models(world: &mut World) {
+    let mut runtime = world.resource_mut::<RoundScript>();
+    if runtime.new_models.is_empty() {
+        return;
+    }
+    let placed: Vec<(u64, ScriptModelId)> = std::mem::take(&mut runtime.new_models)
+        .into_iter()
+        .filter_map(|id| Some((id, runtime.entities.get(&id)?.presence?)))
+        .collect();
+    let wanted: Vec<(ScriptModelId, Arc<str>, [f32; 3], [f32; 3])> = placed
+        .into_iter()
+        .filter_map(|(object, presence)| {
+            let model = model_field(&mut runtime, object)?;
+            let origin = vector(&mut runtime, object, "origin");
+            let angles = vector(&mut runtime, object, "angles");
+            Some((presence, model, origin, angles))
+        })
+        .collect();
+    if wanted.is_empty() {
+        return;
+    }
+    let mut frame = FrameWorld::from_world(world);
+    for (presence, model, origin, angles) in wanted {
+        let capability = frame.model_capability(&model).flatten();
+        let Some(row) = frame.collision_owner_mut(presence) else {
+            continue;
+        };
+        match row.dobj.as_mut() {
+            Some(dobj) if dobj.current_model == *model => {}
+            Some(dobj) => dobj.replace_model(&model, capability),
+            None => {
+                row.dobj = Some(AuthorityDObjState::at_pose(
+                    &model, capability, origin, angles,
+                ));
+                row.followed_pose = Some((origin, angles));
+            }
+        }
+    }
 }
 
 /// Collision rows only. Networked mover state is left to `present`: posing a
@@ -220,6 +262,7 @@ fn publish_killcam_cameras(world: &mut World) {
 }
 
 fn present(world: &mut World, now: i32) {
+    world.resource_mut::<RoundScript>().new_models.clear();
     let retired = std::mem::take(&mut world.resource_mut::<RoundScript>().retired_presence);
     let wanted = collect_wanted(world);
     if retired.is_empty() && wanted.is_empty() {
@@ -283,6 +326,13 @@ fn present(world: &mut World, now: i32) {
         let reshaped = want.model != shown.model || want.attachments != shown.attachments;
         if reshaped || !want.part_ops.is_empty() || want.anim_op.is_some() {
             present_model(&mut frame, &want);
+        }
+        if let Some(tree) = &want.tree
+            && let Some(dobj) = frame
+                .collision_owner_mut(want.presence)
+                .and_then(|row| row.dobj.as_mut())
+        {
+            dobj.set_script_tree(tree.clone());
         }
         updates.push((
             want.object,
@@ -352,7 +402,56 @@ fn with_tag_dobj<T>(
     ))
 }
 
+fn tag_world_from_anim(world: &mut World, object: u64, tag: &str) -> Option<glam::Mat4> {
+    let (node, scripted, anim_time) = {
+        let runtime = world.resource::<RoundScript>();
+        let entity = runtime.entities.get(&object)?;
+        let anim = entity.anim.as_ref()?;
+        let scripted = anim.scripted.as_ref()?;
+        (scripted.node, scripted.clone(), anim.time(scripted.node))
+    };
+    let clip = {
+        let runtime = world.resource::<RoundScript>();
+        let entity = runtime.entities.get(&object)?;
+        let anim = entity.anim.as_ref()?;
+        let clip_name = anim.node_clip_name(node)?;
+        runtime.campaign.anim_library.clip(clip_name)?
+    };
+    let track_idx = clip.tracks.iter().position(|t| &*t.name == tag)?;
+    let sampled = clip.sample_track(track_idx, anim_time)?;
+    let axis = math_iw4::angles_to_axis(scripted.angles);
+    let base_rot = glam::Quat::from_array(fx_iw4::axis_to_quat(axis));
+    let tag_trans = glam::Vec3::from(sampled.translation.unwrap_or([0.0; 3]));
+    let tag_rot = glam::Quat::from_array(sampled.rotation.unwrap_or([0.0, 0.0, 0.0, 1.0]));
+
+    let world_trans = glam::Vec3::from(scripted.origin) + base_rot * tag_trans;
+    let world_rot = (base_rot * tag_rot).normalize();
+    Some(glam::Mat4::from_rotation_translation(
+        world_rot,
+        world_trans,
+    ))
+}
+
 fn tag_lookup(world: &mut World, object: u64, tag: &str) -> Option<Option<[f32; 3]>> {
+    if let Some(matrix) = tag_world_from_anim(world, object, tag) {
+        let (scripted_origin, scripted_rot) = {
+            let runtime = world.resource::<RoundScript>();
+            let entity = runtime.entities.get(&object);
+            let scripted = entity
+                .and_then(|e| e.anim.as_ref())
+                .and_then(|a| a.scripted.as_ref());
+            if let Some(scripted) = scripted {
+                let axis = math_iw4::angles_to_axis(scripted.angles);
+                let rot = glam::Quat::from_array(fx_iw4::axis_to_quat(axis));
+                (glam::Vec3::from(scripted.origin), rot)
+            } else {
+                (glam::Vec3::ZERO, glam::Quat::IDENTITY)
+            }
+        };
+        let world_pos = matrix.w_axis.truncate();
+        let local_pos = scripted_rot.inverse() * (world_pos - scripted_origin);
+        return Some(Some(local_pos.to_array()));
+    }
     with_tag_dobj(world, object, |dobj| {
         Some(dobj.tag_world_pose(tag).map(|(at, _)| {
             dobj.world_from_model
@@ -368,7 +467,8 @@ pub(crate) fn tag_world(
     object: u64,
     tag: &str,
 ) -> Option<([f32; 3], [[f32; 3]; 3])> {
-    let matrix = with_tag_dobj(world, object, |dobj| dobj.tag_world_matrix(tag))?;
+    let matrix = tag_world_from_anim(world, object, tag)
+        .or_else(|| with_tag_dobj(world, object, |dobj| dobj.tag_world_matrix(tag)))?;
     let axis = |v: glam::Vec4| v.truncate().normalize_or_zero().to_array();
     Some((
         matrix.w_axis.truncate().to_array(),
@@ -424,10 +524,12 @@ fn collect_wanted(world: &mut World) -> Vec<Wanted> {
         let entity = runtime.entities.get_mut(&object).unwrap();
         let part_ops = std::mem::take(&mut entity.part_ops);
         let anim_op = entity.anim_op.take();
+        let tree = entity.anim.as_ref().map(|anim| anim.snapshot());
         let attachments = entity.attachments.clone();
         let collision_only = matches!(entity.kind, EntityKind::Missile(_));
         let unchanged = part_ops.is_empty()
             && anim_op.is_none()
+            && tree.is_none()
             && runtime.shown.get(&object).is_some_and(|shown| {
                 !shown.moving
                     && shown.hidden == hidden
@@ -454,6 +556,7 @@ fn collect_wanted(world: &mut World) -> Vec<Wanted> {
             solid,
             part_ops,
             anim_op,
+            tree,
         });
     }
     wanted
@@ -465,6 +568,11 @@ fn present_model(frame: &mut FrameWorld, want: &Wanted) {
         .as_deref()
         .and_then(|model| frame.model_capability(model))
         .flatten();
+    let attached: Vec<_> = want
+        .attachments
+        .iter()
+        .map(|(model, _)| frame.model_capability(model).flatten())
+        .collect();
     let anim = want
         .anim_op
         .as_ref()
@@ -492,10 +600,11 @@ fn present_model(frame: &mut FrameWorld, want: &Wanted) {
     let Some(dobj) = row.dobj.as_mut() else {
         return;
     };
-    let attachments: Vec<(&str, &str)> = want
+    let attachments: Vec<_> = want
         .attachments
         .iter()
-        .map(|(model, tag)| (&**model, &**tag))
+        .zip(attached)
+        .map(|((model, tag), capability)| (&**model, &**tag, capability))
         .collect();
     dobj.set_attachments(&attachments);
     for (tag, hidden) in &want.part_ops {

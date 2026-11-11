@@ -2069,6 +2069,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "bink"
+version = "0.1.0"
+
+[[package]]
 name = "binrw"
 version = "0.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2413,6 +2417,7 @@ dependencies = [
  "assets",
  "audio",
  "bevy",
+ "bink",
  "bots",
  "diag",
  "entity_iw4",
@@ -4501,6 +4506,7 @@ name = "net"
 version = "0.1.0"
 dependencies = [
  "anim_iw4",
+ "asset_transport",
  "bevy",
  "diag",
  "entity_iw4",
@@ -6231,6 +6237,7 @@ dependencies = [
  "assets",
  "audio",
  "bevy",
+ "bink",
  "clipmap_iw4",
  "diag",
  "frame",

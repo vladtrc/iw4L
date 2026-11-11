@@ -12,7 +12,7 @@ Bots submit `TickInput.cmds` like players — [`SIM-STEP.md`](SIM-STEP.md).
 | `observation.rs` / `memory.rs` | what a bot may know, and for how long |
 | `sensor.rs` | visibility probes and the rotation that spends them |
 | `controller.rs` / `task.rs` / `intent.rs` | scores, task choice, stages |
-| `nav.rs` | the baked graph, A\*, resumable route requests |
+| `nav.rs` | the baked graph, A\*, resumable route requests; SP actor routes over path nodes |
 | `query.rs` | the shared collision budget every subsystem draws on |
 | `weapon.rs` / `motor.rs` | the weapon channel; aim and movement |
 

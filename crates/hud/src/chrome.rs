@@ -1023,7 +1023,7 @@ fn push_stretch(
     }
     let mut applied =
         surface.apply_rect(x, y, w, h, rect.horz_align as i32, rect.vert_align as i32);
-    if item.cover {
+    if item.cover && rect.w.abs() >= 600.0 {
         let rest = surface.apply_rect(
             rect.x,
             rect.y,
@@ -1047,7 +1047,13 @@ fn push_stretch(
         Ok(key) if key.kind == asset_core::AssetKind::Material => (key.namespace, key.name),
         _ => (crate::images::HUD_CHROME_NAMESPACE, material),
     };
-    let [s0, t0, s1, t1] = atlas_frame_st(catalog, &material, time_ms);
+    let [mut s0, mut t0, mut s1, mut t1] = atlas_frame_st(catalog, &material, time_ms);
+    if let Some([u0, v0, u1, v1]) = item.tex_coords {
+        s0 = u0;
+        t0 = v0;
+        s1 = u1;
+        t1 = v1;
+    }
     list.cmds.push(Draw2dCmd {
         material_namespace,
         x: applied.x,

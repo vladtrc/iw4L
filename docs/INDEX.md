@@ -35,3 +35,4 @@ game. Keep them this short: nobody opens a long file twice.
 | [`GSC-POSTFX.md`](GSC-POSTFX.md) | script vision, color correction, blur, DoF and bloom | authoring or debugging GSC post effects |
 | [`KILLSTREAKS.md`](KILLSTREAKS.md) | EMP ownership and sentry script/engine boundaries, including the missing visible turret aim pose | checking killstreak damage or sentry rotation |
 | [`BOTS.md`](BOTS.md) | host AI: the per-tick pipeline, what a probe that never ran may not claim, the shared query budget, resumable routes, fighting from a position | bot decisions, bot movement, "why is it standing there" |
+| [`SP.md`](SP.md) | campaign: what parses, where MP is hardwired, the slice plan, and how the `mw2-recompiled` reference is used | starting or continuing singleplayer work |

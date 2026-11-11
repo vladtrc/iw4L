@@ -112,6 +112,10 @@ pub(crate) fn update_compass(
     view: Option<Res<frame::ViewSubject>>,
     local_vars: Res<crate::playercard::UiLocalVars>,
     hud_input: Option<Res<frame::HudInputView>>,
+    (cameras, strings): (
+        Query<(&Camera, &GlobalTransform), With<Camera3d>>,
+        Option<Res<assets::PreparedLocalizedStrings>>,
+    ),
 ) {
     take_fire_pings(
         &mut ping_bus,
@@ -305,8 +309,11 @@ pub(crate) fn update_compass(
             .unwrap_or(0);
         let team =
             gamemode_iw4::Team::from_packed_u8(team as u8).unwrap_or(gamemode_iw4::Team::Free);
+        let campaign = !snapshot.meta.objectives.list.is_empty();
         let objectives = snapshot.meta.objectives.compass.iter().filter(|o| {
-            o.shows_to(team, local.0.0) && !o.icon.is_empty() && (team_mode || o.viewer.is_some())
+            o.shows_to(team, local.0.0)
+                && !o.icon.is_empty()
+                && (team_mode || o.viewer.is_some() || campaign)
         });
         let size = map_item.rect.h * COMPASS_SIZE_DEFAULT;
         for objective in objectives {
@@ -354,6 +361,19 @@ pub(crate) fn update_compass(
             fonts.insert(crate::font_overlay::HUD_SMALL_FONT.to_owned(), font);
             gaps.clear(HudGap::CompassObjectives);
         }
+    }
+    if let (Some(snapshot), Some(camera)) = (
+        presented.snapshot(),
+        cameras.iter().find(|(c, _)| c.is_active),
+    ) {
+        list.cmds.extend(crate::objective_markers::marker_cmds(
+            snapshot,
+            &surface,
+            camera,
+            catalog.as_deref(),
+            strings.as_deref(),
+            &mut fonts,
+        ));
     }
     list.cmds.extend(enemy_ping_cmds(
         &surface,

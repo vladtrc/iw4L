@@ -34,6 +34,9 @@ pub(crate) struct RoundScript {
     pub(crate) suspended_frames: usize,
     /// Endons that fired on a suspended thread; applied when its child yields.
     pub(crate) pending_unwinds: Vec<(u64, usize)>,
+    pub(crate) parents: BTreeMap<u64, u64>,
+    pub(crate) orphans: Vec<u64>,
+    pub(crate) child_spawn: bool,
     pub(crate) entities: BTreeMap<u64, host::entities::ScriptEntity>,
     pub(crate) hud_slots: BTreeMap<u64, usize>,
     pub(crate) next_entity_number: i32,
@@ -57,6 +60,7 @@ pub(crate) struct RoundScript {
     pub(crate) exit_level: bool,
     pub(crate) shown: BTreeMap<u64, host::presence::Shown>,
     pub(crate) retired_presence: Vec<(crate::ScriptModelId, bool)>,
+    pub(crate) new_models: Vec<u64>,
     pub(crate) blasts: Vec<host::entity_damage::ScriptBlast>,
     pub(crate) hits: Vec<host::entity_damage::ScriptHit>,
     pub(crate) use_held: std::collections::BTreeSet<u32>,
@@ -75,6 +79,7 @@ pub(crate) struct RoundScript {
     pub(crate) use_selected: BTreeMap<u32, u64>,
     pub(crate) t5: host::natives::t5::T5State,
     pub(crate) restart: Option<Arc<host::restart::RestartPlan>>,
+    pub(crate) campaign: super::campaign::CampaignState,
     pub(crate) finished: bool,
     pub(crate) pending_restart: Option<bool>,
     pub(crate) restored_pers: BTreeMap<u32, host::restart::Detached>,
@@ -150,6 +155,11 @@ impl RoundScript {
             restart: Default::default(),
             finished: Default::default(),
             pending_restart: Default::default(),
+            parents: Default::default(),
+            orphans: Default::default(),
+            child_spawn: Default::default(),
+            new_models: Default::default(),
+            campaign: Default::default(),
             restored_pers: Default::default(),
         }
     }
@@ -229,4 +239,5 @@ pub(crate) struct MatchScript {
     pub(crate) weapon_bridge: BTreeMap<u32, Vec<(u32, u32)>>,
     pub(crate) next_spawned_presence: u32,
     pub(crate) match_data: host::match_data::MatchData,
+    pub(crate) sp_profile: BTreeMap<String, Value>,
 }

@@ -19,7 +19,13 @@ pub(crate) fn apply_time_scale(
     inputs: TimeScaleInputs,
     fixed: Res<Time<Fixed>>,
     mut time: ResMut<Time<Virtual>>,
+    paused: Option<Res<frame::GamePaused>>,
 ) {
+    match (paused.is_some(), time.is_paused()) {
+        (true, false) => time.pause(),
+        (false, true) => time.unpause(),
+        _ => {}
+    }
     let TimeScaleInputs {
         authority,
         authority_clock,

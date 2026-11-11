@@ -26,6 +26,12 @@ struct ResidentMap {
 
 static RESIDENT_MAP: std::sync::Mutex<Option<ResidentMap>> = std::sync::Mutex::new(None);
 
+pub fn clear_resident_map() {
+    *RESIDENT_MAP
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner()) = None;
+}
+
 fn resident_copy(zone: &ZoneStamp, key: &CommonKey) -> Option<PreparedMatch> {
     let common = landed_common(key)?;
     let slot = RESIDENT_MAP
@@ -75,6 +81,10 @@ pub async fn load_prepared_match(
             prepared.report.extend(progress.timing_report());
             return MatchLoadOutcome::Ready(prepared);
         }
+    }
+    if asset_transport::campaign_zone_set() {
+        clear_resident_map();
+        forget_common();
     }
     let (outcome, common) =
         walk_prepared_match(zone_ff, common_mp, progress.clone(), families).await;

@@ -354,7 +354,7 @@ impl PresentedSnapshot {
         if self
             .snapshot()
             .and_then(|snapshot| snapshot.meta.for_client(id))
-            .is_some_and(|meta| meta.controls.weapons_disabled)
+            .is_some_and(|meta| meta.controls.weapons_disabled || meta.controls.viewmodel_hidden)
         {
             return None;
         }

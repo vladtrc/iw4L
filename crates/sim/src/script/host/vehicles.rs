@@ -5,6 +5,8 @@ use crate::script::runtime::{raise, run_now};
 use crate::script::{NativeRegistry, RoundScript, Value};
 use bevy_ecs::prelude::World;
 
+pub(super) mod campaign;
+
 pub(crate) const DAMAGE: &str = "maps/mp/gametypes/_callbacksetup::codecallback_vehicledamage";
 
 const VEHICLE_SLOTS: u8 = 8;
@@ -58,6 +60,8 @@ pub(crate) struct Heli {
     on_target: bool,
     gunner: Option<u32>,
     next_fire_ms: i32,
+    ground: bool,
+    path_speed: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -134,6 +138,8 @@ impl Default for Heli {
             on_target: false,
             gunner: None,
             next_fire_ms: 0,
+            ground: false,
+            path_speed: 0.0,
         }
     }
 }
@@ -261,11 +267,17 @@ fn fire_weapon(world: &mut World, receiver: &Value, args: &[Value]) -> Result<Va
         super::turrets::fire_bullet(world, id, from, dir, weapon, owner.map(crate::ClientId));
         return Ok(Value::Undefined);
     }
-    let owner = owner
-        .filter(|client| world.resource::<RoundScript>().players.contains_key(client))
+    let player =
+        owner.filter(|client| world.resource::<RoundScript>().players.contains_key(client));
+    let owner = player
+        .or_else(|| super::weapons::campaign::owner(world).map(|client| client.0))
         .ok_or("vehicle owner is not connected")?;
     let end = std::array::from_fn(|i| from[i] + dir[i] * 1000.0);
-    super::weapons::launch(world, crate::ClientId(owner), weapon, from, end)
+    let missile = super::weapons::launch(world, crate::ClientId(owner), weapon, from, end)?;
+    if player.is_none() {
+        super::weapons::campaign::mark_ownerless(world, &missile);
+    }
+    Ok(missile)
 }
 
 fn vec_field(runtime: &mut RoundScript, object: u64, name: &str) -> [f32; 3] {
@@ -283,7 +295,7 @@ fn spawn_vehicle(
     model: &str,
     flight: Option<Heli>,
 ) -> Result<Value, String> {
-    let slot = if flight.is_some() {
+    let slot = if flight.is_some() && !campaign::sp_level(world) {
         let runtime = world.resource::<RoundScript>();
         Some(
             (0..VEHICLE_SLOTS)
@@ -306,11 +318,12 @@ fn spawn_vehicle(
     runtime.set_object_field(id, "origin", Value::Vector(origin));
     runtime.set_object_field(id, "angles", Value::Vector(angles));
     runtime.set_object_field(id, "model", Value::string(model));
+    runtime.new_models.push(id);
     let entity = runtime.entities.get_mut(&id).unwrap();
     entity.presence = Some(presence);
     entity.can_damage = true;
     if let Some(mut flight) = flight {
-        flight.slot = slot.unwrap();
+        flight.slot = slot.unwrap_or(u8::MAX);
         flight.heading = math_iw4::angle_vectors(angles).0;
         runtime.set_object_field(id, "veh_speed", Value::Float(0.0));
         runtime.vehicles.insert(id, flight);
@@ -501,10 +514,12 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         heli(world, receiver)?;
         let object = super::natives::engine::entity_id(world, arg(args, 0)?)?;
         node(&mut world.resource_mut::<RoundScript>(), object)?;
+        let ground = campaign::sp_level(world);
         let vehicle = heli(world, receiver)?;
         vehicle.path_node = Some(object);
         vehicle.path_running = false;
         vehicle.goal = None;
+        vehicle.ground |= ground;
         Ok(Value::Undefined)
     });
     registry.register(Method, "startpath", |world, receiver, args| {
@@ -514,14 +529,29 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
             None => attached.ok_or("vehicle has no attached path")?,
         };
         let origin = node(&mut world.resource_mut::<RoundScript>(), object)?;
+        let (speed, accel, decel) = {
+            let mut runtime = world.resource_mut::<RoundScript>();
+            (
+                campaign::node_speed(&mut runtime, object),
+                campaign::node_accel(&mut runtime, object),
+                campaign::node_decel(&mut runtime, object),
+            )
+        };
         let vehicle = heli(world, receiver)?;
         vehicle.path_node = Some(object);
         vehicle.path_running = true;
-        set_goal(vehicle, origin, true);
+        let ground = vehicle.ground;
+        if ground && let Some(speed) = speed {
+            campaign::take_speed(vehicle, speed, accel, decel);
+        }
+        set_goal(vehicle, origin, !ground);
         Ok(Value::Undefined)
     });
     registry.register(Method, "vehicle_dospawn", |world, receiver, args| {
         let object = super::natives::engine::entity_id(world, receiver)?;
+        if args.is_empty() {
+            return campaign::spawn_from_spawner(world, object);
+        }
         let definition = string(args, 0)?;
         let owner = world
             .resource::<RoundScript>()
@@ -1124,7 +1154,11 @@ pub(crate) fn advance(world: &mut World) {
             [heli.yaw_speed, heli.yaw_accel, heli.yaw_decel],
             heli.yaw_overshoot,
         );
-        let [pitch_target, roll_target] = body_tilt(heli, velocity, angles[1], before, goal_left);
+        let [pitch_target, roll_target] = if heli.ground {
+            [math_iw4::vect_to_angles(heli.heading)[0], 0.0]
+        } else {
+            body_tilt(heli, velocity, angles[1], before, goal_left)
+        };
         let ratio = if heli.def_accel > 0.0 {
             (heli.accel / heli.def_accel).clamp(0.0, 1.0)
         } else {
@@ -1166,19 +1200,45 @@ pub(crate) fn advance(world: &mut World) {
             .flatten();
         let speed = heli.speed;
         if let Some(reached) = reached_node {
-            let successor = next_node(&mut runtime, reached).and_then(|next| match next {
+            let next = match campaign::take_switch(&mut runtime, id, reached) {
+                Some(to) => Ok(Some(to)),
+                None => next_node(&mut runtime, reached),
+            };
+            let successor = next.and_then(|next| match next {
                 Some(next) => Ok(Some((next, node(&mut runtime, next)?))),
                 None => Ok(None),
             });
+            let ground = runtime.vehicles[&id].ground;
+            let reached_speed = campaign::node_speed(&mut runtime, reached);
+            let reached_accel = campaign::node_accel(&mut runtime, reached);
+            let reached_decel = campaign::node_decel(&mut runtime, reached);
+            let last = match &successor {
+                Ok(Some((next, _))) => {
+                    ground && !matches!(next_node(&mut runtime, *next), Ok(Some(_)))
+                }
+                _ => true,
+            };
+            if ground && let Some(speed) = reached_speed {
+                campaign::take_speed(
+                    runtime.vehicles.get_mut(&id).unwrap(),
+                    speed,
+                    reached_accel,
+                    reached_decel,
+                );
+            }
             match successor {
                 Ok(Some((node, goal))) => {
                     let vehicle = runtime.vehicles.get_mut(&id).unwrap();
                     vehicle.path_node = Some(node);
-                    set_goal(vehicle, goal, true);
+                    set_goal(vehicle, goal, !ground || last);
                 }
                 Ok(None) => {
                     runtime.vehicles.get_mut(&id).unwrap().path_running = false;
-                    notes.push("end_of_path");
+                    notes.push(if ground {
+                        "reached_end_node"
+                    } else {
+                        "end_of_path"
+                    });
                 }
                 Err(error) => {
                     runtime.vehicles.get_mut(&id).unwrap().path_running = false;
@@ -1203,6 +1263,7 @@ pub(crate) fn advance(world: &mut World) {
             raise(world, Value::Object(id), note, Vec::new());
         }
     }
+    campaign::drive(world);
 }
 
 pub(crate) fn compass_rows(world: &mut World) -> Vec<crate::CompassVehicle> {
@@ -1259,7 +1320,7 @@ pub(crate) fn hud_targets(world: &World) -> Vec<crate::VehicleHudTarget> {
         .vehicles
         .iter()
         .filter_map(|(id, vehicle)| {
-            if !runtime.live(id) {
+            if !runtime.live(id) || vehicle.slot >= VEHICLE_SLOTS {
                 return None;
             }
             let entity = runtime.entities.get(id)?;

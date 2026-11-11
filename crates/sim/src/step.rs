@@ -21,6 +21,7 @@ use crate::world::{
     inventory_add_weapon,
 };
 use crate::{ActionOutcome, ActionResult, TickEffects, TickResult};
+use entity_iw4::EntityEventKind;
 use playerstate_iw4::PlayerState;
 use playerstate_iw4::buttons;
 
@@ -759,6 +760,7 @@ fn publish_snapshot_system(ecs: &mut World) {
     };
     drop(world);
     let script_seats = crate::script::script_seats(ecs);
+    let campaign_level = crate::script::host::mission::take_due(ecs);
     let mut runtime = ecs.resource_mut::<crate::script::RoundScript>();
     let script_exit_level = std::mem::take(&mut runtime.exit_level);
     effects.kicks = std::mem::take(&mut runtime.kicks)
@@ -779,6 +781,7 @@ fn publish_snapshot_system(ecs: &mut World) {
         pending_final_kill,
         script_seats,
         script_exit_level,
+        campaign_level,
     });
 }
 
@@ -870,11 +873,38 @@ fn emit_snapshot_events(world: &FrameWorld, snapshot: &Snapshot) {
 }
 
 fn harvest_predictable_events(world: &mut FrameWorld, _tick: Tick) {
-    world.for_each_player_mut(|_, ps| {
+    let held = world.old_buttons_mut().clone();
+    let mut noise = Vec::new();
+    world.for_each_player_mut(|client, ps| {
+        let quiet = ps.pm_flags & playerstate_iw4::pm_flags::CROUCH != 0
+            || held
+                .iter()
+                .any(|(id, cmd)| *id == client && cmd & buttons::ADS != 0);
         let mut cursor = ps.old_event_sequence;
-        consume_player_events(ps, &mut cursor, |_| {});
+        consume_player_events(ps, &mut cursor, |event| {
+            if let Some(kind) = ai_noise(EntityEventKind(event.event), quiet) {
+                noise.push((client, kind));
+            }
+        });
         ps.old_event_sequence = cursor;
     });
+    world.set_player_noise(noise);
+}
+
+fn ai_noise(event: EntityEventKind, quiet: bool) -> Option<&'static str> {
+    let loud = || if quiet { "footstep_walk" } else { "footstep" };
+    match event {
+        EntityEventKind::FOOTSTEP_SPRINT => Some("footstep_sprint"),
+        EntityEventKind::FOOTSTEP_WALK => Some("footstep_walk"),
+        EntityEventKind::FOOTSTEP_RUN | EntityEventKind::JUMP => Some(loud()),
+        EntityEventKind(kind)
+            if (EntityEventKind::LANDING_DEFAULT.0..=EntityEventKind::LANDING_SLUSH.0)
+                .contains(&kind) =>
+        {
+            Some(loud())
+        }
+        _ => None,
+    }
 }
 
 fn emit_attack_events(
@@ -941,8 +971,18 @@ fn apply_action(
     match *action {
         ClientAction::JoinMatch { request_id: _ } => {
             let meta = world.client_meta_mut(id);
-            if meta.lifecycle == ClientLifecycle::Connecting {
-                meta.lifecycle = ClientLifecycle::ChoosingClass;
+            if meta.lifecycle != ClientLifecycle::Connecting {
+                return ActionOutcome::Applied;
+            }
+            meta.lifecycle = ClientLifecycle::ChoosingClass;
+            let start = world
+                .bootstrap_ref()
+                .campaign
+                .then(|| crate::spawn::pick_ffa_spawn(&world.bootstrap_ref().spawns))
+                .flatten()
+                .map(|(_, point)| (point.origin, point.angles));
+            if let Some((origin, angles)) = start {
+                crate::script_player::spawn(world, tick, id, origin, angles, "playing");
             }
 
             ActionOutcome::Applied

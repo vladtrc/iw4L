@@ -60,4 +60,5 @@ pub struct TickResult {
     pub pending_final_kill: Option<(ClientId, ClientId)>,
     pub script_seats: Vec<(ClientId, crate::ScriptSeat)>,
     pub script_exit_level: bool,
+    pub campaign_level: Option<String>,
 }

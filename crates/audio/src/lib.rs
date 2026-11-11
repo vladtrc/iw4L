@@ -12,6 +12,7 @@ mod media_queue;
 mod messages;
 mod pcm;
 mod pcm_budget;
+mod pcm_stream;
 mod playback;
 mod plugin;
 mod rumble;
@@ -78,6 +79,7 @@ pub use decode_budget::{DecodeMemory, decode_memory};
 pub use media::PcmError;
 pub use offline::{OfflineError, OfflineRenderer, OfflineSound, OfflineVoice};
 pub use pcm_budget::{PcmMemory, pcm_memory};
+pub use pcm_stream::{PcmClock, PcmStream};
 pub use render_core::{QUANTUM, SAMPLE_RATE};
 
 mod spatial;

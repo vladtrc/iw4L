@@ -52,6 +52,8 @@ pub struct MatchBootstrap {
     pub intermission_view: Option<AuthoredSpawnPoint>,
 
     pub airstrike_height: Option<f32>,
+
+    pub campaign: bool,
 }
 
 impl Default for MatchBootstrap {
@@ -68,6 +70,7 @@ impl Default for MatchBootstrap {
             time_limit_ms,
             intermission_view: None,
             airstrike_height: None,
+            campaign: false,
         }
     }
 }
@@ -87,6 +90,8 @@ pub struct HostCheats(pub bool);
 pub struct HostGameModeSelection(GameModeKind);
 
 impl HostGameModeSelection {
+    pub const CAMPAIGN: Self = Self(GameModeKind::Campaign);
+
     pub const ALL: [Self; 8] = [
         Self(GameModeKind::FreeForAll),
         Self(GameModeKind::Domination),

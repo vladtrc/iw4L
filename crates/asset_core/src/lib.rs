@@ -4,6 +4,7 @@ pub mod family;
 pub use family::{Family, FamilyId, Iw4, Iw5, T5, T6};
 pub mod asset_key;
 pub mod ident;
+pub mod path_node;
 pub mod zone_game;
 
 pub use asset_key::{AssetKey, AssetKeyError, AssetKind, AssetNamespace, MaterialKey};
@@ -15,4 +16,5 @@ pub use ident::{
     TechniqueSetIndex, TechniqueSetSpace, TracerIndex, TracerSpace, WalkLocalMaterialIndex,
     WorldWeaponIndex, WorldWeaponSpace, XAnimIndex, XAnimSpace, ZoneOwner, bound_zone_names,
 };
+pub use path_node::{IW4_NODE_TYPES, PathNode};
 pub use zone_game::ZoneGame;

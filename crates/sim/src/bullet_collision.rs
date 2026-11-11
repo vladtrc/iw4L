@@ -7,6 +7,8 @@ use weapon_iw4::{
     RIFLE_COLLATERAL_SCALE, SURF_TYPE_FLESH, SURFACE_TYPE_NAMES, advance_trace, depth_surface_type,
 };
 
+mod campaign;
+
 pub const CONTENTS_SOLID: u32 = 0x0000_0001;
 
 pub const CONTENTS_SKY: u32 = 0x0000_0800;
@@ -199,6 +201,10 @@ pub struct AuthorityDObjState {
         String,
         Option<std::sync::Arc<xmodel_runtime::RetainedModelCapability>>,
     )>,
+    pub attached: Vec<(
+        std::sync::Arc<xmodel_runtime::RetainedModelCapability>,
+        String,
+    )>,
 }
 
 fn iw_angles_to_mat4(origin: glam::Vec3, angles: [f32; 3]) -> glam::Mat4 {
@@ -334,6 +340,7 @@ impl AuthorityDObjState {
             apos: None,
             t5_destructible: None,
             swap_capabilities: Vec::new(),
+            attached: Vec::new(),
         }
     }
 
@@ -388,23 +395,33 @@ impl AuthorityDObjState {
         self.current_collision = None;
     }
 
-    pub fn set_attachments(&mut self, attachments: &[(&str, &str)]) {
+    pub fn set_attachments(
+        &mut self,
+        attachments: &[(
+            &str,
+            &str,
+            Option<std::sync::Arc<xmodel_runtime::RetainedModelCapability>>,
+        )],
+    ) {
+        self.attached = attachments
+            .iter()
+            .map(|(_, tag, capability)| Some((capability.clone()?, (*tag).to_owned())))
+            .collect::<Option<_>>()
+            .unwrap_or_default();
         let mut models = vec![xmodel_runtime::DObjModelDescriptor {
             model: self.current_model.clone(),
             parent_model: None,
             attach_tag: None,
             ignore_collision: false,
         }];
-        models.extend(
-            attachments
-                .iter()
-                .map(|(model, tag)| xmodel_runtime::DObjModelDescriptor {
-                    model: (*model).to_owned(),
-                    parent_model: Some(0),
-                    attach_tag: Some((*tag).to_owned()),
-                    ignore_collision: true,
-                }),
-        );
+        models.extend(attachments.iter().map(|(model, tag, _)| {
+            xmodel_runtime::DObjModelDescriptor {
+                model: (*model).to_owned(),
+                parent_model: Some(0),
+                attach_tag: Some((*tag).to_owned()),
+                ignore_collision: true,
+            }
+        }));
         if self.semantic_state.composition.models == models {
             return;
         }
@@ -678,19 +695,36 @@ impl AuthorityDObjState {
 
     pub fn tag_bone(&self, tag: &str) -> Option<usize> {
         let capability = self.capability.as_ref()?;
-        capability
+        if let Some(bone) = capability
             .pose
             .bone_names
             .iter()
             .position(|name| name == tag)
+        {
+            return Some(bone);
+        }
+        if self.attached.is_empty() {
+            return None;
+        }
+        let dobj = self.composed()?;
+        self.attached
+            .iter()
+            .zip(dobj.models.iter().skip(1))
+            .find_map(|((attached, _), slot)| {
+                let bone = attached
+                    .pose
+                    .bone_names
+                    .iter()
+                    .position(|name| name == tag)?;
+                Some(slot.base + bone)
+            })
     }
 
     pub fn tag_world_matrix(&self, tag: &str) -> Option<glam::Mat4> {
-        let capability = self.capability.as_ref()?;
         let bone = self.tag_bone(tag)?;
-        let posed = capability
-            .pose(&self.pose_request, self.world_from_model)
-            .ok()?;
+        let posed =
+            xmodel_runtime::pose_dobj(&self.composed()?, &self.pose_request, self.world_from_model)
+                .ok()?;
         posed.get(bone).copied()
     }
 

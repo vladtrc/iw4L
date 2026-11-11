@@ -58,6 +58,10 @@ pub(crate) fn install(
         entries: Vec::new(),
         schemas: level.schemas,
         player_data_defaults: level.player_data_defaults.map(Arc::new),
+        videos: Arc::new(level.videos),
+        turret_ai_scripts: Arc::new(level.turret_ai_scripts),
+        anim: Arc::new(level.anim),
+        path_nodes: Arc::new(level.path_nodes),
     };
     install_level(world, Arc::new(program), plan)
 }
@@ -114,6 +118,10 @@ pub(crate) fn install_level(
     runtime.next_object = 3;
     runtime.next_entity_number = playerstate_iw4::GENTITY_SPAWN_BASE;
     runtime.tables = plan.tables.clone();
+    runtime.campaign.videos = plan.videos.clone();
+    runtime.campaign.turret_ai_scripts = plan.turret_ai_scripts.clone();
+    runtime.campaign.anim_library = plan.anim.clone();
+    runtime.campaign.active = !plan.path_nodes.is_empty();
     runtime.rng = u32::from_le_bytes(program.fingerprint()[..4].try_into().unwrap()) | 1;
     runtime.loading = true;
     world.insert_resource(natives);
@@ -134,10 +142,13 @@ pub(crate) fn install_level(
     }
     let entities = plan.entities.clone();
     let keys = plan.keys.clone();
+    let path_nodes = plan.path_nodes.clone();
     world.resource_mut::<RoundScript>().restart = Some(Arc::new(plan));
     world
         .resource_mut::<RoundScript>()
         .spawn_map_entities(&entities, &keys)
+        .map_err(|m| Fault::at(&location, m))?;
+    host::actors::spawn_path_nodes(world, &path_nodes, &entities, &keys)
         .map_err(|m| Fault::at(&location, m))?;
     host::presence::initialize_map_models(world);
     Ok(())

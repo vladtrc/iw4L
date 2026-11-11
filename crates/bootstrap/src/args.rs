@@ -13,6 +13,7 @@ pub enum LaunchMode {
     Map(String),
     Serve(String),
     ExportGltf(String),
+    CheckScripts(Vec<String>),
     Play {
         name: String,
         zone_override: Option<String>,
@@ -77,7 +78,7 @@ fn parse_acceptance_flag(
     Ok((out, acceptance))
 }
 
-const USAGE: &str = "usage: iw4l [--no-cheats] [--cmds '<script>'] map <zone> | serve <zone> | menu | play <demo>\n       iw4l export-gltf <zone>\n       iw4l --help";
+const USAGE: &str = "usage: iw4l [--no-cheats] [--cmds '<script>'] map <zone> | serve <zone> | menu | play <demo>\n       iw4l export-gltf <zone>\n       iw4l check-scripts <zone>... [<root module>...]\n       iw4l --help";
 
 pub fn parse_launch_args(mut args: impl Iterator<Item = String>) -> Result<LaunchMode, String> {
     match args.next().as_deref() {
@@ -103,6 +104,15 @@ pub fn parse_launch_args(mut args: impl Iterator<Item = String>) -> Result<Launc
             }
             Ok(LaunchMode::ExportGltf(zone))
         }
+        Some("check-scripts") => {
+            let zones: Vec<String> = args.filter(|zone| !zone.is_empty()).collect();
+            if zones.is_empty() {
+                return Err(
+                    "usage: iw4l check-scripts <zone>... [<root module>...] (load order; later zones win)".into(),
+                );
+            }
+            Ok(LaunchMode::CheckScripts(zones))
+        }
         Some("menu") => {
             if args.next().is_some() {
                 return Err("usage: iw4l menu [--cmds '<script>']".into());
@@ -111,7 +121,7 @@ pub fn parse_launch_args(mut args: impl Iterator<Item = String>) -> Result<Launc
         }
         Some("play") => parse_play_args(args),
         Some(other) => Err(format!(
-            "unknown launch args starting with `{other}` — expected: map <zone> | serve <zone> | menu | play <demo> [--cmds '<script>'] | export-gltf <zone>"
+            "unknown launch args starting with `{other}` — expected: map <zone> | serve <zone> | menu | play <demo> [--cmds '<script>'] | export-gltf <zone> | check-scripts <zone>..."
         )),
         None => Err(USAGE.into()),
     }

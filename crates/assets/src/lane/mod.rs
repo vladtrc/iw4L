@@ -44,7 +44,9 @@ pub struct LoadedWorld {
     pub spawns: Vec<asset_world::SpawnPoint>,
     pub bodies: BodyMeshBuild,
     pub fpv_meshes: FpvMeshBuild,
+    pub world_weapons: WorldWeaponBuild,
     pub xanims: XAnimBuild,
+    pub weapons: Option<asset_game::WeaponCatalog>,
     pub facts: crate::MapFacts,
     /// Bytes the zone arenas held while the walk read them. The arenas
     /// themselves die with the walk; only their size travels.
@@ -258,7 +260,9 @@ impl LoadedWorld {
             spawns: Default::default(),
             bodies: Default::default(),
             fpv_meshes: Default::default(),
+            world_weapons: Default::default(),
             xanims: Default::default(),
+            weapons: None,
             facts: Default::default(),
             arena_bytes: Default::default(),
             sound: Default::default(),

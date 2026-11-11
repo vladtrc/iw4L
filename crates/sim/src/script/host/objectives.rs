@@ -6,6 +6,8 @@ use crate::{CompassObjective, ObjectiveMatch, ObjectiveState, ScriptEffect};
 use bevy_ecs::prelude::World;
 use gamemode_iw4::Team;
 
+mod campaign;
+
 const MAX_OBJECTIVES: i32 = 32;
 const ENGINE_SERVER_INFO: &[&str] = &[
     "ui_bomb_timer",
@@ -27,6 +29,7 @@ pub(crate) struct ScriptObjective {
     team: Team,
     icon: String,
     viewer: Option<u32>,
+    sp: campaign::SpObjective,
 }
 
 impl ScriptObjective {
@@ -76,6 +79,9 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
             state,
             ..Default::default()
         };
+        if matches!(args.get(2), Some(Value::LocalizedString(_))) {
+            return campaign::add(world, index, args);
+        }
         if let Some(target) = args.get(2) {
             place(world, index, target)?;
         }
@@ -96,6 +102,7 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
     registry.register(Function, "objective_state", |world, _, args| {
         let index = index(args)?;
         objective(world, index).state = state(args, 1)?;
+        campaign::state_changed(world, index);
         Ok(Value::Undefined)
     });
     registry.register(Function, "objective_icon", |world, _, args| {
@@ -116,6 +123,7 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
             return Err(format!("{} is not an entity", type_name(&target)));
         }
         place(world, index, &target)?;
+        campaign::entity_offset(world, index, args)?;
         Ok(Value::Undefined)
     });
     registry.register(Function, "objective_team", |world, _, args| {
@@ -140,6 +148,7 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         objective.viewer = None;
         Ok(Value::Undefined)
     });
+    campaign::register(registry);
 }
 
 pub(crate) fn publish(world: &mut World) {
@@ -152,6 +161,7 @@ pub(crate) fn publish(world: &mut World) {
         .iter()
         .map(|(index, row)| (*index, row.clone()))
         .collect();
+    let campaign = campaign::publish(world, &rows);
     let mut compass = Vec::with_capacity(rows.len());
     for (index, row) in rows {
         let origin = match &row.entity {
@@ -170,8 +180,11 @@ pub(crate) fn publish(world: &mut World) {
             team: row.team,
             icon: row.icon,
             viewer: row.viewer,
+            label: String::new(),
+            follows: false,
         });
     }
+    let (compass, list) = campaign.unwrap_or((compass, Vec::new()));
     let runtime = world.resource::<RoundScript>();
     let match_script = world.resource::<crate::script::MatchScript>();
     let score = |team: &str| runtime.engine.team_scores.get(team).copied().unwrap_or(0);
@@ -283,5 +296,6 @@ pub(crate) fn publish(world: &mut World) {
         missile_vision,
         night_vision,
         pain_vision,
+        list,
     };
 }
