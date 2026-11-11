@@ -1,9 +1,10 @@
 use std::cell::UnsafeCell;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use crate::admission::AdmissionFailure;
 use crate::media::RenderMedia;
+use crate::pcm_stream::StreamRing;
 
 pub const SAMPLE_RATE: u32 = 48_000;
 pub const QUANTUM: usize = 128;
@@ -154,6 +155,7 @@ pub(crate) struct RenderShared {
     state: UnsafeCell<RenderState>,
     pub frame: AtomicU64,
     pub presentation_epoch: AtomicU64,
+    pub match_paused: AtomicBool,
     pub master: AtomicU32,
     pub busy_blocks: AtomicU64,
     pub device_active: AtomicBool,
@@ -164,6 +166,7 @@ pub(crate) struct RenderShared {
     pub device_underruns: AtomicU64,
     pub cancelled: AtomicBool,
     pub peak: AtomicU32,
+    pub(crate) stream: Arc<Mutex<Option<Arc<StreamRing>>>>,
 }
 
 // The bounded rendering lease exclusively owns RenderState. Slot payload access
@@ -194,6 +197,7 @@ impl RenderShared {
             }),
             frame: AtomicU64::new(0),
             presentation_epoch: AtomicU64::new(0),
+            match_paused: AtomicBool::new(false),
             master: AtomicU32::new(1.0f32.to_bits()),
             busy_blocks: AtomicU64::new(0),
             device_active: AtomicBool::new(false),
@@ -204,6 +208,7 @@ impl RenderShared {
             device_underruns: AtomicU64::new(0),
             cancelled: AtomicBool::new(false),
             peak: AtomicU32::new(0),
+            stream: Arc::default(),
         }
     }
 
@@ -230,6 +235,7 @@ impl RenderShared {
         let frame = self.frame.load(Ordering::Relaxed);
         let epoch = self.presentation_epoch.load(Ordering::Acquire);
         let cancelled = self.cancelled.load(Ordering::Acquire);
+        let match_paused = self.match_paused.load(Ordering::Acquire);
         let hold_one_shots = device == Some(false) && self.device_required.load(Ordering::Relaxed);
         for (index, slot) in self.slots.iter().enumerate() {
             if slot.phase.load(Ordering::Acquire) != PUBLISHED {
@@ -245,6 +251,7 @@ impl RenderShared {
                     epoch,
                     cancelled,
                     hold_one_shots,
+                    match_paused,
                     state.buses.bus(assignment.media.bus),
                 );
                 match device {
@@ -282,6 +289,11 @@ impl RenderShared {
             }
         }
         state.buses.mix_into(output);
+        if let Ok(stream) = self.stream.try_lock()
+            && let Some(ring) = stream.as_ref()
+        {
+            ring.mix(output);
+        }
         let master = f32::from_bits(self.master.load(Ordering::Relaxed));
         for sample in output.iter_mut().flatten() {
             let value = *sample * master;
@@ -340,6 +352,7 @@ fn render_assignment(
     epoch: u64,
     cancelled: bool,
     hold_one_shots: bool,
+    match_paused: bool,
     output: &mut [[f32; 2]; QUANTUM],
 ) -> (bool, usize) {
     let instance = &assignment.instance;
@@ -354,7 +367,8 @@ fn render_assignment(
         instance.set_status(InstanceStatus::Finished);
         return (true, 0);
     }
-    if hold_one_shots && !assignment.looping {
+    if hold_one_shots && !assignment.looping || match_paused && instance.scope == AudioScope::Match
+    {
         return (false, 0);
     }
     let rate = f32::from_bits(instance.rate.load(Ordering::Relaxed));
