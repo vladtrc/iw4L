@@ -42,11 +42,18 @@ enum Side {
 }
 
 pub fn soldier_kits(names: &[String]) -> SoldierKits {
-    let bodies: Vec<&str> = names
+    let mut bodies: Vec<&str> = names
         .iter()
         .map(String::as_str)
         .filter(|name| is_body_model(name))
         .collect();
+    if bodies.is_empty() {
+        bodies = names
+            .iter()
+            .map(String::as_str)
+            .filter(|name| name.starts_with("body_"))
+            .collect();
+    }
     let heads: Vec<&str> = names
         .iter()
         .map(String::as_str)
@@ -75,7 +82,7 @@ fn is_head_model(name: &str) -> bool {
 pub fn is_arms_model(name: &str) -> bool {
     name.starts_with("viewhands_")
         || (name.starts_with("viewmodel_") && name.ends_with("_arms"))
-        || (name.starts_with("c_") && name.contains("_mp_") && name.ends_with("_viewhands"))
+        || name.ends_with("_viewhands")
 }
 
 pub fn is_body_model(name: &str) -> bool {

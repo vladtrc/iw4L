@@ -211,6 +211,8 @@ fn start_match_load(
                         );
                         prepared.sound_gaps = bank.gaps.len();
                         prepared.script_sound_aliases = Some(bank.catalog.script_alias_looping());
+                        prepared.script_sound_length =
+                            Some(bank.catalog.script_alias_length(games));
                         Ok(bank.catalog)
                     }
                     _ => Err("no launch identity or map path to compose the sound bank".into()),
@@ -303,18 +305,30 @@ fn approve_map_load(
             continue;
         }
         let games = asset_transport::GamesRoot(identity.games_root.clone());
+        let campaign = asset_transport::is_campaign_level(&games, &request.zone);
+        asset_transport::set_campaign_zone_set(campaign);
+        if campaign {
+            diag::info!(
+                World,
+                "match load: `{}` is a campaign level; campaign zone set and dropping common/resident",
+                request.zone
+            );
+            crate::session_load::forget_common();
+            crate::session_load::clear_resident_map();
+        }
         let trees = asset_transport::NamespaceTrees::discover(&games);
         let have =
             frame::AssetFamilies::from_families(trees.present().map(|(ns, _)| ns.as_str())).0;
-        let selection =
-            if *role == frame::RuntimeRole::Client || !request.load_key.match_key.is_none() {
-                server_families
-                    .as_deref()
-                    .copied()
-                    .ok_or_else(|| "Server asset families were not supplied".to_owned())
-            } else {
-                frame::AssetFamilies::from_inventory(have, &dvars)
-            };
+        let selection = if campaign {
+            Ok(frame::AssetFamilies::iw4())
+        } else if *role == frame::RuntimeRole::Client || !request.load_key.match_key.is_none() {
+            server_families
+                .as_deref()
+                .copied()
+                .ok_or_else(|| "Server asset families were not supplied".to_owned())
+        } else {
+            frame::AssetFamilies::from_inventory(have, &dvars)
+        };
         let selection = selection.and_then(|families| {
             families.require_map(&request.zone)?;
             if let Some(message) = families.missing_notice(have) {

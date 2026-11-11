@@ -54,7 +54,9 @@ pub(crate) fn publish_audio_context(
     adopted: Option<Res<net::LastAdoptedSnapshot>>,
     prediction: Option<Res<net::ClientPredictionState>>,
     view: Option<Res<frame::ViewSubject>>,
+    paused: Option<Res<frame::GamePaused>>,
 ) {
+    runtime.set_match_paused(paused.is_some());
     if let Some(verdicts) = verdicts {
         runtime.set_fire_verdicts(verdicts.clone());
     }

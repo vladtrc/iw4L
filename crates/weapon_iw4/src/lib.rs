@@ -5,6 +5,8 @@ mod equipment;
 pub use equipment::{EquipmentRuntimeFacts, WEAPCLASS_THROWINGKNIFE};
 
 mod ads_allow;
+mod ai_accuracy;
+pub use ai_accuracy::{AiAccuracyGraph, AiAccuracyGraphs};
 mod ads_overlay;
 mod ammo;
 pub mod event_sound;

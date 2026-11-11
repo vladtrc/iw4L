@@ -193,6 +193,15 @@ impl NamespaceSoundIwd {
         self.index(ns)?.read_sound(relative)
     }
 
+    pub fn read_sound_header(
+        &self,
+        ns: AssetNamespace,
+        relative: &str,
+        limit: usize,
+    ) -> Option<Result<Vec<u8>, String>> {
+        self.index(ns)?.read_sound_header(relative, limit)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.iw4.is_none() && self.t5.is_none() && self.iw5.is_none()
     }
