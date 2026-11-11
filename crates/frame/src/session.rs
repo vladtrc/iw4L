@@ -36,6 +36,12 @@ pub enum AppScreen {
     InGame,
 }
 
+#[derive(Resource, Clone, Copy, Debug, Default)]
+pub struct LoadCinematicPlaying;
+
+#[derive(Resource, Clone, Copy, Debug, Default)]
+pub struct GamePaused;
+
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UiDraw(pub bool);
 

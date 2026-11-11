@@ -13,7 +13,7 @@ use crate::localize::decode_localized_text;
 use asset_core::AssetRef;
 use asset_iw4::size as sz;
 use asset_material::{TS_2D, TS_COLOR_MAP, decode_zone_image_rgba};
-use asset_transport::{GamesRoot, ZoneMemory, find_zone_file, game_root_for_zone, open_zone};
+use asset_transport::{GamesRoot, ZoneMemory, game_root_for_zone, open_zone};
 
 pub const ITEM_TYPE_BUTTON: i32 = 1;
 
@@ -172,6 +172,7 @@ pub struct MenuItem {
     pub mouse_enter: Vec<String>,
     pub on_focus: Vec<String>,
     pub cover: bool,
+    pub tex_coords: Option<[f32; 4]>,
 }
 
 #[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
@@ -695,7 +696,7 @@ fn cover_wide_hud_overlays(catalog: &mut MenuCatalog) {
 }
 
 pub fn ui_games_root(games: &GamesRoot) -> Result<GamesRoot, String> {
-    let anchor = find_zone_file(games, "iw4:common_mp")?;
+    let anchor = asset_transport::find_mp_zone_file(games, "iw4:common_mp")?;
     game_root_for_zone(&anchor.path).map(GamesRoot)
 }
 
@@ -708,7 +709,7 @@ pub fn load_ui_menu_catalog(games: &GamesRoot) -> (MenuCatalog, Vec<String>) {
     };
     report.push(format!("menu asset root (IW4): {}", games.0.display()));
     for zone in UI_MENU_ZONES {
-        match find_zone_file(&games, &format!("iw4:{zone}")) {
+        match asset_transport::find_mp_zone_file(&games, &format!("iw4:{zone}")) {
             Ok(found) => match load_menu_catalog_with_iwd(&found.path, Some(&games.0)) {
                 Ok(part) => {
                     report.push(format!(

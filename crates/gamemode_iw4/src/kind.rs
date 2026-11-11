@@ -19,6 +19,8 @@ pub enum GameModeKind {
     Headquarters = 6,
 
     Sabotage = 7,
+
+    Campaign = 8,
 }
 
 impl GameModeKind {
@@ -61,6 +63,7 @@ impl GameModeKind {
             Self::CaptureTheFlag => "ctf",
             Self::Headquarters => "koth",
             Self::Sabotage => "sab",
+            Self::Campaign => "campaign",
         }
     }
 
@@ -74,6 +77,7 @@ impl GameModeKind {
             Self::CaptureTheFlag => &["ctf"],
             Self::Headquarters => &["koth"],
             Self::Sabotage => &["sab"],
+            Self::Campaign => &[],
         }
     }
 
@@ -91,6 +95,7 @@ impl GameModeKind {
             5 => Some(Self::CaptureTheFlag),
             6 => Some(Self::Headquarters),
             7 => Some(Self::Sabotage),
+            8 => Some(Self::Campaign),
             _ => None,
         }
     }
@@ -105,11 +110,12 @@ impl GameModeKind {
             Self::CaptureTheFlag => "CAPTURE THE FLAG",
             Self::Headquarters => "HEADQUARTERS",
             Self::Sabotage => "SABOTAGE",
+            Self::Campaign => "CAMPAIGN",
         }
     }
 
     pub fn is_team(self) -> bool {
-        !matches!(self, Self::FreeForAll)
+        !matches!(self, Self::FreeForAll | Self::Campaign)
     }
 
     pub fn team_start_classname(self, axis: bool) -> Option<&'static str> {
@@ -119,7 +125,8 @@ impl GameModeKind {
             | Self::SearchAndDestroy
             | Self::CaptureTheFlag
             | Self::Headquarters
-            | Self::Sabotage => None,
+            | Self::Sabotage
+            | Self::Campaign => None,
             Self::Domination => Some(if axis {
                 dom::START_SPAWN_AXIS
             } else {
@@ -140,7 +147,8 @@ impl GameModeKind {
             | Self::SearchAndDestroy
             | Self::CaptureTheFlag
             | Self::Headquarters
-            | Self::Sabotage => &[],
+            | Self::Sabotage
+            | Self::Campaign => &[],
             Self::Domination => &[dom::SPAWN_CLASSNAME],
             Self::Demolition => {
                 if axis {

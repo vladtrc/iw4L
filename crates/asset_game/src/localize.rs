@@ -567,6 +567,13 @@ pub fn load_mp_localized_strings(
     games: &crate::GamesRoot,
     zone: &str,
 ) -> Result<LocalizeCatalog, String> {
+    asset_transport::with_mp_zones(|| load_mp_localized_strings_in_set(games, zone))
+}
+
+fn load_mp_localized_strings_in_set(
+    games: &crate::GamesRoot,
+    zone: &str,
+) -> Result<LocalizeCatalog, String> {
     let zone_ff = crate::find_zone_file(games, zone)?;
     let mut catalog = LocalizeCatalog::default();
     for name in MP_LOCALIZED_ZONES {

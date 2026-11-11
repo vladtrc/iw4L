@@ -242,6 +242,13 @@ impl Drop for FlightGuard {
     }
 }
 
+pub fn forget_common() {
+    COMMON
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .take();
+}
+
 pub(super) fn landed_common(key: &CommonKey) -> Option<Arc<CommonSet>> {
     let slot = COMMON.lock().unwrap_or_else(|poison| poison.into_inner());
     let flight = slot.as_ref().filter(|flight| flight.key == *key)?;
