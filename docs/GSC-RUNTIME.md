@@ -56,6 +56,9 @@ after terminator removal. Fingerprints hash IR version 5 and each module's
 `Function` or native `Builtin`), locals (per-function slots) and field names (symbol ids)
 are resolved at load, and `install` binds native slots once.
 UTF-8 and single-byte sources are supported; developer blocks are excluded.
+A builtin whose argument or return shape the retail scripts leave ambiguous is
+checked against the `mw2-recompiled` dispatch tables, as a reference only; see
+[`SP.md`](SP.md).
 
 ## Language and scheduling
 

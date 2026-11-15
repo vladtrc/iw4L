@@ -187,9 +187,13 @@ impl DObj {
                             ),
                         })?;
                     let range = slot.base..slot.base + slot.bone_count;
+                    let tag = match a.tag.as_ref() {
+                        "" => model.bone_names.first().map_or("", String::as_str),
+                        tag => tag,
+                    };
                     let found = bones[range.clone()]
                         .iter()
-                        .position(|b| b.name == a.tag)
+                        .position(|b| *b.name == *tag)
                         .map(|i| slot.base + i);
                     Some(found.ok_or_else(|| DObjError::AttachTag {
                         model: model.name.clone(),

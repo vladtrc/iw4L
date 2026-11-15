@@ -209,6 +209,7 @@ fn release_match(
         identity.zone.clear();
     }
 
+    asset_transport::set_campaign_zone_set(false);
     perf::match_torn(reason.label());
     diag::lifecycle_boundary(
         "local_session_revoked",
@@ -372,6 +373,7 @@ fn run_session_swap(
             format!("Could not load map '{}'.\n\n{details}", fact.zone),
         );
         dvars.set("ui_map_error", "1");
+        asset_transport::set_campaign_zone_set(false);
         diag::warn!(
             Sim,
             "session: map `{}` failed (swap #{}): {} — returned to menu",
@@ -477,6 +479,24 @@ fn run_exit_level(
     match transition.request_menu() {
         Ok(id) => diag::info!(Sim, "session: exitLevel( false ) → lobby (swap #{id})"),
         Err(err) => diag::info!(Sim, "session: exitLevel refused — {err}"),
+    }
+}
+
+fn run_campaign_level(
+    mut called: MessageReader<frame::CampaignLevelCalled>,
+    mut transition: ResMut<SessionSwapRequest>,
+) {
+    let Some(frame::CampaignLevelCalled(level)) = called.read().last() else {
+        return;
+    };
+    let requested = if level.is_empty() {
+        transition.request_menu()
+    } else {
+        transition.request_zone(level.clone())
+    };
+    match requested {
+        Ok(id) => diag::info!(Sim, "session: campaign → '{level}' (swap #{id})"),
+        Err(err) => diag::info!(Sim, "session: campaign level '{level}' refused — {err}"),
     }
 }
 
@@ -770,6 +790,7 @@ pub fn register_lifecycle(app: &mut App) {
             (
                 follow_master_match,
                 run_exit_level,
+                run_campaign_level,
                 run_peer_lobby_return,
                 run_udp_peer_lobby_return,
                 request_teardown,

@@ -50,8 +50,23 @@ pub(crate) fn random(world: &mut World) -> u32 {
     x
 }
 
-fn random_unit(world: &mut World) -> f32 {
+pub(crate) fn random_unit(world: &mut World) -> f32 {
     (random(world) >> 8) as f32 / (1u32 << 24) as f32
+}
+
+pub(crate) fn spread_end(
+    start: [f32; 3],
+    end: [f32; 3],
+    spread: f32,
+    (r, t): (f32, f32),
+) -> [f32; 3] {
+    const RANGE: f32 = 8192.0;
+    let angles = math_iw4::vect_to_angles(std::array::from_fn(|k| end[k] - start[k]));
+    let (forward, right, up) = math_iw4::angle_vectors(angles);
+    let radius = r.sqrt() * spread.to_radians().tan() * RANGE;
+    let theta = t * std::f32::consts::TAU;
+    let (x, y) = (radius * theta.cos(), radius * theta.sin());
+    std::array::from_fn(|k| start[k] + forward[k] * RANGE + right[k] * x + up[k] * y)
 }
 
 pub(crate) fn register(registry: &mut NativeRegistry) {
@@ -142,6 +157,16 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
     registry.register(Function, "vectordot", |_, _, args| {
         Ok(Value::Float(dot(vector(args, 0)?, vector(args, 1)?)))
     });
+    registry.register(Function, "squared", |_, _, args| {
+        let x = float(args, 0)?;
+        Ok(Value::Float(x * x))
+    });
+    registry.register(Function, "vectorlerp", |_, _, args| {
+        let (a, b, t) = (vector(args, 0)?, vector(args, 1)?, float(args, 2)?);
+        Ok(Value::Vector(std::array::from_fn(|i| {
+            a[i] + (b[i] - a[i]) * t
+        })))
+    });
     registry.register(Function, "vectornormalize", |_, _, args| {
         Ok(Value::Vector(normalize(vector(args, 0)?)))
     });
@@ -223,6 +248,11 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
     registry.register(Function, "randomfloat", |world, _, args| {
         let max = float(args, 0)?;
         Ok(Value::Float(random_unit(world) * max))
+    });
+    registry.register(Function, "bulletspread", |world, _, args| {
+        let (start, end, spread) = (vector(args, 0)?, vector(args, 1)?, float(args, 2)?);
+        let draws = (random_unit(world), random_unit(world));
+        Ok(Value::Vector(spread_end(start, end, spread, draws)))
     });
     registry.register(Function, "randomfloatrange", |world, _, args| {
         let (min, max) = (float(args, 0)?, float(args, 1)?);

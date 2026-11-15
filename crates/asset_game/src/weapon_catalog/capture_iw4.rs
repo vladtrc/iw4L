@@ -144,12 +144,21 @@ impl WeaponCatalog {
             skin_parent: None,
             projectile_model,
             rocket_model,
+            ai_script: geometry
+                .ai_script_name
+                .and_then(|ptr| stream.cstr(ptr).ok())
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned),
             knife_xmodel: None,
             dual_wield_weapon: None,
             sz_xanims,
             sz_xanims_right,
             sz_xanims_left,
             hide_tags,
+            ai_accuracy: weapon_iw4::AiAccuracyGraphs {
+                vs_ai: read_knots(stream, geometry.ai_vs_ai_knots),
+                vs_player: read_knots(stream, geometry.ai_vs_player_knots),
+            },
             sounds: WeaponSoundAliases {
                 notetrack_convention: NotetrackConvention::SoundMap,
                 fire: geometry
@@ -477,4 +486,16 @@ impl WeaponCatalog {
             },
         });
     }
+}
+
+fn read_knots(stream: &ZoneStream<'_>, knots: Option<(Ptr, usize)>) -> weapon_iw4::AiAccuracyGraph {
+    let Some((at, count)) = knots else {
+        return Default::default();
+    };
+    weapon_iw4::AiAccuracyGraph::new((0..count).map_while(|k| {
+        Some([
+            stream.f32_at(at, k * 8).ok()?,
+            stream.f32_at(at, k * 8 + 4).ok()?,
+        ])
+    }))
 }

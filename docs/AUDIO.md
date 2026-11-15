@@ -47,7 +47,9 @@ replacement.
 Control ranks eight map voices with a 0.002 gain floor. Device recovery uses
 bounded backoff; one-shots preserve PCM during short outages until their start
 deadlines expire. Master volume is applied once. `OfflineRenderer` shares the
-mixing kernel. Streaming, DSP buses/tails and acoustic propagation are unfinished.
+mixing kernel. One pushed PCM stream (`AudioRuntime::open_stream`, cinematics)
+mixes after the slots from a 0.5 s SPSC ring. DSP buses/tails and acoustic
+propagation are unfinished.
 
 `IW4L_AUDIO_DIAG=1` enables cue identities/decisions, request/preparation timings,
 slow control stages, affinity and device/null frame counts. Set

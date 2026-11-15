@@ -3,7 +3,7 @@ use super::super::arrays::new_array;
 use super::super::players::{LinkView, PlayerLink};
 use super::super::tables::perk_slot_code;
 use crate::frame::FrameWorld;
-use crate::script::Namespace::Method;
+use crate::script::Namespace::{Function, Method};
 use crate::script::{Arc, NativeRegistry, RoundScript, Value, runtime};
 use crate::script_player;
 use crate::world::ClientId;
@@ -481,6 +481,14 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         "forceusehintoff",
         "predictstreampos",
     );
+    registry.register(Method, "getviewmodel", |world, receiver, _| {
+        let client = player(world, receiver)?;
+        Ok(slot(world, client)?
+            .presented
+            .get("setviewmodel")
+            .and_then(|args| args.first().cloned())
+            .unwrap_or(Value::Undefined))
+    });
     registry.register(Method, "isitemunlocked", |world, receiver, args| {
         let client = data_client(world, player(world, receiver)?)?;
         let name = string(args, 0)?;
@@ -918,7 +926,11 @@ pub(crate) fn link_to(
         .player(ClientId(client))
         .map_or(base, |ps| ps.origin);
     let delta: [f32; 3] = std::array::from_fn(|i| origin[i] - base[i]);
-    let local = if view == LinkView::WeaponDelta {
+    let snap = tag.is_some()
+        && (FrameWorld::from_world(world).bootstrap_ref().campaign
+            || FrameWorld::from_world(world).bootstrap_ref().kind
+                == gamemode_iw4::GameModeKind::Campaign);
+    let local = if view == LinkView::WeaponDelta || snap {
         [0.0; 3]
     } else {
         std::array::from_fn(|i| (0..3).map(|j| delta[j] * axis[i][j]).sum())
@@ -1101,6 +1113,8 @@ fn register_body(registry: &mut NativeRegistry) {
         "enableweaponswitch" => switch_disabled = false,
         "disableusability" => usability_disabled = true,
         "enableusability" => usability_disabled = false,
+        "hideviewmodel" => viewmodel_hidden = true,
+        "showviewmodel" => viewmodel_hidden = false,
     );
     registry.register(Method, "setmovespeedscale", |world, receiver, args| {
         let id = client_of(world, receiver)?;
@@ -1139,6 +1153,14 @@ fn register_body(registry: &mut NativeRegistry) {
         let angles = vector(args, 0)?;
         FrameWorld::from_world(world).set_viewangles(id, angles);
         Ok(Value::Undefined)
+    });
+    registry.register(Method, "getplayerviewheight", |world, receiver, _| {
+        let id = client_of(world, receiver)?;
+        Ok(Value::Float(
+            FrameWorld::from_world(world)
+                .player(id)
+                .map_or(0.0, |ps| ps.view_height_current),
+        ))
     });
     registry.register(Method, "getstance", |world, receiver, _| {
         let id = client_of(world, receiver)?;
@@ -1417,6 +1439,34 @@ fn register_inventory(registry: &mut NativeRegistry) {
             new_array(world, tags)
         },
     );
+    registry.register(Method, "getplayerweaponmodel", |world, receiver, _| {
+        let id = client_of(world, receiver)?;
+        let frame = FrameWorld::from_world(world);
+        let weapon = frame.player(id).map_or(0, |ps| ps.weapon);
+        if weapon == 0 {
+            return Ok(Value::Undefined);
+        }
+        let model = frame.weapon_world_model(weapon).map_or("", |(m, _)| m);
+        if model.is_empty() {
+            Ok(Value::Undefined)
+        } else {
+            Ok(Value::string(model))
+        }
+    });
+    registry.register(Method, "getplayerknifemodel", |world, receiver, _| {
+        let _id = client_of(world, receiver)?;
+        Ok(Value::Undefined)
+    });
+    registry.register(Method, "hidepart_allinstances", |world, receiver, args| {
+        let _id = client_of(world, receiver)?;
+        let _part = string(args, 0)?;
+        let _model = optional(args, 1, string)?;
+        Ok(Value::Undefined)
+    });
+    registry.register(Method, "hideallparts", |world, receiver, _| {
+        let _ = super::engine::entity_id(world, receiver)?;
+        Ok(Value::Undefined)
+    });
     registry.register(Method, "giveweapon", |world, receiver, args| {
         let id = client_of(world, receiver)?;
         let named = weapon_arg(world, args, 0)?;
@@ -1732,4 +1782,98 @@ fn register_inventory(registry: &mut NativeRegistry) {
             _ => "none",
         }))
     });
+    registry.register(Method, "giveachievement", |world, receiver, args| {
+        let name = string(args, 0)?;
+        diag::info!(Sim, "achievement unlocked: {}", name);
+        if let Ok(id) = super::engine::entity_id(world, receiver) {
+            world.resource_mut::<RoundScript>().set_object_field(
+                id,
+                "last_achievement",
+                Value::string(&name),
+            );
+        }
+        Ok(Value::Undefined)
+    });
+    registry.register(Method, "uploadscore", |world, receiver, args| {
+        let lb = string(args, 0)?;
+        let score = int(args, 1)?;
+        diag::info!(Sim, "uploadscore for {}: {}", lb, score);
+        if let Ok(id) = super::engine::entity_id(world, receiver) {
+            world.resource_mut::<RoundScript>().set_object_field(
+                id,
+                "leaderboard_score",
+                Value::Int(score),
+            );
+        }
+        Ok(Value::Undefined)
+    });
+    registry.register(Method, "uploadtime", |world, receiver, args| {
+        let lb = string(args, 0)?;
+        let time = float(args, 1)?;
+        diag::info!(Sim, "uploadtime for {}: {}", lb, time);
+        if let Ok(id) = super::engine::entity_id(world, receiver) {
+            world.resource_mut::<RoundScript>().set_object_field(
+                id,
+                "leaderboard_time",
+                Value::Float(time),
+            );
+        }
+        Ok(Value::Undefined)
+    });
+    registry.register(Method, "playersetstreamorigin", |world, receiver, args| {
+        let id = super::engine::entity_id(world, receiver)?;
+        let origin = vector(args, 0)?;
+        world.resource_mut::<RoundScript>().set_object_field(
+            id,
+            "stream_origin",
+            Value::Vector(origin),
+        );
+        Ok(Value::Undefined)
+    });
+    registry.register(Method, "playerclearstreamorigin", |world, receiver, _| {
+        let id = super::engine::entity_id(world, receiver)?;
+        world
+            .resource_mut::<RoundScript>()
+            .set_object_field(id, "stream_origin", Value::Undefined);
+        Ok(Value::Undefined)
+    });
+    registry.register(
+        Method,
+        "playersetgroundreferenceent",
+        |world, receiver, args| {
+            let id = super::engine::entity_id(world, receiver)?;
+            let ent = args.get(0).cloned().unwrap_or(Value::Undefined);
+            world
+                .resource_mut::<RoundScript>()
+                .set_object_field(id, "groundreferenceent", ent);
+            Ok(Value::Undefined)
+        },
+    );
+    registry.register(Method, "nightvisionforceoff", |world, receiver, _| {
+        let id = super::engine::entity_id(world, receiver)?;
+        world.resource_mut::<RoundScript>().set_object_field(
+            id,
+            "nightvision_active",
+            Value::Int(0),
+        );
+        crate::script::runtime::raise(world, Value::Object(id), "nightvision_off", Vec::new());
+        Ok(Value::Undefined)
+    });
+    registry.register(Function, "precachenightvisioncodeassets", |_, _, _| {
+        Ok(Value::Undefined)
+    });
+    registry.register(Method, "thermaldrawenable", |world, receiver, _| {
+        let id = super::engine::entity_id(world, receiver)?;
+        world.resource_mut::<RoundScript>().set_object_field(
+            id,
+            "thermal_draw_enabled",
+            Value::Int(1),
+        );
+        Ok(Value::Undefined)
+    });
+    registry.register(
+        Method,
+        "forceviewmodelanimation",
+        |_world, _receiver, _args| Ok(Value::Undefined),
+    );
 }

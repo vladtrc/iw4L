@@ -119,8 +119,12 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
         }
     };
 
-    s.plain_array(p, s.layout(104, 136), 4, 8, ai_vs_ai_knots)?;
-    s.plain_array(p, s.layout(108, 144), 4, 8, ai_vs_player_knots)?;
+    let ai_vs_ai_graph = s
+        .plain_array(p, s.layout(104, 136), 4, 8, ai_vs_ai_knots)?
+        .map(|knots| (knots, ai_vs_ai_knots));
+    let ai_vs_player_graph = s
+        .plain_array(p, s.layout(108, 144), 4, 8, ai_vs_player_knots)?
+        .map(|knots| (knots, ai_vs_player_knots));
 
     let name = match s.ptr_at(p, 0)? {
         ZonePtr::Offset(q) => Some(s.resolve_alias(q)),
@@ -345,6 +349,8 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
         },
     };
     s.record_weapon(WeaponGeometry {
+        ai_vs_ai_knots: ai_vs_ai_graph,
+        ai_vs_player_knots: ai_vs_player_graph,
         alternate_weapon_name,
         alternate_raise_time_ms: s.i32_at(p, s.layout(68, 92))?,
         first_raise_time_ms: s.i32_at(p, s.layout(84, 116))?,
@@ -398,6 +404,10 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
         world_model_names,
         projectile_model_name,
         rocket_model_name,
+        ai_script_name: weap_def.and_then(|body| match s.ptr_at(body, s.layout(1420, 1856)) {
+            Ok(ZonePtr::Offset(q)) => Some(s.resolve_alias(q)),
+            _ => None,
+        }),
         sz_xanims,
         sz_xanims_right,
         sz_xanims_left,

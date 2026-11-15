@@ -1252,6 +1252,8 @@ fn decode_client_meta(input: &mut WireReader<'_>) -> Result<ClientSnapshotMeta, 
         usability_disabled: input.get_u8()? != 0,
         linked: input.get_u8()? != 0,
         switch_to: input.get_u32()?,
+        denied: 0,
+        viewmodel_hidden: false,
     };
     let killcam_hud = match input.get_u8()? {
         0 => None,
@@ -3129,6 +3131,8 @@ fn decode_objectives(input: &mut WireReader<'_>) -> Result<sim::ObjectiveMatch, 
             team,
             icon,
             viewer,
+            label: String::new(),
+            follows: false,
         });
     }
     let count = input.get_u16()?;

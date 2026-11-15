@@ -369,13 +369,25 @@ fn print_text(world: &mut World, value: &Value) -> String {
     }
 }
 
-fn print(
+pub(crate) fn print(
     world: &mut World,
     recipient: Option<u32>,
     bold: bool,
     args: &[Value],
 ) -> Result<Value, String> {
-    let (template, arg) = match arg(args, 0)? {
+    let (template, arg) = print_parts(world, args)?;
+    FrameWorld::from_world(world).push_print(crate::PendingPrint {
+        recipient: recipient.map(crate::ClientId),
+        bold,
+        chat: false,
+        template,
+        arg,
+    });
+    Ok(Value::Undefined)
+}
+
+pub(crate) fn print_parts(world: &mut World, args: &[Value]) -> Result<(String, String), String> {
+    Ok(match arg(args, 0)? {
         Value::LocalizedString(key) => (
             key.to_string(),
             args[1..]
@@ -394,15 +406,7 @@ fn print(
             }
             (text, String::new())
         }
-    };
-    FrameWorld::from_world(world).push_print(crate::PendingPrint {
-        recipient: recipient.map(crate::ClientId),
-        bold,
-        chat: false,
-        template,
-        arg,
-    });
-    Ok(Value::Undefined)
+    })
 }
 
 pub(crate) fn chat(
@@ -699,4 +703,41 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         frame.set_hud_elem_sound_ids(ids);
         Ok(Value::Undefined)
     });
+    registry.register(
+        Method,
+        "setwaypointedgestyle_rotatingicon",
+        |world, receiver, _| {
+            let (_, slot) = slot_of(world, receiver)?;
+            edit(world, slot, |s| {
+                s.elem.elem_type = HE_TYPE_WAYPOINT;
+            });
+            Ok(Value::Undefined)
+        },
+    );
+    registry.register(
+        Method,
+        "setwaypointiconoffscreenonly",
+        |world, receiver, _| {
+            let (_, slot) = slot_of(world, receiver)?;
+            edit(world, slot, |s| {
+                s.elem.elem_type = HE_TYPE_WAYPOINT;
+                s.elem.value = (s.elem.value as i32 | hud_iw4::WAYPOINT_HIDE_OFFSCREEN) as f32;
+            });
+            Ok(Value::Undefined)
+        },
+    );
+    registry.register(
+        Method,
+        "setmotiontrackervisible",
+        |world, receiver, args| {
+            let id = super::natives::engine::entity_id(world, receiver)?;
+            let visible = optional(args, 0, int)?.unwrap_or(1) != 0;
+            world.resource_mut::<RoundScript>().set_object_field(
+                id,
+                "motion_tracker_visible",
+                Value::Int(visible.into()),
+            );
+            Ok(Value::Undefined)
+        },
+    );
 }

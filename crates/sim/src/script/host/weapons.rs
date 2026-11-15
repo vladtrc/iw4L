@@ -11,6 +11,8 @@ use bevy_ecs::prelude::World;
 pub(crate) use weapon_iw4::WEAPTYPE_PROJECTILE;
 use weapon_iw4::{WEAPTYPE_GRENADE, WeaponState};
 
+pub(crate) mod campaign;
+
 const GRENADE_LINGER_MS: i64 = 30_000; // threads on the grenade keep running after it explodes
 
 pub(crate) fn is_changing_weapon(state: i32) -> bool {
@@ -155,9 +157,13 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
                 .player_client_of(value)
                 .map(ClientId)
                 .ok_or("MagicBullet owner is not a player")?,
-            None => return Err("MagicBullet needs an owning player".into()),
+            None => campaign::owner(world).ok_or("MagicBullet needs an owning player")?,
         };
-        launch(world, owner, weapon, start, end)
+        let missile = launch(world, owner, weapon, start, end)?;
+        if args.get(3).is_none() {
+            campaign::mark_ownerless(world, &missile);
+        }
+        Ok(missile)
     });
     registry.register(Method, "detonate", |world, receiver, _| {
         let (_, id, number) = missile_of(world, receiver)?;
@@ -261,6 +267,7 @@ pub(crate) fn sync_engine_events(world: &mut World) {
     super::triggers::dispatch_grenade_touches(world);
     super::guidance::advance(world);
     super::turrets::advance(world);
+    campaign::projectile_impacts(world, &notes);
     settle_projectiles(world, &notes);
     settle_items(world);
     super::vehicles::advance(world);
@@ -452,7 +459,7 @@ fn settle_projectiles(world: &mut World, notes: &[WeaponNote]) {
             continue;
         };
         let detonated = notes.iter().find_map(|note| match *note {
-            WeaponNote::Detonated { id: at, origin } if at == id => Some(origin),
+            WeaponNote::Detonated { id: at, origin, .. } if at == id => Some(origin),
             _ => None,
         });
         let stuck = notes

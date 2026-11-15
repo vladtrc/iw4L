@@ -1,5 +1,7 @@
 use super::*;
 
+mod campaign;
+
 static NEXT_PRODUCTS_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 pub(super) async fn walk_prepared_match(
@@ -130,11 +132,15 @@ pub(super) async fn walk_prepared_match(
         common.retained_payloads(),
         common.retained_bytes() as f64 / (1024.0 * 1024.0),
     ));
-    let common_images = hold_image_plan(
-        "common_mp FPV",
-        common.fpv_plan.clone(),
-        load_jobs::open(JobKind::ImageDecode).namespace("iw4"),
-    );
+    let common_images = if asset_transport::campaign_zone_set() {
+        None
+    } else {
+        hold_image_plan(
+            "common_mp FPV",
+            common.fpv_plan.clone(),
+            load_jobs::open(JobKind::ImageDecode).namespace("iw4"),
+        )
+    };
 
     let opened_map = map_open.await;
     if progress.is_canceled() {
@@ -183,7 +189,9 @@ pub(super) async fn walk_prepared_match(
         spawns: dm_spawns,
         mut bodies,
         fpv_meshes: map_fpv,
+        world_weapons: map_world_weapons,
         xanims: map_xanims,
+        weapons: map_weapons,
         mut facts,
         arena_bytes: s1_map_bytes,
         sound,
@@ -303,6 +311,7 @@ pub(super) async fn walk_prepared_match(
         "GSC source assets: {} (map overrides common_mp)",
         scripts.len()
     ));
+    let viewhands = campaign::viewhands(&scripts, &zone_name);
 
     report.push(format!(
         "map teams: allies={:?} axis={:?} attackers={:?} defenders={:?}",
@@ -318,6 +327,17 @@ pub(super) async fn walk_prepared_match(
         asset_transport::process_resident_bytes().unwrap_or(0),
     ));
 
+    if let Some(mut map_weapons) = map_weapons {
+        let captured = map_weapons.len();
+        map_weapons.retain(|namespace, name| !weapons.holds(namespace, name));
+        report.push(format!(
+            "map weapons: {} absorbed of {captured} captured",
+            map_weapons.len()
+        ));
+        if !map_weapons.is_empty() {
+            weapons.absorb(map_weapons.into_build());
+        }
+    }
     let common_xanim_count = xanims.len();
     let map_xanim_count = map_xanims.len();
     let t5_xanim_added = xanims.absorb(t5_xanims);
@@ -376,6 +396,10 @@ pub(super) async fn walk_prepared_match(
     let map_fpv_added = fpv_meshes.absorb(map_fpv);
     fpv_meshes.set_map_namespace(map_namespace);
 
+    if asset_transport::campaign_zone_set() {
+        let added = world_weapons.absorb(map_world_weapons);
+        report.push(format!("map world guns: {added} absorbed"));
+    }
     world_weapons.seal_identity();
     weapons.resolve_world_model_edges(&world_weapons);
     let world_model_edges = weapons.world_model_edge_census();
@@ -681,7 +705,7 @@ pub(super) async fn walk_prepared_match(
         &player_anim_sources,
         &xanims,
     );
-    weapons.resolve_fpv_soldiers(&fpv_meshes, &soldiers);
+    weapons.resolve_fpv_soldiers(&fpv_meshes, &soldiers, viewhands.as_deref());
     let assembly_started = std::time::Instant::now();
     let assemblies = weapons.resolve_fpv_assemblies(&fpv_meshes, &xanims);
     report.push(format!(
@@ -849,6 +873,7 @@ pub(super) async fn walk_prepared_match(
         sound,
         sound_gaps: 0,
         script_sound_aliases: None,
+        script_sound_length: None,
     };
     (MatchLoadOutcome::Ready(prepared), Some(common))
 }

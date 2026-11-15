@@ -159,6 +159,8 @@ pub struct ScriptControls {
     pub usability_disabled: bool,
     pub linked: bool,
     pub switch_to: u32,
+    pub denied: u8,
+    pub viewmodel_hidden: bool,
 }
 
 impl ClientMatchState {

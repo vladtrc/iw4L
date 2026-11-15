@@ -29,15 +29,15 @@ pub use schedule::{
     configure_client_sets, configure_render_sets, configure_worker_cmd_sets, worker_cmd_name,
 };
 pub use script_entity_notify::{AbortKillcam, BeginKillcam, KillcamEnded, SpawnedPlayer};
-pub use script_notify::{ExitLevelCalled, register_script_notify};
+pub use script_notify::{CampaignLevelCalled, ExitLevelCalled, register_script_notify};
 pub use session::{
     AdmissionKey, AppScreen, BotNavigationReady, CacWeaponOffer, ClassSelectHandoff,
-    DisplayEncodedCamera, Headless, HostClassLoadouts, HostClassSlot, HudDraw, HudInputView,
-    InstalledMatch, LaunchIdentity, LaunchReport, LifeEndCause, LifeEnded, LifeStartReason,
-    LifeStarted, LocalLoadKey, LocalSpawnArmed, MapLoadApproved, MapLoadFailed, MatchKey,
-    PresentationContext, ReadinessState, RuntimeRole, TeardownReason, UiCamera, UiDraw,
-    UiOverlayInput, UiPointerFree, ViewSubject, WorldGeneration, WorldProducts, WorldReadiness,
-    WorldStamp,
+    DisplayEncodedCamera, GamePaused, Headless, HostClassLoadouts, HostClassSlot, HudDraw,
+    HudInputView, InstalledMatch, LaunchIdentity, LaunchReport, LifeEndCause, LifeEnded,
+    LifeStartReason, LifeStarted, LoadCinematicPlaying, LocalLoadKey, LocalSpawnArmed,
+    MapLoadApproved, MapLoadFailed, MatchKey, PresentationContext, ReadinessState, RuntimeRole,
+    TeardownReason, UiCamera, UiDraw, UiOverlayInput, UiPointerFree, ViewSubject, WorldGeneration,
+    WorldProducts, WorldReadiness, WorldStamp,
 };
 pub use settings::{DisplayResolution, GameSettings, OtherGame};
 pub use ui::{

@@ -36,6 +36,9 @@ pub struct SimWeaponRow {
     pub melee_only: bool,
     pub script_sounds: WeaponScriptSounds,
     pub equipment: crate::EquipmentRuntimeFacts,
+    pub ai_accuracy: weapon_iw4::AiAccuracyGraphs,
+    pub silenced: bool,
+    pub thermal_scope: bool,
 }
 
 #[derive(Debug)]
@@ -61,6 +64,9 @@ pub struct SimWeaponContent {
     pub(crate) weapon_melee_only: Vec<bool>,
     pub(crate) weapon_script_sounds: Vec<WeaponScriptSounds>,
     pub(crate) equipment_runtime: Vec<EquipmentRuntimeFacts>,
+    pub(crate) ai_accuracy: Vec<weapon_iw4::AiAccuracyGraphs>,
+    pub(crate) weapon_silenced: Vec<bool>,
+    pub(crate) weapon_thermal_scope: Vec<bool>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -94,6 +100,9 @@ impl SimWeaponContent {
             weapon_melee_only: Default::default(),
             weapon_script_sounds: Default::default(),
             equipment_runtime: Default::default(),
+            ai_accuracy: Default::default(),
+            weapon_silenced: Default::default(),
+            weapon_thermal_scope: Default::default(),
         }
     }
 
@@ -138,6 +147,9 @@ impl SimWeaponContent {
             result.weapon_melee_only.push(row.melee_only);
             result.weapon_script_sounds.push(row.script_sounds);
             result.equipment_runtime.push(row.equipment);
+            result.ai_accuracy.push(row.ai_accuracy);
+            result.weapon_silenced.push(row.silenced);
+            result.weapon_thermal_scope.push(row.thermal_scope);
             names.push(row.script_name);
             setups.push(row.setup);
         }

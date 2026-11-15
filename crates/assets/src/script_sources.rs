@@ -6,6 +6,7 @@ pub struct ScriptSources {
     tables: BTreeMap<String, ScriptTable>,
     schemas: BTreeMap<String, std::sync::Arc<structured_data_iw4::DefinitionSet>>,
     entities: Option<String>,
+    path_nodes: Vec<asset_world::PathNode>,
     configs: BTreeMap<String, String>,
 }
 
@@ -42,6 +43,61 @@ impl ScriptSources {
 
     pub fn origin(&self, module: &str) -> Option<ScriptSourceOrigin> {
         self.sources.get(module).map(|source| source.origin)
+    }
+
+    pub fn modules(&self) -> impl Iterator<Item = &str> {
+        self.sources.keys().map(String::as_str)
+    }
+
+    pub fn walk_iw4_zone(path: &std::path::Path) -> Result<Self, String> {
+        struct Walk(ScriptSources);
+        impl fastfile_iw4::AssetSink for Walk {
+            fn set_script_strings(&mut self, _: fastfile_iw4::ScriptStrings) {}
+            fn load_asset(
+                &mut self,
+                s: &mut fastfile_iw4::ZoneStream<'_>,
+                _: usize,
+                ty: fastfile_iw4::AssetType,
+                slot: fastfile_iw4::Ptr,
+            ) -> fastfile_iw4::Result<()> {
+                fastfile_iw4::load_asset_at_observed(s, ty, slot, self).map(|_| ())
+            }
+        }
+        impl fastfile_iw4::AssetLinkSink for Walk {
+            fn loaded(
+                &mut self,
+                _: &fastfile_iw4::ZoneStream<'_>,
+                _: fastfile_iw4::AssetType,
+                _: fastfile_iw4::Ptr,
+                _: Option<fastfile_iw4::Ptr>,
+            ) -> fastfile_iw4::Result<()> {
+                Ok(())
+            }
+            fn alias(
+                &mut self,
+                _: fastfile_iw4::AssetType,
+                _: fastfile_iw4::Ptr,
+                _: fastfile_iw4::Ptr,
+            ) -> fastfile_iw4::Result<()> {
+                Ok(())
+            }
+            fn capture_raw_file(
+                &mut self,
+                name: &str,
+                data: &[u8],
+                zlib_compressed: bool,
+            ) -> fastfile_iw4::Result<()> {
+                self.0.capture(name, data, zlib_compressed);
+                Ok(())
+            }
+        }
+        let image = asset_transport::open_zone(path).map_err(|e| e.to_string())?;
+        let header = image.header().map_err(|e| e.to_string())?;
+        let mut memory = asset_transport::ZoneMemory::for_header(&header);
+        let mut stream = memory.stream(&image.bytes).map_err(|e| e.to_string())?;
+        let mut walk = Walk(Self::default());
+        fastfile_iw4::load_zone(&mut stream, &mut walk).map_err(|e| e.to_string())?;
+        Ok(walk.0)
     }
 
     pub fn len(&self) -> usize {
@@ -150,6 +206,14 @@ impl ScriptSources {
         self.entities.as_deref()
     }
 
+    pub fn path_nodes(&self) -> &[asset_world::PathNode] {
+        &self.path_nodes
+    }
+
+    pub(crate) fn set_path_nodes(&mut self, nodes: Vec<asset_world::PathNode>) {
+        self.path_nodes = nodes;
+    }
+
     pub fn config(&self, name: &str) -> Option<&str> {
         self.configs.get(&normalize(name)).map(String::as_str)
     }
@@ -163,7 +227,11 @@ impl ScriptSources {
 
     pub(crate) fn capture(&mut self, name: &str, data: &[u8], compressed: bool) {
         let name = normalize(name);
-        if name.ends_with(".cfg") || name.ends_with(".shock") || name == "radiant/keys.txt" {
+        if name.ends_with(".cfg")
+            || name.ends_with(".shock")
+            || name.ends_with(".atr")
+            || name == "radiant/keys.txt"
+        {
             if let Some(text) = asset_world::decode_rawfile_text(data, compressed) {
                 self.configs.insert(name, text);
             }
@@ -242,13 +310,16 @@ impl ScriptSources {
         self.entities = Some(entities);
     }
 
-    pub(crate) fn overlay(&mut self, other: Self) {
+    pub fn overlay(&mut self, other: Self) {
         self.sources.extend(other.sources);
         self.tables.extend(other.tables);
         self.schemas.extend(other.schemas);
         self.configs.extend(other.configs);
         if other.entities.is_some() {
             self.entities = other.entities;
+        }
+        if !other.path_nodes.is_empty() {
+            self.path_nodes = other.path_nodes;
         }
     }
 }

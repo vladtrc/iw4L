@@ -20,10 +20,31 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
             parts.next().unwrap_or(0.0)
         })))
     });
-    registry.register(Function, "setdvar", |world, _, args| {
-        let name = dvar_name(args)?;
-        let value = dvar_value(args)?;
-        set_dvar(world, &name, &value);
+    for name in ["setdvar", "setsaveddvar"] {
+        registry.register(Function, name, |world, _, args| {
+            let name = dvar_name(args)?;
+            let value = dvar_value(args)?;
+            set_dvar(world, &name, &value);
+            Ok(Value::Undefined)
+        });
+    }
+    registry.register(Function, "settimescale", |world, _, args| {
+        let scale = super::super::args::float(args, 0)?;
+        if scale <= 0.0 {
+            return Err("timescale must be positive".into());
+        }
+        set_dvar(world, "timescale", &scale.to_string());
+        Ok(Value::Undefined)
+    });
+    registry.register(Function, "soundsettimescalefactor", |world, _, args| {
+        let factor = super::super::args::float(args, 0)?;
+        set_dvar(world, "snd_timescalefactor", &factor.to_string());
+        Ok(Value::Undefined)
+    });
+    registry.register(Function, "laserforceon", |_, _, _| Ok(Value::Undefined));
+    registry.register(Function, "laserforceoff", |_, _, _| Ok(Value::Undefined));
+    registry.register(Function, "issavesuccessful", |_, _, _| Ok(Value::Int(1)));
+    registry.register(Function, "refreshhudcompass", |_, _, _| {
         Ok(Value::Undefined)
     });
     registry.register(Function, "setdvarifuninitialized", |world, _, args| {

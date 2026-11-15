@@ -23,6 +23,7 @@ net.workspace = true
 render_frontend.workspace = true
 render_fx.workspace = true
 sim.workspace = true
+bink.workspace = true
 gamemode_iw4.workspace = true
 clipmap_iw4.workspace = true
 weapon_iw4.workspace = true

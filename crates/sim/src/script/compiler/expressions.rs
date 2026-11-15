@@ -35,6 +35,8 @@ impl Parser {
             self.invocation(false, false)?;
         } else if self.eat("thread") {
             self.invocation(false, true)?;
+        } else if self.eat("childthread") {
+            self.child_invocation(false)?;
         } else if self.eat("%") {
             let name = self.ident()?.to_ascii_lowercase();
             let tree = self
@@ -162,6 +164,8 @@ impl Parser {
                 self.invocation(true, false)?;
             } else if self.eat("thread") {
                 self.invocation(true, true)?;
+            } else if self.eat("childthread") {
+                self.child_invocation(true)?;
             } else {
                 let receiver_call = !self.tokens[self.pos].string
                     && self.tokens[self.pos]

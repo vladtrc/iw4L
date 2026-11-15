@@ -1,3 +1,4 @@
+pub(crate) mod campaign;
 mod lifecycle;
 mod state;
 
@@ -174,24 +175,40 @@ pub(super) fn run_now(
     now: i64,
 ) -> Result<(), Fault> {
     let (program, function, location) = entry(world, name)?;
-    let mut thread = new_thread(world, &program, function, receiver, args)
+    run_function_now(world, &program, function, receiver, args, now)
         .map_err(|m| Fault::at(&location, m))?;
+    match world.resource::<RoundScript>().fault.clone() {
+        Some(fault) => Err(fault),
+        None => Ok(()),
+    }
+}
+
+fn run_function_now(
+    world: &mut World,
+    program: &Program,
+    function: usize,
+    receiver: Value,
+    args: Vec<Value>,
+    now: i64,
+) -> Result<Option<u64>, String> {
+    let mut thread = new_thread(world, program, function, receiver, args)?;
     thread.state = ThreadState::Runnable;
     let budget = std::mem::replace(
         &mut world.resource_mut::<RoundScript>().budget,
         INSTRUCTION_BUDGET,
     );
-    execute(world, &program, &mut thread, now);
+    execute(world, program, &mut thread, now);
     world.resource_mut::<RoundScript>().budget = budget;
+    let serial = thread.serial;
     if thread.state == ThreadState::Complete {
-        retire(&mut world.resource_mut::<RoundScript>(), thread.serial);
-    } else {
-        world.spawn(thread);
+        retire(&mut world.resource_mut::<RoundScript>(), serial);
+        return Ok(None);
     }
-    match world.resource::<RoundScript>().fault.clone() {
-        Some(fault) => Err(fault),
-        None => Ok(()),
+    let entity = world.spawn(thread).id();
+    if let Some(mut index) = world.get_resource_mut::<ThreadIndex>() {
+        index.0.insert(serial, entity);
     }
+    Ok(Some(serial))
 }
 
 fn spawn_thread(
@@ -341,7 +358,7 @@ fn truth(value: &Value) -> Result<bool, String> {
     }
 }
 
-fn scalar(value: &Value) -> Option<f32> {
+pub(super) fn scalar(value: &Value) -> Option<f32> {
     match value {
         Value::Int(n) => Some(*n as f32),
         Value::Float(n) => Some(*n),
@@ -806,6 +823,7 @@ fn instruction(
             }
             thread.stack.push(Value::Vector(v));
         }
+        Op::ChildThread => world.resource_mut::<RoundScript>().child_spawn = true,
         Op::Jump(pc) => thread.frames.last_mut().unwrap().pc = pc,
         Op::JumpFalse(pc) => {
             if !truth(&pop(thread)?)? {
@@ -847,6 +865,10 @@ fn instruction(
                 Callee::Script(function) if spawn => {
                     frame_room(world, thread)?;
                     let child = new_thread(world, program, function as usize, receiver, args)?;
+                    let mut runtime = world.resource_mut::<RoundScript>();
+                    if std::mem::take(&mut runtime.child_spawn) {
+                        runtime.parents.insert(child.serial, thread.serial);
+                    }
                     run_inline(world, program, thread, child, now)?;
                 }
                 Callee::Script(function) => {
@@ -1148,6 +1170,20 @@ fn with_thread<R>(
 fn retire(runtime: &mut RoundScript, serial: u64) {
     runtime.waiters.retain(|w| w.thread != serial);
     dequeue(runtime, serial);
+    runtime.parents.remove(&serial);
+    if runtime.parents.is_empty() {
+        return;
+    }
+    let children: Vec<u64> = runtime
+        .parents
+        .iter()
+        .filter(|(_, parent)| **parent == serial)
+        .map(|(child, _)| *child)
+        .collect();
+    for child in children {
+        runtime.orphans.push(child);
+        retire(runtime, child);
+    }
 }
 
 fn dequeue(runtime: &mut RoundScript, serial: u64) {
@@ -1304,6 +1340,7 @@ pub(crate) fn advance_scheduler(world: &mut World) {
     world.resource_mut::<RoundScript>().last_tick = Some(tick);
     let now = i64::from(tick.0) * i64::from(crate::MATCH_TICK_MS);
     super::host::mechanics::deliver_finished(world);
+    campaign::advance(world, now);
     deliver_external(world, now);
     let doomed = threads_waiting_on_deleted(world);
     let dead: Vec<_> = if doomed.is_empty() {
@@ -1332,6 +1369,11 @@ pub(crate) fn advance_scheduler(world: &mut World) {
         runtime.buckets.insert(now, current);
     }
     run_ready(world, &program, now);
+    for serial in std::mem::take(&mut world.resource_mut::<RoundScript>().orphans) {
+        if let Some(entity) = find_thread(world, serial) {
+            world.despawn(entity);
+        }
+    }
     let deletes = world.resource_mut::<RoundScript>().take_finishing();
     for object in deletes {
         // Map objects and HUD elements use script-local numbers. Model presence
@@ -1516,7 +1558,9 @@ fn stack_effect(op: &Op) -> (usize, usize) {
         Op::Call(_, argc, method) | Op::Spawn(_, argc, method) => (argc + usize::from(method), 1),
         Op::Indirect(argc, method, _) => (argc + 1 + usize::from(method), 1),
         Op::Notify(argc) | Op::AwaitMatch(argc) => (argc + 2, 0),
-        Op::Jump(_) | Op::EnsureLocalArray(_) | Op::FrameEnd | Op::Return => (0, 0),
+        Op::Jump(_) | Op::EnsureLocalArray(_) | Op::FrameEnd | Op::Return | Op::ChildThread => {
+            (0, 0)
+        }
     }
 }
 
@@ -1712,6 +1756,7 @@ impl RoundScript {
                 .flat_map(|(_, _, args)| args.iter().cloned()),
         );
         self.t5.roots(pending);
+        self.campaign.roots(pending);
     }
 }
 

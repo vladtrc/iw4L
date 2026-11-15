@@ -16,6 +16,10 @@ pub(crate) struct RestartPlan {
     pub entries: Vec<String>,
     pub schemas: BTreeMap<String, Arc<structured_data_iw4::DefinitionSet>>,
     pub player_data_defaults: Option<Arc<crate::PlayerDataDefaults>>,
+    pub videos: Arc<BTreeMap<String, i32>>,
+    pub turret_ai_scripts: Arc<BTreeMap<String, String>>,
+    pub anim: Arc<super::script_anim::AnimLibrary>,
+    pub path_nodes: Arc<Vec<asset_core::PathNode>>,
 }
 
 impl std::fmt::Debug for RestartPlan {
@@ -90,6 +94,16 @@ fn field(runtime: &RoundScript, object: u64, name: &str) -> Option<Value> {
     runtime.objects.get(&object)?.get(id).cloned()
 }
 
+pub(crate) fn detach_game(runtime: &RoundScript) -> Vec<(Arc<str>, Detached)> {
+    runtime
+        .objects
+        .get(&1)
+        .into_iter()
+        .flatten()
+        .filter_map(|(id, value)| Some((symbol_name(runtime, *id)?, detach(runtime, value, 0)?)))
+        .collect()
+}
+
 pub(crate) fn restart_level(world: &mut World, tick: crate::Tick) {
     let runtime = world.resource::<RoundScript>();
     let Some(persist) = runtime.pending_restart else {
@@ -101,13 +115,7 @@ pub(crate) fn restart_level(world: &mut World, tick: crate::Tick) {
     let (Some(program), Some(plan)) = (runtime.program.clone(), runtime.restart.clone()) else {
         return;
     };
-    let game: Vec<(Arc<str>, Detached)> = runtime
-        .objects
-        .get(&1)
-        .into_iter()
-        .flatten()
-        .filter_map(|(id, value)| Some((symbol_name(runtime, *id)?, detach(runtime, value, 0)?)))
-        .collect();
+    let game = detach_game(runtime);
     let pers: BTreeMap<u32, Detached> = runtime
         .players
         .iter()
@@ -123,7 +131,12 @@ pub(crate) fn restart_level(world: &mut World, tick: crate::Tick) {
     let spawned: Vec<crate::ScriptModelId> = runtime
         .entities
         .values()
-        .filter(|e| matches!(e.kind, EntityKind::Spawned | EntityKind::Vehicle))
+        .filter(|e| {
+            matches!(
+                e.kind,
+                EntityKind::Spawned | EntityKind::Vehicle | EntityKind::Actor
+            )
+        })
         .filter_map(|e| e.presence)
         .collect();
 

@@ -377,6 +377,7 @@ impl XAnimBuild {
                     notifies,
                     indices,
                     delta_trans: None,
+                    delta_quat: None,
                 }),
             },
         );
@@ -470,6 +471,7 @@ impl XAnimBuild {
                     notifies,
                     indices,
                     delta_trans: None,
+                    delta_quat: None,
                 }),
             },
         );
@@ -568,6 +570,7 @@ impl XAnimBuild {
             notifies,
             indices,
             delta_trans: None,
+            delta_quat: None,
         };
         self.insert_in(
             ns,
@@ -672,6 +675,8 @@ impl AssetLinkSink for XAnimBuild {
             copy_u16(s, geometry.indices, geometry.index_count)
         };
         let delta_trans = copy_delta_trans(s, geometry.delta_trans);
+        let delta_quat = copy_delta_quat(s, geometry.delta_quat2, 2)
+            .or_else(|| copy_delta_quat(s, geometry.delta_quat, 4));
 
         self.insert_captured(CapturedXAnim {
             namespace: AssetNamespace::Iw4,
@@ -691,6 +696,7 @@ impl AssetLinkSink for XAnimBuild {
                 notifies,
                 indices,
                 delta_trans,
+                delta_quat,
             }),
         });
         let _ = geometry.frequency;
@@ -744,6 +750,43 @@ fn copy_f32_3(s: &ZoneStream<'_>, ptr: Ptr, off: usize) -> Option<[f32; 3]> {
         f32::from_le_bytes(bytes[4..8].try_into().ok()?),
         f32::from_le_bytes(bytes[8..12].try_into().ok()?),
     ])
+}
+
+fn copy_delta_quat(
+    s: &ZoneStream<'_>,
+    geo: fastfile_iw4::XAnimDeltaQuatGeometry,
+    lanes: usize,
+) -> Option<crate::xanim_clip::RawDeltaQuat> {
+    let (indices, words) = match geo.constant {
+        Some(constant) => (Vec::new(), copy_u16(s, Some(constant), lanes)),
+        None => {
+            let n = geo.size as usize + 1;
+            let indices = if geo.indices_are_bytes {
+                copy_u8(s, geo.indices, n)
+                    .into_iter()
+                    .map(u16::from)
+                    .collect()
+            } else {
+                copy_u16(s, geo.indices, n)
+            };
+            (indices, copy_u16(s, geo.frames?.into(), lanes * n))
+        }
+    };
+    if words.is_empty() {
+        return None;
+    }
+    let values = words
+        .chunks_exact(lanes)
+        .map(|key| {
+            let key: Vec<i16> = key.iter().map(|w| *w as i16).collect();
+            if lanes == 2 {
+                [0, 0, key[0], key[1]]
+            } else {
+                [key[0], key[1], key[2], key[3]]
+            }
+        })
+        .collect();
+    Some(crate::xanim_clip::RawDeltaQuat { indices, values })
 }
 
 fn copy_delta_trans(

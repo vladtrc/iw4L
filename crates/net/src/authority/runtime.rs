@@ -12,7 +12,7 @@ use crate::policy::seat::ActiveKillcams;
 use crate::schedule::AuthoritySet;
 use crate::transport::archive::FrameArchive;
 use crate::transport::loopback_live::ListenLoopback;
-use frame::{ExitLevelCalled, RuntimeRole, register_script_notify};
+use frame::{CampaignLevelCalled, ExitLevelCalled, RuntimeRole, register_script_notify};
 use sim::{ClientId, ClientLifecycle, DamageSource, SimEvent};
 
 #[derive(Resource)]
@@ -537,6 +537,7 @@ fn advance_authority_clock(
     mut server_tick: ResMut<ServerTick>,
     mut pending_step: ResMut<PendingStepResult>,
     mut trace: Option<ResMut<AuthorityPhaseTrace>>,
+    world: Option<ResMut<AuthorityWorld>>,
 ) {
     if let Some(t) = trace.as_deref_mut() {
         t.0.clear();
@@ -544,6 +545,12 @@ fn advance_authority_clock(
     push_phase(trace, "Advance");
     server_tick.0 = None;
     pending_step.0 = None;
+    if clock.tick == 0
+        && let Some(tick) = world.and_then(|mut world| world.0.take_resume_tick())
+    {
+        clock.tick = tick.0;
+        clock.time_ms = (tick.0 as i32).wrapping_mul(crate::AUTHORITY_MS);
+    }
     clock.advance();
 }
 
@@ -802,6 +809,7 @@ struct FanoutQueues<'w> {
     gives: ResMut<'w, DumpGiveLog>,
     configuration_changes: ResMut<'w, DumpConfigurationChangeLog>,
     exit_level: MessageWriter<'w, ExitLevelCalled>,
+    campaign_level: MessageWriter<'w, CampaignLevelCalled>,
 }
 
 fn fanout_loopback(
@@ -856,6 +864,11 @@ fn fanout_loopback(
     if tick.script_exit_level {
         queues.exit_level.write(ExitLevelCalled);
         diag::info!(Sim, "exitLevel: called by the match scripts");
+    }
+    if let Some(level) = &tick.campaign_level {
+        queues
+            .campaign_level
+            .write(CampaignLevelCalled(level.clone()));
     }
     queues.deaths.push_journal(&tick.snapshot.meta.journal);
     queues.gives.push_journal(&tick.snapshot.meta.journal);
@@ -1062,7 +1075,9 @@ pub fn authority_bookkeeping(
     push_phase(trace, "Bookkeeping");
 
     if let Some(tick) = server_tick.0.as_ref() {
-        archive.push_snapshot(&tick.snapshot, &seats.viewers());
+        if !asset_transport::campaign_zone_set() {
+            archive.push_snapshot(&tick.snapshot, &seats.viewers());
+        }
     }
 }
 pub fn register_listen_runtime(app: &mut App) {

@@ -612,6 +612,12 @@ pub struct FxWorldGeometry {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PathDataGeometry {
+    pub nodes: Option<Ptr>,
+    pub node_count: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct GlassDataGeometry {
     pub data: Option<Ptr>,
     pub piece_count: usize,
@@ -817,6 +823,17 @@ pub struct XAnimPartsGeometry {
     pub indices_are_bytes: bool,
 
     pub delta_trans: XAnimDeltaTransGeometry,
+    pub delta_quat2: XAnimDeltaQuatGeometry,
+    pub delta_quat: XAnimDeltaQuatGeometry,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct XAnimDeltaQuatGeometry {
+    pub size: u16,
+    pub constant: Option<Ptr>,
+    pub frames: Option<Ptr>,
+    pub indices: Option<Ptr>,
+    pub indices_are_bytes: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -919,6 +936,8 @@ pub struct WeaponIdleCapture {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct WeaponGeometry {
     pub name: Option<Ptr>,
+    pub ai_vs_ai_knots: Option<(Ptr, usize)>,
+    pub ai_vs_player_knots: Option<(Ptr, usize)>,
     pub alternate_weapon_name: Option<Ptr>,
     pub alternate_raise_time_ms: i32,
     pub alternate_drop_time_ms: i32,
@@ -941,6 +960,8 @@ pub struct WeaponGeometry {
     pub projectile_model_name: Option<Ptr>,
 
     pub rocket_model_name: Option<Ptr>,
+
+    pub ai_script_name: Option<Ptr>,
 
     pub sz_xanims: Option<Ptr>,
 
@@ -1419,6 +1440,7 @@ pub struct ZoneStream<'a> {
     gfx_world: Option<GfxWorldGeometry>,
     fx_world: Option<FxWorldGeometry>,
     glass_data: Option<GlassDataGeometry>,
+    path_data: Option<PathDataGeometry>,
     clip_map: Option<ClipMapGeometry>,
     map_ents: Option<MapEntsGeometry>,
     xmodel: Option<XModelGeometry>,
@@ -1525,6 +1547,7 @@ impl<'a> ZoneStream<'a> {
             gfx_world: None,
             fx_world: None,
             glass_data: None,
+            path_data: None,
             clip_map: None,
             map_ents: None,
             xmodel: None,
@@ -2078,6 +2101,14 @@ impl<'a> ZoneStream<'a> {
 
     pub fn glass_data(&self) -> Option<GlassDataGeometry> {
         self.glass_data
+    }
+
+    pub fn record_path_data(&mut self, geometry: PathDataGeometry) {
+        self.path_data = Some(geometry);
+    }
+
+    pub fn path_data(&self) -> Option<PathDataGeometry> {
+        self.path_data
     }
 
     pub fn record_clip_map(&mut self, geometry: ClipMapGeometry) {

@@ -295,11 +295,78 @@ pub fn launch(
             }
             run_export_gltf(games, artifacts, zone);
         }
+        LaunchMode::CheckScripts(zones) => {
+            if acceptance.is_some() {
+                fatal("render acceptance is not available for check-scripts");
+            }
+            run_check_scripts(games, zones);
+        }
         LaunchMode::Play {
             name,
             zone_override,
         } => run_play(games, artifacts, name, zone_override, acceptance),
     }
+}
+
+fn run_check_scripts(games: asset_transport::GamesRoot, zones: Vec<String>) {
+    struct Sources<'a>(&'a assets::ScriptSources);
+    impl sim::script::SourceResolver for Sources<'_> {
+        fn read(&self, module: &str) -> Result<String, String> {
+            self.read_bytes(module)
+                .map(|bytes| sim::script::decode_source(&bytes))
+        }
+        fn read_bytes(&self, module: &str) -> Result<Vec<u8>, String> {
+            self.0.read(module)
+        }
+    }
+    let version = asset_transport::zone_version(asset_core::ZoneGame::Iw4);
+    let mut scripts = assets::ScriptSources::default();
+    let (roots, zones): (Vec<String>, Vec<String>) =
+        zones.into_iter().partition(|arg| arg.contains('/'));
+    for zone in &zones {
+        let found = asset_transport::find_zone_file_version(&games, zone, version)
+            .unwrap_or_else(|error| fatal(&format!("check-scripts: {error}")));
+        let walked = assets::ScriptSources::walk_iw4_zone(&found.path)
+            .unwrap_or_else(|error| fatal(&format!("check-scripts: {zone}: {error}")));
+        println!("{zone}: {} scripts", walked.len());
+        scripts.overlay(walked);
+    }
+    let roots: Vec<&str> = if roots.is_empty() {
+        scripts.modules().collect()
+    } else {
+        roots.iter().map(String::as_str).collect()
+    };
+    let catalog = sim::script::Catalog::iw4_sp();
+    let mut failures =
+        std::collections::BTreeMap::<String, std::collections::BTreeSet<String>>::new();
+    let mut faults = std::collections::BTreeMap::<String, Vec<&str>>::new();
+    for root in &roots {
+        match sim::script::Program::unresolved(&Sources(&scripts), &[root], &catalog) {
+            Ok(found) => {
+                for (message, modules) in found {
+                    failures.entry(message).or_default().extend(modules);
+                }
+            }
+            Err(fault) => faults.entry(fault.to_string()).or_default().push(root),
+        }
+    }
+    for (fault, reached_from) in &faults {
+        println!(
+            "parse: {fault}  [reached from {} roots]",
+            reached_from.len()
+        );
+    }
+    for (message, modules) in &failures {
+        let first = modules.first().map_or("", String::as_str);
+        println!("{message}  [{} modules, first {first}]", modules.len());
+    }
+    println!(
+        "check-scripts: {} unresolved, {} parse faults across {} modules",
+        failures.len(),
+        faults.len(),
+        roots.len()
+    );
+    std::process::exit(i32::from(!failures.is_empty() || !faults.is_empty()));
 }
 
 fn run_export_gltf(games: asset_transport::GamesRoot, artifacts: PathBuf, zone_arg: String) {
@@ -602,6 +669,7 @@ fn run_map(
     playback: Option<ReplayPlayback>,
     cheats: sim::HostCheats,
 ) {
+    asset_transport::set_campaign_zone_set(asset_transport::is_campaign_level(&games, &zone_arg));
     let found = find_zone_file(&games, &zone_arg);
     let zone_alias = found.as_ref().ok().and_then(|z| z.alias_note.clone());
     let zone_arg_lc = zone_arg.trim().to_ascii_lowercase();

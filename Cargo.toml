@@ -19,6 +19,7 @@ members = [
     "crates/asset_transport",
     "crates/asset_world",
     "crates/assets",
+    "crates/bink",
     "crates/bootstrap",
     "crates/audio",
     "crates/bots",
@@ -127,6 +128,7 @@ asset_model = { path = "crates/asset_model" }
 asset_world = { path = "crates/asset_world" }
 assets = { path = "crates/assets" }
 audio = { path = "crates/audio" }
+bink = { path = "crates/bink" }
 bots = { path = "crates/bots" }
 clipmap_iw4 = { path = "crates/clipmap_iw4" }
 console = { path = "crates/console" }

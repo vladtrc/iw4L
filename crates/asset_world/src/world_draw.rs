@@ -1878,8 +1878,12 @@ fn extract_dpvs(s: &ZoneStream<'_>, g: GfxWorldGeometry) -> Result<DpvsWorldData
     if let Some(insts_ptr) = g.smodel_insts {
         out.smodel_bounds.reserve(g.smodel_count);
         for i in 0..g.smodel_count {
-            out.smodel_bounds
-                .push(read_bounds(s, insts_ptr.at(i * sz::GFX_STATIC_MODEL_INST))?);
+            let bounds = read_bounds(s, insts_ptr.at(i * sz::GFX_STATIC_MODEL_INST))?;
+            out.smodel_bounds.push(if bounds.is_cleared() {
+                bounds
+            } else {
+                Bounds::from_mid_half(bounds.mid(), bounds.half().map(f32::abs))
+            });
         }
     }
 

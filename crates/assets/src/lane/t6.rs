@@ -2640,6 +2640,7 @@ impl ZoneLane for T6Lane {
                 collision: Some(collision),
                 bodies,
                 fpv_meshes,
+                world_weapons: Default::default(),
                 spawns,
                 facts: crate::MapFacts {
                     script_sound: asset_audio::MapScriptSoundFacts {

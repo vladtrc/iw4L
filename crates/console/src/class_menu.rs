@@ -238,7 +238,7 @@ pub(crate) fn route(
     mut events: MessageReader<ConsoleCommand>,
     mut state: Local<ClassMenuState>,
     mut store: ResMut<SessionClassStore>,
-    catalog: Res<ClassLoadoutCatalog>,
+    catalog: Option<Res<ClassLoadoutCatalog>>,
     loading: Option<Res<frame::FrontendContentLoading>>,
     menu_state: hud::MenuState,
     player_data: Res<sim::LocalPlayerData>,
@@ -250,6 +250,9 @@ pub(crate) fn route(
     mut menus: MessageWriter<UiMenuRequest>,
     mut echo: crate::feature_dispatch::ConsoleEcho,
 ) {
+    let Some(catalog) = catalog else {
+        return;
+    };
     let (shell_loc, prepared_loc) = loc;
     let loc = prepared_loc
         .as_ref()

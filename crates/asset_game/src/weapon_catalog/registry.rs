@@ -1069,6 +1069,13 @@ impl WeaponRegistry {
             .and_then(|row| row.projectile_model.as_deref())
     }
 
+    pub fn ai_scripts(&self) -> impl Iterator<Item = (String, &str)> + '_ {
+        self.rows.iter().filter_map(|row| {
+            let script = row.ai_script.as_deref()?;
+            Some((gsc_weapon_script_name(&row.name), script))
+        })
+    }
+
     pub fn rocket_model_of(&self, index: u32) -> Option<&str> {
         self.rows
             .get(index as usize)
@@ -1092,6 +1099,22 @@ impl WeaponRegistry {
             .get(index as usize)
             .map(|row| row.hide_tags.as_slice())
             .unwrap_or(&[])
+    }
+
+    pub fn ai_accuracy_of(&self, index: u32) -> Option<&weapon_iw4::AiAccuracyGraphs> {
+        self.rows.get(index as usize).map(|row| &row.ai_accuracy)
+    }
+
+    pub fn silenced_of(&self, index: u32) -> bool {
+        self.rows
+            .get(index as usize)
+            .is_some_and(|row| row.facts.silenced)
+    }
+
+    pub fn thermal_scope_of(&self, index: u32) -> bool {
+        self.rows
+            .get(index as usize)
+            .is_some_and(|row| row.facts.thermal_scope)
     }
 
     pub fn sounds_of(&self, index: u32) -> Option<&WeaponSoundAliases> {

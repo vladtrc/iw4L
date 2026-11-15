@@ -18,6 +18,7 @@ asset_transport.workspace = true
 asset_world.workspace = true
 assets = { path = "../assets" }
 audio = { path = "../audio" }
+bink.workspace = true
 input_iw4.workspace = true
 net = { path = "../net" }
 render = { path = "../render" }

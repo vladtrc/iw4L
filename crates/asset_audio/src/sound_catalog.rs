@@ -27,7 +27,7 @@ use fastfile_iw4::{AssetLinkSink, AssetType, Ptr, Result, ZonePtr, ZoneStream};
 
 use crate::asset_graph::{AssetEdge, AssetEdgeCensus, AssetEdgeReason, ZoneOwner};
 use crate::ent_channel::{EntChannel, parse_ent_channel_file};
-use crate::{AssetNamespace, ZoneGame};
+use crate::{AssetNamespace, GamesRoot, NamespaceSoundIwd, NamespaceTrees, ZoneGame};
 
 pub use asset_iw4::{advance_lcg, lerp_range, pick_weighted_variant_index, unit_random};
 
@@ -535,6 +535,60 @@ impl SoundCatalog {
             .collect()
     }
 
+    pub fn script_alias_length(&self, games: GamesRoot) -> ScriptSoundLength {
+        #[derive(Clone)]
+        enum Source {
+            Ms(u32),
+            Streamed(AssetNamespace, String),
+        }
+        let mut sources = HashMap::new();
+        for sound in &self.sounds {
+            let ns = ns_of(sound.game);
+            if ns != AssetNamespace::Iw4 {
+                continue;
+            }
+            let Some(row) = sound.aliases.first() else {
+                continue;
+            };
+            let loaded = row
+                .loaded
+                .bound_index()
+                .and_then(|index| self.pcm_at(index));
+            let source = if let Some(pcm) = loaded {
+                let frame = (pcm.channels() * pcm.bits() / 8) as u64;
+                if pcm.format() != MSS_PCM || frame == 0 || pcm.rate == 0 {
+                    continue;
+                }
+                let frames = pcm.encoded_bytes().len() as u64 / frame;
+                Source::Ms((frames * 1000 / u64::from(pcm.rate)) as u32)
+            } else if let Some((ns, dir, name)) = self.streamed_from_row(ns, row) {
+                Source::Streamed(ns, format!("{dir}/{name}"))
+            } else {
+                continue;
+            };
+            let name = sound.name.to_ascii_lowercase();
+            sources.insert(format!("{}:{name}", ns.as_str()), source.clone());
+            sources.insert(name, source);
+        }
+        let iwd = std::sync::OnceLock::new();
+        let read = std::sync::Mutex::new(HashMap::new());
+        std::sync::Arc::new(move |alias: &str| match sources.get(alias)? {
+            Source::Ms(ms) => Some(*ms),
+            Source::Streamed(ns, rel) => {
+                let mut read = read
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                *read.entry(rel.clone()).or_insert_with(|| {
+                    let iwd: &NamespaceSoundIwd = iwd.get_or_init(|| {
+                        NamespaceSoundIwd::open(&NamespaceTrees::discover(&games)).0
+                    });
+                    let header = iwd.read_sound_header(*ns, rel, 4096)?.ok()?;
+                    wav_length_ms(&header)
+                })
+            }
+        })
+    }
+
     pub fn index_in(&self, ns: AssetNamespace, alias: &str) -> Option<usize> {
         if let Some(&i) = self.by_alias.get(&(ns, alias.to_owned())) {
             return Some(i);
@@ -1008,4 +1062,23 @@ impl SoundCatalog {
             .filter(|weights| !weights.is_empty())?;
         Some(pick_weighted_variant_index(weights, rng, avoid))
     }
+}
+
+pub type ScriptSoundLength = std::sync::Arc<dyn Fn(&str) -> Option<u32> + Send + Sync>;
+
+pub fn wav_length_ms(header: &[u8]) -> Option<u32> {
+    if header.get(..4)? != b"RIFF" || header.get(8..12)? != b"WAVE" {
+        return None;
+    }
+    let u32_at = |i: usize| Some(u32::from_le_bytes(header.get(i..i + 4)?.try_into().ok()?));
+    let (mut at, mut byte_rate) = (12, None);
+    while let (Some(id), Some(size)) = (header.get(at..at + 4), u32_at(at + 4)) {
+        match id {
+            b"fmt " => byte_rate = u32_at(at + 16).filter(|&rate| rate != 0),
+            b"data" => return Some((u64::from(size) * 1000 / u64::from(byte_rate?)) as u32),
+            _ => {}
+        }
+        at += 8 + size as usize + (size as usize & 1);
+    }
+    None
 }

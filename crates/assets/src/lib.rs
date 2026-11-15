@@ -44,8 +44,9 @@ pub use prepared::{
 };
 pub use session_load::{
     MatchLoadOutcome, MatchMaterialSeed, PreparedMatch, PreparedWorld, ShellCommon,
-    apply_match_material_map, load_match_material_catalog, load_match_material_seed, load_pool,
-    load_prepared_match, load_shell_common, load_workers, publish_process_cpus,
+    apply_match_material_map, clear_resident_map, forget_common, load_match_material_catalog,
+    load_match_material_seed, load_pool, load_prepared_match, load_shell_common, load_workers,
+    publish_process_cpus,
 };
 
 pub mod image_handles;

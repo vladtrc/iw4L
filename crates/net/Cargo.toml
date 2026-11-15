@@ -7,6 +7,7 @@ description = "Our wire: frames, deltas, prediction, interpolation. Not retail's
 
 [dependencies]
 updater = { path = "../updater" }
+asset_transport.workspace = true
 structured_data_iw4.workspace = true
 ring = "0.17.14"
 diag.workspace = true

@@ -1000,6 +1000,31 @@ fn register_placement(registry: &mut NativeRegistry) {
             origin[i] + (maxs[i] + mins[i]) * 0.5 + (maxs[i] - mins[i]) * 0.5 * scale[i]
         })))
     });
+    registry.register(Method, "getcentroid", |world, receiver, _| {
+        let id = entity_id(world, receiver)?;
+        let origin = vector_field(world, id, "origin");
+        let (mins, maxs) = super::super::triggers::entity_bounds(world, id);
+        Ok(Value::Vector(std::array::from_fn(|i| {
+            origin[i] + (maxs[i] + mins[i]) * 0.5
+        })))
+    });
+    registry.register(Method, "setlookattext", |world, receiver, args| {
+        let id = entity_id(world, receiver)?;
+        let text = string(args, 0)?;
+        let mut runtime = world.resource_mut::<RoundScript>();
+        runtime.set_object_field(id, "lookattext", Value::string(&text));
+        if let Some(sub) = args.get(1) {
+            runtime.set_object_field(id, "lookatsubtext", sub.clone());
+        }
+        Ok(Value::Undefined)
+    });
+    registry.register(Method, "stoplookat", |world, receiver, _| {
+        let id = entity_id(world, receiver)?;
+        let mut runtime = world.resource_mut::<RoundScript>();
+        runtime.set_object_field(id, "lookattext", Value::Undefined);
+        runtime.set_object_field(id, "lookatsubtext", Value::Undefined);
+        Ok(Value::Undefined)
+    });
     registry.register(Method, "gettagangles", |world, receiver, args| {
         let id = entity_id(world, receiver)?;
         let tag = string(args, 0)?;
@@ -1040,6 +1065,7 @@ fn register_appearance(registry: &mut NativeRegistry) {
         let model = string(args, 0)?;
         let id = entity_id(world, receiver)?;
         runtime(world).set_object_field(id, "model", Value::string(&model));
+        runtime(world).new_models.push(id);
         crate::script::host::players::dress_insertion_glow(world, id, &model);
         Ok(Value::Undefined)
     });
@@ -1103,6 +1129,20 @@ fn register_appearance(registry: &mut NativeRegistry) {
     });
     registry.register(Method, "notsolid", |world, receiver, _| {
         with_entity(world, receiver, |e| e.solid = false)
+    });
+    registry.register(Method, "invisiblenotsolid", |world, receiver, _| {
+        with_entity(world, receiver, |e| {
+            e.hidden = true;
+            e.shown_to = 0;
+            e.solid = false;
+        })
+    });
+    registry.register(Method, "visiblesolid", |world, receiver, _| {
+        with_entity(world, receiver, |e| {
+            e.hidden = false;
+            e.shown_to = 0;
+            e.solid = true;
+        })
     });
     registry.register(Method, "setcontents", |world, receiver, args| {
         let contents = int(args, 0)?;
@@ -1632,7 +1672,14 @@ fn register_entity_state(registry: &mut NativeRegistry) {
     registry.register(Method, "scriptmodelclearanim", |world, receiver, _| {
         with_entity(world, receiver, |e| e.anim_op = Some(None))
     });
-    entity_accepts!["willneverchange", "laseron", "laseroff", "logstring",];
+    entity_accepts![
+        "willneverchange",
+        "laseron",
+        "laseroff",
+        "laserforceon",
+        "laserforceoff",
+        "logstring",
+    ];
 }
 
 fn register_traces(registry: &mut NativeRegistry) {
@@ -1744,7 +1791,7 @@ fn register_traces(registry: &mut NativeRegistry) {
 }
 
 fn register_match(registry: &mut NativeRegistry) {
-    use Namespace::Function;
+    use Namespace::{Function, Method};
 
     registry.register(Function, "setteamscore", |world, _, args| {
         let team = team_key(args)?;
@@ -1812,6 +1859,282 @@ fn register_match(registry: &mut NativeRegistry) {
             .get("northyaw")
             .map_or(0.0, |v| super::iw4::atof(v) as f32);
         Ok(Value::Float(yaw))
+    });
+    registry.register(Function, "setnorthyaw", |world, _, args| {
+        let yaw = float(args, 0)?;
+        runtime(world)
+            .engine
+            .worldspawn
+            .insert("northyaw".into(), yaw.to_string());
+        Ok(Value::Undefined)
+    });
+    registry.register(Function, "getculldist", |world, _, _| {
+        let dist = world
+            .resource::<crate::script::MatchScript>()
+            .dvars
+            .get("r_culldist")
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(0.0);
+        Ok(Value::Float(dist))
+    });
+    registry.register(Function, "setculldist", |world, _, args| {
+        let dist = float(args, 0)?;
+        super::iw4::set_dvar(world, "r_culldist", &dist.to_string());
+        Ok(Value::Undefined)
+    });
+    registry.register(Function, "deleteglass", |_, _, _| Ok(Value::Undefined));
+    registry.register(Function, "transformmove", |world, _, args| {
+        if args.len() < 6 {
+            return Err("TransformMove requires 6 arguments".into());
+        }
+        let pos_t1 = vector(args, 0)?;
+        let ang_t1 = vector(args, 1)?;
+        let pos_t2 = vector(args, 2)?;
+        let ang_t2 = vector(args, 3)?;
+        let pos_e = vector(args, 4)?;
+        let ang_e = vector(args, 5)?;
+
+        let axis_t1 = math_iw4::angles_to_axis(ang_t1);
+        let axis_t2 = math_iw4::angles_to_axis(ang_t2);
+        let axis_e = math_iw4::angles_to_axis(ang_e);
+
+        let delta = [
+            pos_e[0] - pos_t1[0],
+            pos_e[1] - pos_t1[1],
+            pos_e[2] - pos_t1[2],
+        ];
+        let local_pos = [
+            delta[0] * axis_t1[0][0] + delta[1] * axis_t1[0][1] + delta[2] * axis_t1[0][2],
+            delta[0] * axis_t1[1][0] + delta[1] * axis_t1[1][1] + delta[2] * axis_t1[1][2],
+            delta[0] * axis_t1[2][0] + delta[1] * axis_t1[2][1] + delta[2] * axis_t1[2][2],
+        ];
+        let mut axis_rel = [[0.0; 3]; 3];
+        for i in 0..3 {
+            for j in 0..3 {
+                axis_rel[i][j] = axis_t1[0][i] * axis_e[0][j]
+                    + axis_t1[1][i] * axis_e[1][j]
+                    + axis_t1[2][i] * axis_e[2][j];
+            }
+        }
+
+        let new_pos = [
+            pos_t2[0]
+                + local_pos[0] * axis_t2[0][0]
+                + local_pos[1] * axis_t2[1][0]
+                + local_pos[2] * axis_t2[2][0],
+            pos_t2[1]
+                + local_pos[0] * axis_t2[0][1]
+                + local_pos[1] * axis_t2[1][1]
+                + local_pos[2] * axis_t2[2][1],
+            pos_t2[2]
+                + local_pos[0] * axis_t2[0][2]
+                + local_pos[1] * axis_t2[1][2]
+                + local_pos[2] * axis_t2[2][2],
+        ];
+        let new_axis = math_iw4::matrix_multiply(axis_t2, axis_rel);
+        let new_angles = math_iw4::axis_to_angles(new_axis);
+
+        let mut rt = runtime(world);
+        let id = rt.next_object;
+        rt.next_object = id.checked_add(1).ok_or("object identifier exhausted")?;
+        rt.objects.insert(id, std::collections::BTreeMap::new());
+        rt.set_object_field(id, "origin", Value::Vector(new_pos));
+        rt.set_object_field(id, "angles", Value::Vector(new_angles));
+        Ok(Value::Object(id))
+    });
+    registry.register(Function, "gettimesincelastpaused", |world, _, _| {
+        let now = crate::level_time_ms(world.resource::<crate::step::StepRequest>().tick);
+        Ok(Value::Int(now))
+    });
+    registry.register(Function, "setsunlight", |world, _, args| {
+        let r = float(args, 0)?;
+        let g = float(args, 1)?;
+        let b = float(args, 2)?;
+        runtime(world)
+            .engine
+            .worldspawn
+            .insert("sunlight".into(), format!("{r} {g} {b}"));
+        super::iw4::set_dvar(world, "r_lightTweakSunLight", &format!("{r} {g} {b}"));
+        Ok(Value::Undefined)
+    });
+    registry.register(Function, "getmapsunlight", |world, _, _| {
+        let sun = runtime(world)
+            .engine
+            .worldspawn
+            .get("sunlight")
+            .cloned()
+            .unwrap_or_else(|| "1 1 1".into());
+        let parts: Vec<f32> = sun
+            .split_whitespace()
+            .filter_map(|s| s.parse::<f32>().ok())
+            .collect();
+        if parts.len() == 3 {
+            Ok(Value::Vector([parts[0], parts[1], parts[2]]))
+        } else {
+            Ok(Value::Vector([1.0, 1.0, 1.0]))
+        }
+    });
+    registry.register(Function, "resetsunlight", |world, _, _| {
+        runtime(world).engine.worldspawn.remove("sunlight");
+        super::iw4::set_dvar(world, "r_lightTweakSunLight", "1 1 1");
+        Ok(Value::Undefined)
+    });
+    registry.register(Function, "resetsundirection", |world, _, _| {
+        super::iw4::set_dvar(world, "r_lightTweakSunDirection", "0 0 0");
+        Ok(Value::Undefined)
+    });
+    registry.register(Function, "enableforcedsunshadows", |world, _, _| {
+        super::iw4::set_dvar(world, "sm_sunEnable", "1");
+        Ok(Value::Undefined)
+    });
+    registry.register(Function, "disableforcedsunshadows", |world, _, _| {
+        super::iw4::set_dvar(world, "sm_sunEnable", "0");
+        Ok(Value::Undefined)
+    });
+    registry.register(Function, "enableforcednosunshadows", |world, _, _| {
+        super::iw4::set_dvar(world, "sm_sunEnable", "0");
+        Ok(Value::Undefined)
+    });
+    registry.register(Function, "enableouterspacemodellighting", |world, _, _| {
+        super::iw4::set_dvar(world, "r_outerSpaceModelLighting", "1");
+        Ok(Value::Undefined)
+    });
+    registry.register(Function, "disableouterspacemodellighting", |world, _, _| {
+        super::iw4::set_dvar(world, "r_outerSpaceModelLighting", "0");
+        Ok(Value::Undefined)
+    });
+    registry.register(Function, "sethalfresparticles", |world, _, args| {
+        let enable = if !args.is_empty() {
+            int(args, 0)? != 0
+        } else {
+            true
+        };
+        super::iw4::set_dvar(world, "r_halfResParticles", if enable { "1" } else { "0" });
+        Ok(Value::Undefined)
+    });
+    registry.register(Function, "physicsjolt", |_world, _, _args| {
+        Ok(Value::Undefined)
+    });
+    registry.register(Function, "physicsjitter", |_world, _, _args| {
+        Ok(Value::Undefined)
+    });
+    registry.register(Method, "joltbody", |_world, _receiver, _args| {
+        Ok(Value::Undefined)
+    });
+    registry.register(Function, "bullettracer", |_world, _, _args| {
+        Ok(Value::Undefined)
+    });
+    registry.register(Function, "getpartname", |_world, _, args| {
+        let index = if args.len() > 1 { int(args, 1)? } else { 0 };
+        if index == 0 {
+            Ok(Value::string("tag_origin"))
+        } else {
+            Ok(Value::string(""))
+        }
+    });
+    registry.register(Method, "dontinterpolate", |world, receiver, _| {
+        let id = entity_id(world, receiver)?;
+        runtime(world).set_object_field(id, "dont_interpolate", Value::Int(1));
+        Ok(Value::Undefined)
+    });
+    registry.register(Method, "hideonclient", |world, receiver, args| {
+        let id = entity_id(world, receiver)?;
+        let client_num = if !args.is_empty() {
+            if let Ok(c_id) = entity_id(world, &args[0]) {
+                world
+                    .resource::<RoundScript>()
+                    .entities
+                    .get(&c_id)
+                    .map_or(0, |e| e.number)
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+        runtime(world).set_object_field(id, "hide_on_client", Value::Int(client_num));
+        Ok(Value::Undefined)
+    });
+    registry.register(Function, "hideonclient", |world, _, args| {
+        if !args.is_empty() {
+            if let Ok(id) = entity_id(world, &args[0]) {
+                let client_num = if args.len() > 1 {
+                    if let Ok(c_id) = entity_id(world, &args[1]) {
+                        world
+                            .resource::<RoundScript>()
+                            .entities
+                            .get(&c_id)
+                            .map_or(0, |e| e.number)
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                };
+                runtime(world).set_object_field(id, "hide_on_client", Value::Int(client_num));
+            }
+        }
+        Ok(Value::Undefined)
+    });
+    registry.register(Method, "showonclient", |world, receiver, _| {
+        let id = entity_id(world, receiver)?;
+        runtime(world).set_object_field(id, "hide_on_client", Value::Int(-1));
+        Ok(Value::Undefined)
+    });
+    registry.register(Method, "setlightcolor", |world, receiver, args| {
+        let id = entity_id(world, receiver)?;
+        let color = vector(args, 0)?;
+        runtime(world).set_object_field(id, "light_color", Value::Vector(color));
+        Ok(Value::Undefined)
+    });
+    registry.register(Method, "getlightcolor", |world, receiver, _| {
+        let id = entity_id(world, receiver)?;
+        match crate::script::host::players::entity_field(world, id, "light_color") {
+            Value::Vector(v) => Ok(Value::Vector(v)),
+            _ => Ok(Value::Vector([1.0, 1.0, 1.0])),
+        }
+    });
+    registry.register(Method, "setlightfovrange", |world, receiver, args| {
+        let id = entity_id(world, receiver)?;
+        let fov = float(args, 0)?;
+        let range = if args.len() > 1 {
+            float(args, 1)?
+        } else {
+            1000.0
+        };
+        runtime(world).set_object_field(id, "light_fov", Value::Float(fov));
+        runtime(world).set_object_field(id, "light_range", Value::Float(range));
+        Ok(Value::Undefined)
+    });
+    registry.register(Method, "getattachpos", |world, receiver, _| {
+        let id = entity_id(world, receiver)?;
+        Ok(crate::script::host::players::entity_field(
+            world, id, "origin",
+        ))
+    });
+    registry.register(Method, "setsoundblend", |_world, _receiver, _args| {
+        Ok(Value::Undefined)
+    });
+    registry.register(Function, "kill", |_world, _, _args| Ok(Value::Undefined));
+    registry.register(Function, "setdebugangles", |world, _, args| {
+        if let Ok(ang) = vector(args, 0) {
+            super::iw4::set_dvar(
+                world,
+                "debug_angles",
+                &format!("{} {} {}", ang[0], ang[1], ang[2]),
+            );
+        }
+        Ok(Value::Undefined)
+    });
+    registry.register(Function, "setdebugorigin", |world, _, args| {
+        if let Ok(pos) = vector(args, 0) {
+            super::iw4::set_dvar(
+                world,
+                "debug_origin",
+                &format!("{} {} {}", pos[0], pos[1], pos[2]),
+            );
+        }
+        Ok(Value::Undefined)
     });
     for name in ["logprint", "logstring"] {
         registry.register(Function, name, |_, _, args| {

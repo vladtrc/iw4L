@@ -161,6 +161,7 @@ impl ZoneLane for Iw4Lane {
         if let Some(entities) = map_ents_entity_string(&stream) {
             scripts.set_entities(entities.to_owned());
         }
+        scripts.set_path_nodes(asset_world::path_nodes(&stream, &sink.script_strings));
         let script_sound = std::mem::take(&mut sink.script_sound).finish();
         let exp_fog = sink.exp_fog.take();
         let createart_name = sink.createart_name.take();
@@ -236,7 +237,10 @@ impl ZoneLane for Iw4Lane {
         let phys_presets = std::mem::take(&mut sink.phys_presets);
         let bodies = std::mem::take(&mut sink.bodies);
         let fpv_meshes = std::mem::take(&mut sink.fpv_meshes);
+        let world_weapons = std::mem::take(&mut sink.world_weapons);
         let map_xanims = std::mem::take(&mut sink.xanims);
+        let mut map_weapons = std::mem::take(&mut sink.weapons);
+        map_weapons.resolve_reticles(&materials);
         report.push(format!(
             "map XAnim catalog: {} clips captured ({} gaps)",
             map_xanims.len(),
@@ -433,7 +437,9 @@ impl ZoneLane for Iw4Lane {
                 spawns: dm_spawns,
                 bodies,
                 fpv_meshes,
+                world_weapons,
                 xanims: map_xanims,
+                weapons: Some(map_weapons),
                 facts: crate::MapFacts {
                     compass,
                     script_sound,
@@ -678,7 +684,9 @@ impl ZoneLane for Iw4Lane {
                     spawns: dm_spawns,
                     bodies,
                     fpv_meshes,
+                    world_weapons,
                     xanims: map_xanims,
+                    weapons: Some(map_weapons),
                     facts: crate::MapFacts {
                         minimap_corners,
                         north_yaw,
@@ -721,7 +729,9 @@ impl ZoneLane for Iw4Lane {
                     spawns: dm_spawns,
                     bodies,
                     fpv_meshes,
+                    world_weapons,
                     xanims: map_xanims,
+                    weapons: Some(map_weapons),
                     facts: crate::MapFacts {
                         compass,
                         script_sound,

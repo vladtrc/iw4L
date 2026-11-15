@@ -491,6 +491,7 @@ fn occupy_script_model_scene_ents(
     lod_skinned: Res<render_scene::LodRampSkinnedDvar>,
     presented: Res<net::PresentedSnapshot>,
     local: Res<net::LocalPresentClient>,
+    mut undrawable: Local<std::collections::HashSet<String>>,
 ) {
     let Some(assets) = assets else {
         return;
@@ -508,6 +509,22 @@ fn occupy_script_model_scene_ents(
             continue;
         }
         let Some(skels) = presented_skel_arcs(&assets, &owner.dobj_state) else {
+            for descriptor in &owner.dobj_state.composition.models {
+                let why = match assets.get_name(&descriptor.model) {
+                    None => "not in the scene catalog",
+                    Some(asset_world::MapXModelSceneAsset::Unavailable { reason }) => reason,
+                    Some(
+                        asset_world::MapXModelSceneAsset::Iw4(skel)
+                        | asset_world::MapXModelSceneAsset::Iw5(skel)
+                        | asset_world::MapXModelSceneAsset::T6(skel)
+                        | asset_world::MapXModelSceneAsset::T5(skel),
+                    ) if skel.pose.is_none() => "no pose source",
+                    Some(_) => continue,
+                };
+                if undrawable.insert(descriptor.model.to_string()) {
+                    diag::warn!(World, "script model {} not drawn: {why}", descriptor.model);
+                }
+            }
             continue;
         };
         let skel_refs: Vec<&asset_model::ModelSkel> =
@@ -1285,6 +1302,7 @@ fn lod_culled(
 fn publish_script_model_bolt_poses(
     owners: Query<(&WorldScriptModelInstance, &Transform)>,
     persist: Res<ScriptModelDobjs>,
+    xanims: Option<Res<assets::PreparedXAnims>>,
     mut demand: ResMut<crate::anim::dobj_pose::ScriptModelBoltDemand>,
     mut dobj_poses: ResMut<crate::anim::dobj_pose::HostDObjPoseFrame>,
 ) {
@@ -1304,9 +1322,18 @@ fn publish_script_model_bolt_poses(
         else {
             continue;
         };
+        let request = owner
+            .dobj_state
+            .resolve_request(|name| {
+                xanims
+                    .as_ref()?
+                    .0
+                    .clip(asset_core::AssetNamespace::Iw4, name)
+            })
+            .unwrap_or_else(|_| xmodel_runtime::DObjPoseRequest::bind_pose());
         let Ok(local) = xmodel_runtime::pose_dobj_with_controller(
             &slot.dobj,
-            &xmodel_runtime::DObjPoseRequest::bind_pose(),
+            &request,
             Mat4::IDENTITY,
             |_, _, _| {},
         ) else {

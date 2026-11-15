@@ -121,6 +121,19 @@ pub(crate) fn begin_load_from_session(
         return;
     };
     let games = asset_transport::GamesRoot(identity.games_root.clone());
+    let is_sp = asset_transport::is_campaign_level(&games, &fact.zone);
+    if is_sp {
+        diag::info!(
+            Ui,
+            "session: campaign level `{}` starting; dropping MP resources and common cache",
+            fact.zone
+        );
+        commands.insert_resource(crate::classes::setup::ClassLoadoutCatalog::default());
+        commands.remove_resource::<crate::frontend::maps::MapPresentation>();
+        commands.remove_resource::<frame::FrontendContentLoading>();
+        assets::forget_common();
+        assets::clear_resident_map();
+    }
     let (zone, zone_ff, common_mp, zone_alias, loading_title) = resolve_zone(&games, &fact.zone);
     if loading.as_ref().is_some_and(|s| s.title() == loading_title) {
         return;

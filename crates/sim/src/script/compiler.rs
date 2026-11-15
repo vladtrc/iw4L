@@ -7,9 +7,11 @@ use std::collections::BTreeSet;
 
 mod assignments;
 mod calls;
+mod campaign;
 mod expressions;
 mod lexer;
 mod statements;
+pub(super) use campaign::unresolved;
 use lexer::{Token, lex};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -174,6 +176,16 @@ impl Parser {
                         super::runtime::binary(op, a, b).map_err(|e| Fault::at(&location, e))?,
                     );
                 }
+                Op::Vector => {
+                    let mut v = [0.0; 3];
+                    for component in v.iter_mut().rev() {
+                        *component =
+                            super::runtime::scalar(&pop(&mut values)?).ok_or_else(|| {
+                                Fault::at(&location, "vector component must be a number")
+                            })?;
+                    }
+                    values.push(Value::Vector(v));
+                }
                 _ => {
                     return Err(Fault::at(
                         &location,
@@ -275,11 +287,19 @@ impl Parser {
     }
 }
 
-pub(super) fn compile(
+struct Parsed {
+    functions: Vec<Function>,
+    names: BTreeMap<String, usize>,
+    modules: Vec<ModuleIdentity>,
+    tables: Tables,
+    imports: BTreeMap<String, Vec<String>>,
+}
+
+fn parse(
     resolver: &impl SourceResolver,
     roots: &[&str],
     catalog: &Catalog,
-) -> Result<Program, Fault> {
+) -> Result<Parsed, Fault> {
     let root_location = Location {
         module: "<loader>".into(),
         function: String::new(),
@@ -343,6 +363,27 @@ pub(super) fn compile(
             sha256: Sha256::digest(&bytes).into(),
         });
     }
+    Ok(Parsed {
+        functions,
+        names,
+        modules,
+        tables,
+        imports,
+    })
+}
+
+pub(super) fn compile(
+    resolver: &impl SourceResolver,
+    roots: &[&str],
+    catalog: &Catalog,
+) -> Result<Program, Fault> {
+    let Parsed {
+        mut functions,
+        names,
+        mut modules,
+        tables,
+        imports,
+    } = parse(resolver, roots, catalog)?;
     let mut native_ids = BTreeMap::new();
     let mut natives = Vec::new();
     let mut resolved = Vec::with_capacity(tables.pending.len());

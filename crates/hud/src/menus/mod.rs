@@ -68,6 +68,17 @@ pub(super) const DVAR_FOCUS: i32 = 0x10;
 pub(super) const MAX_SCRIPT_DEPTH: u32 = 16;
 const MAIN_MENU_DVAR: &str = "g_scriptMainMenu";
 const FALLBACK_MAIN_MENU: &str = "class";
+const CAMPAIGN_PAUSE_MENU: &str = "iw4l_campaign_pause";
+const FRONTEND_MODE_DVAR: &str = "ui_iw4l_mode";
+
+fn frontend_root(runner: &Runner<'_, '_>) -> &'static str {
+    match runner.dvar(FRONTEND_MODE_DVAR) {
+        Some("mp") => "iw4l_main",
+        Some("sp") => "iw4l_campaign",
+        _ => "iw4l_select",
+    }
+}
+
 const SCOREBOARD_MENU: &str = "scoreboard";
 
 pub(super) fn is_focusable(item: &asset_game::MenuItem) -> bool {
@@ -231,6 +242,24 @@ pub(crate) struct MenuOutputs<'w> {
 }
 
 #[allow(clippy::too_many_arguments)]
+pub(crate) fn sync_campaign_pause(
+    menus: MenuState,
+    paused: Option<bevy::prelude::Res<frame::GamePaused>>,
+    mut commands: bevy::prelude::Commands,
+) {
+    let open = menus.is_some_and(|menus| {
+        menus
+            .open_names()
+            .iter()
+            .any(|name| name == CAMPAIGN_PAUSE_MENU)
+    });
+    if open && paused.is_none() {
+        commands.insert_resource(frame::GamePaused);
+    } else if !open && paused.is_some() {
+        commands.remove_resource::<frame::GamePaused>();
+    }
+}
+
 pub(crate) fn update_script_menus(
     surface: Res<crate::surface::Hud2dSurface>,
     catalog: Option<Res<MenuCatalog>>,
@@ -361,7 +390,7 @@ pub(crate) fn update_script_menus(
         binding: &mut out.binding,
     };
 
-    let main_menu = "iw4l_main";
+    let main_menu = frontend_root(&runner);
     if frontend && screen_changed {
         runner.open(main_menu);
         if let Some(def) = catalog.get("main")
@@ -813,8 +842,17 @@ fn handle_input(
     if pressed.escape {
         match runner.menus.input_menu().map(|m| m.name.clone()) {
             Some(top) => runner.escape(&top),
-            None if !runner.world.in_game => runner.open("iw4l_main"),
+            None if !runner.world.in_game => runner.open(frontend_root(&runner)),
             None => {
+                let campaign = runner
+                    .world
+                    .dvars
+                    .as_ref()
+                    .is_some_and(|d| d.string("g_gametype").is_none_or(str::is_empty));
+                if campaign && runner.catalog.get(CAMPAIGN_PAUSE_MENU).is_some() {
+                    runner.open(CAMPAIGN_PAUSE_MENU);
+                    return;
+                }
                 let main = runner
                     .world
                     .dvars

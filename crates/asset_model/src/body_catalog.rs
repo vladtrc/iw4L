@@ -228,7 +228,8 @@ impl BodyMeshCatalog {
                 .entries
                 .iter()
                 .filter(|(name, entry)| {
-                    !is_body_model(name) || body_has_tp_attach_bones(&entry.skel.bone_names)
+                    !(is_body_model(name) || name.starts_with("body_"))
+                        || body_has_tp_attach_bones(&entry.skel.bone_names)
                 })
                 .map(|(name, _)| name.clone())
                 .collect();

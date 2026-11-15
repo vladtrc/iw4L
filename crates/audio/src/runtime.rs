@@ -193,6 +193,10 @@ impl AudioRuntime {
         self.rejections[reason as usize - 1].load(Ordering::Relaxed)
     }
 
+    pub fn open_stream(&self) -> crate::PcmStream {
+        crate::PcmStream::attach(&self.shared)
+    }
+
     pub fn set_master_volume(&self, gain: f32) {
         let gain = if gain.is_finite() { gain.max(0.0) } else { 0.0 };
         self.shared.master.store(gain.to_bits(), Ordering::Release);
@@ -206,6 +210,10 @@ impl AudioRuntime {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .retain_epoch(epoch);
+    }
+
+    pub fn set_match_paused(&self, paused: bool) {
+        self.shared.match_paused.store(paused, Ordering::Release);
     }
 
     pub fn cancel_all(&self) {

@@ -164,6 +164,7 @@ impl WeaponCatalog {
                 .filter(|s| !s.is_empty())
                 .map(str::to_owned),
             knife_xmodel: None,
+            ai_script: None,
             rocket_model: geometry
                 .rocket_model_name
                 .and_then(|ptr| stream.cstr(ptr).ok())
@@ -184,6 +185,7 @@ impl WeaponCatalog {
                 .unwrap_or([const { None }; WEAPON_ANIM_SLOTS]),
             hide_tags: read_hide_tags_t5(stream, strings, geometry.hide_tags),
             sounds: leftover_t5_sounds(stream, strings, &geometry),
+            ai_accuracy: Default::default(),
             combat_fx: WeaponCombatFx::empty(crate::AssetNamespace::T5),
             flame: flame_stream::capture_t5_flame_stream(stream, &geometry),
             combat_slots: CombatFxSlots::default(),

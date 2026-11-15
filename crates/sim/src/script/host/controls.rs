@@ -7,6 +7,8 @@ use crate::world::ClientId;
 use bevy_ecs::prelude::World;
 use playerstate_iw4::{PlayerState, buttons, weap_flags};
 
+pub(crate) mod campaign;
+
 mod pof {
     pub const THERMAL_VISION: u32 = 0x8;
     pub const THERMAL_VISION_OVERLAY_FOF: u32 = 0x10;
@@ -425,7 +427,7 @@ pub(crate) fn command_buttons(command: &str) -> u32 {
         "+smoke" => buttons::SMOKE,
         "+speed_throw" | "+toggleads_throw" | "mouse2" => buttons::ADS,
         "+gostand" | "space" => buttons::JUMP,
-        _ => 0,
+        _ => campaign::command_buttons(command),
     }
 }
 

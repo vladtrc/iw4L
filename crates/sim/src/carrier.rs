@@ -92,6 +92,26 @@ impl DerefMut for SimWorld {
 }
 
 impl SimWorld {
+    pub(crate) fn ecs(&self) -> &World {
+        &self.ecs
+    }
+
+    pub(crate) fn ecs_mut(&mut self) -> &mut World {
+        &mut self.ecs
+    }
+
+    pub fn take_resume_tick(&mut self) -> Option<Tick> {
+        self.ecs
+            .resource_mut::<crate::script::RoundScript>()
+            .campaign
+            .resume_tick
+            .take()
+    }
+
+    pub fn restore_campaign_checkpoint(&self, level: &str) -> Option<SimWorld> {
+        crate::script::host::mission::restore_checkpoint(level, self)
+    }
+
     pub fn validate_entity_lifetimes(&self) -> Result<(), String> {
         crate::frame::validate_entity_payloads(&self.ecs)
     }
@@ -197,6 +217,12 @@ impl SimWorld {
         crate::script::install(&mut self.ecs, program, natives, level)
     }
 
+    pub fn defer_gsc_until_player(&mut self, entries: Vec<String>) {
+        let mut runtime = self.ecs.resource_mut::<crate::script::RoundScript>();
+        runtime.started = true;
+        runtime.campaign.deferred_entries = entries;
+    }
+
     pub fn start_gsc(
         &mut self,
         name: &str,
@@ -213,6 +239,19 @@ impl SimWorld {
 
     pub fn set_gsc_dvar(&mut self, name: &str, value: &str) {
         crate::script::set_dvar(&mut self.ecs, name, value);
+    }
+
+    pub fn path_nodes_awaiting_nav(&self) -> Option<std::sync::Arc<Vec<asset_core::PathNode>>> {
+        let runtime = self.ecs.resource::<crate::script::RoundScript>();
+        let nodes = &runtime.restart.as_ref()?.path_nodes;
+        (runtime.campaign.actor_nav.is_none() && !nodes.is_empty()).then(|| nodes.clone())
+    }
+
+    pub fn install_actor_nav(&mut self, nav: std::sync::Arc<dyn crate::script::ActorNav>) {
+        self.ecs
+            .resource_mut::<crate::script::RoundScript>()
+            .campaign
+            .actor_nav = Some(crate::script::host::actors::NavHandle(nav));
     }
 
     pub fn gsc_realm(&self) -> Option<crate::script::Realm> {
@@ -396,6 +435,14 @@ impl SimWorld {
             .slow_motion
     }
 
+    pub fn cinematic(&self) -> Option<crate::ScriptCinematic> {
+        self.ecs
+            .resource::<crate::script::RoundScript>()
+            .engine
+            .cinematic
+            .clone()
+    }
+
     pub fn adopt_snapshot(&mut self, snapshot: &Snapshot) -> crate::AdoptReport {
         assert!(
             self.gsc_program_fingerprint().is_none(),
@@ -486,5 +533,12 @@ pub fn try_step(
     msec: i32,
     reason: StepReason,
 ) -> Result<crate::TickResult, crate::script::Fault> {
-    world.run(tick, input, msec, reason)
+    let result = world.run(tick, input, msec, reason).inspect_err(|fault| {
+        let mut runtime = world.ecs.resource_mut::<crate::script::RoundScript>();
+        if runtime.fault.is_none() {
+            runtime.fault = Some(fault.clone());
+        }
+    });
+    crate::script::host::mission::take_save(world, tick);
+    result
 }

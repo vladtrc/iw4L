@@ -6,7 +6,7 @@ fn change(world: &mut World, args: &[Value], stop: bool, ac130: bool) -> Result<
     if if stop {
         args.len() > 1
     } else {
-        !(1..=2).contains(&args.len())
+        !(1..=3).contains(&args.len())
     } {
         return Err("wrong number of ambient arguments".into());
     }
@@ -170,6 +170,70 @@ fn channel_volumes(
     Ok(Value::Undefined)
 }
 
+fn stop_entity_sound_channel(
+    world: &mut World,
+    receiver: &Value,
+    args: &[Value],
+) -> Result<Value, String> {
+    let _channel = optional(args, 0, string)?;
+    stop_entity_sounds(world, receiver)
+}
+
+fn set_reverb(world: &mut World, receiver: &Value, args: &[Value]) -> Result<Value, String> {
+    let _entity = super::natives::engine::entity_id(world, receiver)?;
+    let _priority = string(args, 0)?;
+    let _roomtype = string(args, 1)?;
+    let _drylevel = float(args, 2)?;
+    let _wetlevel = float(args, 3)?;
+    let _fadetime = optional(args, 4, float)?.unwrap_or(0.0);
+    Ok(Value::Undefined)
+}
+
+fn deactivate_reverb(world: &mut World, receiver: &Value, args: &[Value]) -> Result<Value, String> {
+    let _entity = super::natives::engine::entity_id(world, receiver)?;
+    let _priority = string(args, 0)?;
+    let _fadetime = optional(args, 1, float)?.unwrap_or(0.0);
+    Ok(Value::Undefined)
+}
+
+fn set_eq(world: &mut World, receiver: &Value, args: &[Value]) -> Result<Value, String> {
+    let _entity = super::natives::engine::entity_id(world, receiver)?;
+    if args.is_empty() {
+        return Err("seteq expects arguments".into());
+    }
+    Ok(Value::Undefined)
+}
+
+fn set_eq_bands(world: &mut World, receiver: &Value, args: &[Value]) -> Result<Value, String> {
+    let _entity = super::natives::engine::entity_id(world, receiver)?;
+    if args.is_empty() {
+        return Err("seteqbands expects arguments".into());
+    }
+    Ok(Value::Undefined)
+}
+
+fn deactivate_eq(world: &mut World, receiver: &Value, args: &[Value]) -> Result<Value, String> {
+    let _entity = super::natives::engine::entity_id(world, receiver)?;
+    if args.is_empty() {
+        return Err("deactivateeq expects arguments".into());
+    }
+    Ok(Value::Undefined)
+}
+
+fn set_eq_lerp(world: &mut World, receiver: &Value, args: &[Value]) -> Result<Value, String> {
+    let _entity = super::natives::engine::entity_id(world, receiver)?;
+    let _progress = float(args, 0)?;
+    Ok(Value::Undefined)
+}
+
+fn eq_toggle(world: &mut World, receiver: &Value, on: bool) -> Result<Value, String> {
+    let id = super::natives::engine::entity_id(world, receiver)?;
+    world
+        .resource_mut::<RoundScript>()
+        .set_object_field(id, "eq_active", Value::Int(on.into()));
+    Ok(Value::Undefined)
+}
+
 pub(crate) fn register(registry: &mut NativeRegistry) {
     registry.register(
         Namespace::Method,
@@ -183,6 +247,23 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
     );
     registry.register(Namespace::Method, "stopsounds", |world, receiver, _| {
         stop_entity_sounds(world, receiver)
+    });
+    registry.register(
+        Namespace::Method,
+        "stopsoundchannel",
+        |world, receiver, args| stop_entity_sound_channel(world, receiver, args),
+    );
+    registry.register(Namespace::Method, "setreverb", set_reverb);
+    registry.register(Namespace::Method, "deactivatereverb", deactivate_reverb);
+    registry.register(Namespace::Method, "seteq", set_eq);
+    registry.register(Namespace::Method, "seteqbands", set_eq_bands);
+    registry.register(Namespace::Method, "deactivateeq", deactivate_eq);
+    registry.register(Namespace::Method, "seteqlerp", set_eq_lerp);
+    registry.register(Namespace::Method, "eqon", |world, receiver, _| {
+        eq_toggle(world, receiver, true)
+    });
+    registry.register(Namespace::Method, "eqoff", |world, receiver, _| {
+        eq_toggle(world, receiver, false)
     });
     registry.register(Namespace::Function, "soundfade", |world, _, args| {
         sound_fade(world, args)

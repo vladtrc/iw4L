@@ -177,6 +177,7 @@ impl Plugin for ConsolePlugin {
                             crate::frontend::route,
                             crate::class_menu::route,
                             crate::barracks_menu::route,
+                            crate::campaign_menu::route,
                         )
                             .chain(),
                         crate::feature_dispatch::route_capture_commands,
@@ -254,6 +255,17 @@ impl Plugin for ConsolePlugin {
                 )
                     .chain(),
             );
+        app.add_systems(
+            Update,
+            (
+                crate::cinematic::route,
+                crate::cinematic::start_load_cinematic,
+                crate::cinematic::sync_script_cinematic,
+                crate::cinematic::tick.run_if(resource_exists::<crate::cinematic::Cinematic>),
+            )
+                .chain()
+                .in_set(ClientSet::Diag),
+        );
         crate::diagnostics::register_diagnostics_mirror(app);
     }
 }
@@ -802,6 +814,7 @@ fn setup_console(
     crate::debug_lod::register_lod_ramp_commands(&mut registry);
     crate::debug_cg_gun::register_cg_gun_commands(&mut registry);
     crate::debug_cl_yawspeed::register_cl_yawspeed_command(&mut registry);
+    crate::cinematic::register(&mut registry);
     crate::debug_fx::register_debug_fx_commands(&mut registry);
     crate::debug_fx_marks::register_fx_mark_commands(&mut registry);
     binds.apply_defaults();
@@ -813,6 +826,7 @@ fn setup_console(
     crate::frontend::register(&mut registry);
     crate::class_menu::register(&mut registry);
     crate::barracks_menu::register(&mut registry);
+    crate::campaign_menu::register(&mut registry);
     let font = fonts.add(Font::from_bytes(EMBEDDED_FONT.to_vec()));
     commands.insert_resource(ConsoleFont(font.clone()));
 

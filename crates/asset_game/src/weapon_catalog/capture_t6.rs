@@ -110,6 +110,7 @@ impl WeaponCatalog {
                 .map(t6_model_name)
                 .or_else(|| crate::weapon_t6::planted_model(name).map(str::to_owned)),
             rocket_model: None,
+            ai_script: None,
             sz_xanims: t6_sz_xanims(weapon),
             dual_wield_weapon: None,
             impact_payload: None,
@@ -117,6 +118,7 @@ impl WeaponCatalog {
             sz_xanims_left: t6_sz_xanims_left(weapon),
             hide_tags: Vec::new(),
             sounds: capture_t6_sounds(weapon),
+            ai_accuracy: Default::default(),
             flame: None,
             combat_fx: WeaponCombatFx {
                 view_flash_hint: weapon

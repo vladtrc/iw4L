@@ -228,10 +228,6 @@ pub(super) fn load_gameworld_mp(s: &mut ZoneStream<'_>) -> Result<()> {
 
 /// `GameWorldSp`: name + inline `PathData` + inline `VehicleTrack` + glass ptr.
 ///
-/// Only the stream advance matters here (single-player pathfinding and
-/// vehicle data the runtime never consumes): node `Links`, tree children and
-/// track branches are walked so the cursor lands past the asset. Script
-/// strings inside `pathnode_constant_t` are u16 indices, never followed.
 pub(super) fn load_gameworld_sp(s: &mut ZoneStream<'_>) -> Result<()> {
     let p = s.alloc_load(4, s.layout(sz::GAME_WORLD_SP, 112))?;
     s.push(XFILE_BLOCK_VIRTUAL)?;
@@ -250,7 +246,9 @@ fn load_path_data(s: &mut ZoneStream<'_>, path: Ptr) -> Result<()> {
     let tree_count = s.i32_at(path, s.layout(32, 64))?.max(0) as usize;
     let node_stride = s.layout(sz::PATH_NODE, 168);
 
-    if let Some(nodes) = s.follow_array(path, s.layout(4, 8), 4, node_stride, node_count)? {
+    let nodes = s.follow_array(path, s.layout(4, 8), 4, node_stride, node_count)?;
+    s.record_path_data(crate::PathDataGeometry { nodes, node_count });
+    if let Some(nodes) = nodes {
         let link_field = s.layout(60, 64);
         for i in 0..node_count {
             let node = nodes.at(i * node_stride);

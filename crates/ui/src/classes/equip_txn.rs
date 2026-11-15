@@ -31,7 +31,7 @@ struct EquipCorrelation {
 pub fn apply_pending_class_equip(
     mut pending: ResMut<PendingClassEquip>,
     store: Res<SessionClassStore>,
-    catalog: Res<crate::ClassLoadoutCatalog>,
+    catalog: Option<Res<crate::ClassLoadoutCatalog>>,
     player_data: Res<sim::LocalPlayerData>,
     weapons: Option<Res<assets::PreparedWeapons>>,
     mut actions: ResMut<ClientActionInbox>,
@@ -47,6 +47,15 @@ pub fn apply_pending_class_equip(
     ),
 ) {
     let Some(req) = pending.0.take() else {
+        return;
+    };
+    let Some(catalog) = catalog else {
+        reject_class_equip(
+            &mut phase,
+            &mut status,
+            req.request_id,
+            "Weapon catalog is not ready".to_owned(),
+        );
         return;
     };
     if let Some(signon) = signon.as_deref()
@@ -364,10 +373,13 @@ fn sync_server_class_families(
 
 fn publish_class_availability(
     store: Res<SessionClassStore>,
-    catalog: Res<crate::ClassLoadoutCatalog>,
+    catalog: Option<Res<crate::ClassLoadoutCatalog>>,
     player_data: Res<sim::LocalPlayerData>,
     mut dvars: ResMut<frame::UiMenuDvars>,
 ) {
+    let Some(catalog) = catalog else {
+        return;
+    };
     if !store.is_changed()
         && !catalog.is_changed()
         && !player_data.is_changed()
@@ -409,7 +421,7 @@ fn publish_class_availability(
 
 fn consume_class_select_handoff(
     mut handoff: ResMut<frame::ClassSelectHandoff>,
-    mut catalog: ResMut<crate::ClassLoadoutCatalog>,
+    catalog: Option<ResMut<crate::ClassLoadoutCatalog>>,
     mut store: ResMut<SessionClassStore>,
     weapons: Option<Res<assets::PreparedWeapons>>,
     menus: Res<asset_game::MenuCatalog>,
@@ -417,7 +429,7 @@ fn consume_class_select_handoff(
     if !handoff.pending {
         return;
     }
-    let Some(weapons) = weapons else {
+    let (Some(weapons), Some(mut catalog)) = (weapons, catalog) else {
         return;
     };
     let revision = catalog.revision.wrapping_add(1);

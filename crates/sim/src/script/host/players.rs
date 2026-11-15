@@ -4,6 +4,8 @@ use crate::script::{Arc, BTreeMap, Fault, Location, RoundScript, Value, VecDeque
 use crate::world::ClientId;
 use bevy_ecs::prelude::World;
 
+mod campaign;
+
 const CONNECT: &str = "maps/mp/gametypes/_callbacksetup::codecallback_playerconnect";
 const DISCONNECT: &str = "maps/mp/gametypes/_callbacksetup::codecallback_playerdisconnect";
 const DAMAGE: &str = "maps/mp/gametypes/_callbacksetup::codecallback_playerdamage";
@@ -49,6 +51,14 @@ pub(crate) fn player_damage(world: &mut World, tick: crate::Tick, hit: &crate::s
         .copied()
         .unwrap_or("none");
     let inflictor = damage_inflictor(world, hit).unwrap_or_else(|| attacker.clone());
+    if FrameWorld::from_world(world).bootstrap_ref().campaign {
+        let attacker = if hit.attacker.is_some() {
+            attacker
+        } else {
+            inflictor
+        };
+        return campaign::damage(world, tick, hit, attacker, Value::String(weapon.into()));
+    }
     let args = vec![
         inflictor,
         attacker,
@@ -310,8 +320,8 @@ pub(crate) fn settle_deaths(world: &mut World) {
             continue;
         }
         if callback == KILLED {
-            let attacker = args.get(1).cloned().unwrap_or(Value::Undefined);
-            raise(world, victim.clone(), "death", vec![attacker]);
+            let arg = |i: usize| args.get(i).cloned().unwrap_or(Value::Undefined);
+            raise(world, victim.clone(), "death", vec![arg(1), arg(3), arg(4)]);
         }
         if run_now(world, callback, victim, args, now).is_err() {
             return;
@@ -1279,6 +1289,7 @@ pub(crate) fn sync_players(world: &mut World) {
                 if let Some(slot) = world.resource_mut::<RoundScript>().players.get_mut(&client) {
                     slot.begun = true;
                 }
+                super::actors::start_deferred(world);
             }
             Some(_) => {}
             None => {
@@ -1310,7 +1321,9 @@ pub(crate) fn sync_players(world: &mut World) {
                         .set_object_field(object, "pers", pers),
                     Err(_) => return,
                 }
-                if run_now(world, CONNECT, Value::Object(object), Vec::new(), now).is_err() {
+                if !super::actors::join_campaign(world, object)
+                    && run_now(world, CONNECT, Value::Object(object), Vec::new(), now).is_err()
+                {
                     return;
                 }
             }
@@ -1685,6 +1698,12 @@ pub(crate) fn apply_player_links(world: &mut World) {
             .entities
             .get(&link.parent)
             .map_or(playerstate_iw4::ENTITYNUM_NONE, |entity| entity.number);
+        let (origin, blended_view) = super::controls::campaign::blend_link(
+            world,
+            client,
+            origin,
+            math_iw4::axis_to_angles(child_axis),
+        );
         let mut frame = FrameWorld::from_world(world);
         if link.view != LinkView::WeaponDelta {
             frame.set_origin(id, origin);
@@ -1711,13 +1730,25 @@ pub(crate) fn apply_player_links(world: &mut World) {
             };
         }
         match (link.view, link.clamp) {
-            (LinkView::Absolute, _) => view = math_iw4::axis_to_angles(child_axis),
+            (LinkView::Absolute, _) => view = blended_view,
             (_, Some([pitch_min, pitch_max, yaw_min, yaw_max])) => {
                 let pitch = angle_delta(view[0], parent[0]).clamp(pitch_min, pitch_max);
                 let yaw = angle_delta(view[1], parent[1]).clamp(yaw_min, yaw_max);
-                view = [parent[0] + pitch, parent[1] + yaw, view[2]];
+                view = [
+                    parent[0] + pitch,
+                    parent[1] + yaw,
+                    if link.use_tag_angles {
+                        parent[2]
+                    } else {
+                        view[2]
+                    },
+                ];
             }
-            _ => {}
+            _ => {
+                if link.use_tag_angles {
+                    view[2] = parent[2];
+                }
+            }
         }
         if let Some(ps) = frame.player_mut(id) {
             for i in 0..3 {

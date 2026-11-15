@@ -118,11 +118,25 @@ impl SimContent {
     }
 }
 
+#[derive(Clone, Default)]
+struct ScriptSoundLength(Option<Arc<dyn Fn(&str) -> Option<u32> + Send + Sync>>);
+
+impl std::fmt::Debug for ScriptSoundLength {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_some() {
+            "ScriptSoundLength"
+        } else {
+            "None"
+        })
+    }
+}
+
 #[derive(Debug)]
 struct ContentData {
     map: Arc<asset_core::MapContentDefinition>,
     weapons: Arc<crate::SimWeaponContent>,
     script_sound_aliases: Option<std::collections::BTreeMap<String, Option<bool>>>,
+    script_sound_length: ScriptSoundLength,
     script_fx: std::collections::BTreeSet<String>,
     collision_complete: bool,
     clip_brushes: Vec<SimBrush>,
@@ -171,6 +185,7 @@ impl SimContentBuilder {
                 map: Default::default(),
                 weapons,
                 script_sound_aliases: Default::default(),
+                script_sound_length: Default::default(),
                 script_fx: Default::default(),
                 collision_complete: false,
                 clip_brushes: Default::default(),
@@ -215,6 +230,13 @@ impl SimContentBuilder {
                 .map(|(name, looping)| (name.to_ascii_lowercase(), looping))
                 .collect()
         });
+    }
+
+    pub fn set_script_sound_length(
+        &mut self,
+        length: Option<Arc<dyn Fn(&str) -> Option<u32> + Send + Sync>>,
+    ) {
+        self.data.script_sound_length = ScriptSoundLength(length);
     }
 
     pub fn finish(mut self) -> Arc<SimContent> {
@@ -336,10 +358,12 @@ impl SimContent {
     pub(super) fn weapons(&self) -> &Arc<crate::SimWeaponContent> {
         &self.data.weapons
     }
+    pub(super) fn script_sound_length(&self, name: &str) -> Option<u32> {
+        self.data.script_sound_length.0.as_ref()?(&name.to_ascii_lowercase())
+    }
     pub(super) fn script_fx(&self) -> &std::collections::BTreeSet<String> {
         &self.data.script_fx
     }
-
     pub(super) fn script_sound_aliases(
         &self,
     ) -> &Option<std::collections::BTreeMap<String, Option<bool>>> {

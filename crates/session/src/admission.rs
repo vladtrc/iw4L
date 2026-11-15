@@ -21,6 +21,7 @@ pub fn update_admission(
     generation: Res<frame::WorldGeneration>,
     navigation: Option<Res<frame::BotNavigationReady>>,
     mut policy: ResMut<crate::SessionReadinessPolicy>,
+    briefing: Option<Res<frame::LoadCinematicPlaying>>,
 ) {
     if let (Some(live), Some(installed), Some(weapons)) =
         (live.as_mut(), admission.core.installed(), weapons.as_mut())
@@ -56,7 +57,16 @@ pub fn update_admission(
         audio.as_ref().map(|report| report.0),
     );
     if let Some(hold) = hold.as_mut() {
-        hold.0 = !decision.advancement;
+        let held = !decision.advancement || briefing.is_some();
+        if hold.0 != held {
+            diag::info!(
+                Sim,
+                "authority hold={held} advancement={} briefing={}",
+                decision.advancement,
+                briefing.is_some()
+            );
+        }
+        hold.0 = held;
     }
     if let Some(live) = live.as_ref() {
         admission
@@ -81,6 +91,7 @@ pub fn update_admission(
     }
     let admitted = installed
         && decision.presentation
+        && briefing.is_none()
         && !signon.phase.is_failed()
         && match *role {
             RuntimeRole::Client => admission.core.class_select_allowed(),

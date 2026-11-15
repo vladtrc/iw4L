@@ -22,6 +22,7 @@ pub struct ObjectiveMatch {
     pub missile_vision: Option<crate::VisionChange>,
     pub night_vision: Option<crate::VisionChange>,
     pub pain_vision: Option<crate::VisionChange>,
+    pub list: Vec<ObjectiveListRow>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -94,6 +95,16 @@ pub struct CompassObjective {
     pub team: Team,
     pub icon: String,
     pub viewer: Option<u32>,
+    pub label: String,
+    pub follows: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ObjectiveListRow {
+    pub index: u8,
+    pub state: ObjectiveState,
+    pub template: String,
+    pub arg: String,
 }
 
 impl ObjectiveMatch {
