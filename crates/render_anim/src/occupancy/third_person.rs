@@ -1,5 +1,5 @@
 use asset_world::ClipCollision;
-use net::{AUTHORITY_MS, PresentedProjectile, PresentedSnapshot};
+use net::{AUTHORITY_MS, PresentedSnapshot};
 use playerstate_iw4::{
     CG_CAMERA_PULLBACK_BOX_HALF, CG_CAMERA_PULLBACK_CLIPMASK, CG_THIRD_PERSON_RANGE_DEFAULT,
     KillCamMode, OffsetThirdPersonViewInputs, ThirdPersonViewInputs, is_third_person_view,
@@ -26,8 +26,16 @@ pub fn presented_is_third_person(
     let Some(ps) = presented.player(local) else {
         return false;
     };
+    if !in_killcam
+        && ps.viewlocked != 0
+        && ps.e_flags & playerstate_iw4::eflags::TURRET_ACTIVE_DUCK != 0
+    {
+        return ps.f_weapon_pos_frac < 0.5;
+    }
     if in_killcam && ps.kill_cam_entity != playerstate_iw4::ENTITYNUM_NONE {
-        return true;
+        // Older demos name the eventual missile throughout the preroll.
+        // The camera remains first person until it can resolve that entity.
+        return super::killcam::classify_view(presented, local, true, None).is_some();
     }
     if remote_missile_link(presented, local).is_some() {
         return true;
@@ -53,7 +61,7 @@ fn remote_missile_link(
 // The missile leaves the snapshot on impact, before the link goes and the
 // static starts. The last pose is held until then so that neither the
 // player's own view nor a black frame shows in between.
-#[derive(Default)]
+#[derive(bevy::prelude::Resource, Default)]
 pub struct RemoteMissileView {
     held: Option<HeldMissileView>,
     turn: MissileTurn,
@@ -139,9 +147,10 @@ impl RemoteMissileView {
             .is_none()
             .then(|| {
                 presented
-                    .presented_projectiles()
+                    .snapshot()?
+                    .projectiles
                     .iter()
-                    .find(|p| p.authoritative_id() == Some(link.projectile))
+                    .find(|p| p.id == link.projectile)
             })
             .flatten();
         let snapshot_ms = presented.tick().map_or(at_time, sim::level_time_ms);
@@ -150,7 +159,11 @@ impl RemoteMissileView {
                 .record((life, link.projectile), snapshot_ms, link.angles);
             let pose = WorldCameraPose {
                 origin: missile_eye(missile, snapshot_ms, at_time, clip),
-                angles: self.turn.angles_at(at_time).unwrap_or(link.angles),
+                angles: missile_camera_angles(
+                    self.turn.angles_at(at_time).unwrap_or(link.angles),
+                    missile.velocity,
+                    at_time,
+                ),
             };
             self.held = Some(HeldMissileView {
                 life,
@@ -162,8 +175,20 @@ impl RemoteMissileView {
     }
 }
 
+fn missile_camera_angles(mut angles: [f32; 3], velocity: [f32; 3], at_time: i32) -> [f32; 3] {
+    let speed = velocity.iter().map(|v| v * v).sum::<f32>().sqrt();
+    let boost = ((speed - 3_000.0) / 3_000.0).clamp(0.0, 1.0);
+    let seconds = at_time as f32 * 0.001;
+    for (i, angle) in angles.iter_mut().enumerate() {
+        let frequency = [17.0, 23.0, 31.0][i];
+        let amplitude = [0.2, 0.2, 0.3][i];
+        *angle += (seconds * frequency * std::f32::consts::TAU).sin() * amplitude * boost;
+    }
+    angles
+}
+
 fn missile_eye(
-    missile: &PresentedProjectile,
+    missile: &sim::ProjectileState,
     snapshot_ms: i32,
     at_time: i32,
     clip: Option<&ClipCollision>,
@@ -197,8 +222,22 @@ pub fn linked_weapon_camera(
         .interpolation_pair()
         .and_then(|(before, _, fraction)| {
             let meta = before.meta.for_client(local)?;
-            (meta.life_sequence == current.life_sequence)
-                .then_some((meta.linked_weapon_view?, fraction.clamp(0.0, 1.0)))
+            let previous = meta.linked_weapon_view?;
+            (meta.life_sequence == current.life_sequence
+                && previous.entity_num == view.entity_num
+                && before
+                    .meta
+                    .generations
+                    .get(view.entity_num as usize)
+                    .zip(
+                        presented
+                            .snapshot()?
+                            .meta
+                            .generations
+                            .get(view.entity_num as usize),
+                    )
+                    .is_some_and(|(before, next)| before == next))
+            .then_some((previous, fraction.clamp(0.0, 1.0)))
         });
     Some(match previous {
         Some((previous, fraction)) => WorldCameraPose {

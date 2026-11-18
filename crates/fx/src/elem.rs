@@ -110,7 +110,7 @@ pub fn elem_slot_for_handle(handle: u16) -> Option<usize> {
         return None;
     }
     let byte = (handle as u32) << 2;
-    if byte % FX_ELEM_RUNTIME_STRIDE as u32 != 0 {
+    if !byte.is_multiple_of(FX_ELEM_RUNTIME_STRIDE as u32) {
         return None;
     }
     let slot = (byte / FX_ELEM_RUNTIME_STRIDE as u32) as usize;

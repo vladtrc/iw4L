@@ -1,5 +1,5 @@
 use super::{WeaponRegistry, normalize_weapon_name};
-use crate::{AssetNamespace, ConfigurationRefusal, FamilyKey, WeaponFamily, WeaponSelection};
+use crate::{ConfigurationRefusal, FamilyKey, WeaponFamily, WeaponSelection};
 
 pub(crate) trait WeaponConfigurationCompiler {
     fn compile(
@@ -9,31 +9,8 @@ pub(crate) trait WeaponConfigurationCompiler {
     ) -> Result<u32, ConfigurationRefusal>;
 }
 
-mod common;
-mod iw4;
-mod iw5;
-mod t5;
-mod t6;
-
-pub(super) fn authored_name(key: &FamilyKey, attachments: &[String]) -> String {
-    match key.namespace {
-        AssetNamespace::Iw4 => iw4::authored_name(&key.base, attachments),
-        AssetNamespace::Iw5 => common::joined_name(&key.base, attachments),
-        AssetNamespace::T5 => t5::authored_name(&key.base, attachments),
-        AssetNamespace::T6 => t6::authored_name(&key.base, attachments),
-    }
-}
-
 pub(crate) fn authored_attachments(key: &FamilyKey, name: &str) -> Option<Vec<String>> {
-    let name = name.strip_suffix("_mp").unwrap_or(name);
-    if name == key.base {
-        return Some(Vec::new());
-    }
-    if key.namespace == AssetNamespace::T5 && name == t5::authored_name(&key.base, &["dw".into()]) {
-        return Some(vec!["dw".into()]);
-    }
-    let rest = name.strip_prefix(&key.base)?.strip_prefix('_')?;
-    Some(rest.split('_').map(str::to_owned).collect())
+    (crate::weapon_policy(key.namespace)?.authored_attachments)(&key.base, name)
 }
 
 impl WeaponRegistry {
@@ -42,13 +19,9 @@ impl WeaponRegistry {
         family: &WeaponFamily,
         selection: &WeaponSelection,
     ) -> Result<u32, ConfigurationRefusal> {
-        let compiler: &dyn WeaponConfigurationCompiler = match family.key.namespace {
-            AssetNamespace::Iw4 => &iw4::Iw4Configuration(self),
-            AssetNamespace::Iw5 => &iw5::Iw5Configuration(self),
-            AssetNamespace::T5 => &t5::T5Configuration(self),
-            AssetNamespace::T6 => &t6::T6Configuration(self),
-        };
-        compiler.compile(family, selection)
+        let policy = crate::weapon_policy(family.key.namespace)
+            .ok_or_else(|| ConfigurationRefusal::UnknownFamily(family.key.to_string()))?;
+        (policy.configuration)(self, family, selection)
     }
 }
 
@@ -70,7 +43,7 @@ impl crate::weapon_families::FamilyContent for WeaponRegistry {
             .ok()
             .map(|weapon| weapon.handle())
     }
-    fn lookup(&self, namespace: crate::AssetNamespace, name: &str) -> Option<u32> {
+    fn lookup(&self, namespace: crate::FamilyId, name: &str) -> Option<u32> {
         self.by_namespaced
             .get(&(namespace, normalize_weapon_name(name)))
             .copied()
@@ -91,12 +64,12 @@ impl crate::weapon_families::FamilyContent for WeaponRegistry {
             .collect()
     }
 
-    fn names_in(&self, namespace: crate::AssetNamespace) -> Vec<(u32, String)> {
+    fn names_in(&self, namespace: crate::FamilyId) -> Vec<(u32, String)> {
         self.published_weapons()
             .map(|weapon| weapon.wire_id())
             .filter(|&id| id != 0)
             .filter(|&id| self.identity_namespace_of(id) == Some(namespace))
-            .filter(|&id| self.iw5_configuration_of(id).is_none())
+            .filter(|&id| self.rows[id as usize].indexed_name)
             .map(|id| (id, normalize_weapon_name(self.name_of(id))))
             .collect()
     }
@@ -149,4 +122,30 @@ pub(super) fn compile_completion_names(registry: &WeaponRegistry) -> Vec<String>
     names.sort();
     names.dedup();
     names
+}
+
+impl crate::WeaponConfigurationContent for WeaponRegistry {
+    fn authored(&self, namespace: crate::FamilyId, name: &str) -> Option<u32> {
+        self.by_namespaced
+            .get(&(namespace, name.to_owned()))
+            .copied()
+    }
+    fn prepared(&self, selection: &crate::WeaponSelection) -> Option<u32> {
+        self.configurations.get(selection).copied()
+    }
+    fn native_admission(&self, id: u32) -> Result<(), ConfigurationRefusal> {
+        self.native_configuration_admission(id)
+    }
+    fn name(&self, id: u32) -> &str {
+        self.name_of(id)
+    }
+    fn namespace(&self, id: u32) -> Option<crate::FamilyId> {
+        self.identity_namespace_of(id)
+    }
+    fn attachment_assets(&self, id: u32) -> Option<&[Option<String>]> {
+        Some(&self.rows.get(id as usize)?.attachment_assets)
+    }
+    fn attachments(&self) -> &crate::WeaponAttachments {
+        &self.attachments
+    }
 }

@@ -76,6 +76,9 @@ pub fn pmove<C: CollisionBackend, L: MantleXAnimLength, R: MantleRootDelta>(
 ) -> PmoveResult {
     let msec = clamped_msec(cmd.server_time.wrapping_sub(ps.command_time));
     ps.command_time = cmd.server_time;
+    if ps.pm_flags & pm_flags::SCRIPT_NO_LEAN != 0 {
+        ps.leanf = 0.;
+    }
 
     let mut pml = Pml {
         forward: [0.0; 3],
@@ -102,6 +105,17 @@ pub fn pmove<C: CollisionBackend, L: MantleXAnimLength, R: MantleRootDelta>(
     pml.forward = forward;
     pml.right = right;
     pml.up = up;
+
+    if ps.pm_type == playerstate_iw4::PM_TYPE_NOCLIP {
+        crate::noclip::move_player(ps, cmd, pml.frametime, forward, right);
+        drop_timers(ps, &pml);
+        return PmoveResult {
+            pml,
+            bounds: context.bounds,
+            stance_event: None,
+            reset_torso: false,
+        };
+    }
 
     mantle::clear_hint(ps);
 

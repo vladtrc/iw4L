@@ -145,6 +145,9 @@ pub(super) struct ExactColourFrameCensus {
     pub(super) xmodel_reuse_n: Option<u32>,
     pub(super) xmodel_material_runs: Option<u32>,
     pub(super) smodel_index_gaps: Option<u32>,
+    pub(super) smodel_index_owner: Option<u64>,
+    pub(super) smodel_index_revision: Option<u64>,
+    pub(super) smodel_index_words: Option<usize>,
     pub(super) smodel_material_runs: Option<u32>,
     pub(super) smodel_material_runs_seq: Option<u32>,
     pub(super) smodel_material_run_max: Option<u32>,
@@ -185,26 +188,35 @@ pub(super) fn copy_submit_prepare_ms(
 
     for (counter, value) in [
         (
-            perf::Counter::CounterDipsColour,
+            perf::counter!("dip_colour", "iw4l.render", handle),
             census.preparation.gpu_ready,
         ),
-        (perf::Counter::CounterDipsSun, census.frame.sun_shadow_gpu),
         (
-            perf::Counter::CounterBindGroup0,
+            perf::counter!("dip_sun", "iw4l.render", handle),
+            census.frame.sun_shadow_gpu,
+        ),
+        (
+            perf::counter!("bind0", "iw4l.render", handle),
             census.preparation.set_bind_group0_n,
         ),
         (
-            perf::Counter::CounterBindGroup1,
+            perf::counter!("bind1", "iw4l.render", handle),
             census.preparation.set_bind_group1_n,
         ),
-        (perf::Counter::CounterCmdState, census.frame.set_state_n),
         (
-            perf::Counter::CounterOverlayConstWrites,
+            perf::counter!("cmd_state", "iw4l.render", handle),
+            census.frame.set_state_n,
+        ),
+        (
+            perf::counter!("overlay_const_writes", "iw4l.render", handle),
             census.preparation.overlay_const_writes_n,
         ),
-        (perf::Counter::CounterMultiDraws, census.frame.multi_draw_n),
         (
-            perf::Counter::CounterMultiDrawCommands,
+            perf::counter!("multi_draw", "iw4l.render", handle),
+            census.frame.multi_draw_n,
+        ),
+        (
+            perf::counter!("multi_draw_cmds", "iw4l.render", handle),
             census.frame.multi_draw_commands_n,
         ),
     ] {
@@ -214,23 +226,23 @@ pub(super) fn copy_submit_prepare_ms(
     }
     for (counter, value) in [
         (
-            perf::Counter::RenderSubmitSunMs,
+            perf::counter!("submit_sun", "iw4l.render", handle),
             census.frame.sun_shadow_submit_ms,
         ),
         (
-            perf::Counter::RenderSubmitGatherMs,
+            perf::counter!("submit_gather", "iw4l.render", handle),
             census.frame.submit_gather_ms,
         ),
         (
-            perf::Counter::RenderSubmitPrepareMs,
+            perf::counter!("submit_prepare", "iw4l.render", handle),
             census.frame.submit_prepare_ms,
         ),
         (
-            perf::Counter::RenderSubmitArenaMs,
+            perf::counter!("submit_arena", "iw4l.render", handle),
             census.frame.submit_arena_ms,
         ),
         (
-            perf::Counter::RenderSubmitRecordMs,
+            perf::counter!("submit_record", "iw4l.render", handle),
             census.frame.submit_record_ms,
         ),
     ] {
@@ -342,6 +354,9 @@ pub(super) fn copy_submit_prepare_ms(
         guard.xmodel_reuse_n = census.frame.xmodel_reuse_n;
         guard.xmodel_material_runs = census.frame.xmodel_material_runs;
         guard.smodel_index_gaps = census.frame.smodel_index_gaps;
+        guard.smodel_index_owner = census.frame.smodel_index_owner;
+        guard.smodel_index_revision = census.frame.smodel_index_revision;
+        guard.smodel_index_words = census.frame.smodel_index_words;
         guard.smodel_material_runs = census.frame.smodel_material_runs;
         guard.smodel_material_runs_seq = census.frame.smodel_material_runs_seq;
         guard.smodel_material_run_max = census.frame.smodel_material_run_max;

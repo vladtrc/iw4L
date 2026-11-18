@@ -18,7 +18,6 @@ pub struct WorldPassMaterial {
     pub probe: Option<Handle<Image>>,
     pub ambient: Option<Handle<Image>>,
     pub directional: Option<Handle<Image>>,
-    pub sun_mask: Option<Handle<Image>>,
     pub sun: Option<WorldSun>,
     pub alpha_mode: AlphaMode,
 
@@ -37,8 +36,6 @@ pub use render_frame::WorldVertexRefusal;
 #[derive(Resource, Clone, Debug, Default)]
 pub struct WorldDrawGpuPlan {
     pub packed_vertices: asset_world::WorldVertexPayload,
-
-    pub surface_material: Vec<u32>,
 
     pub surface_sampler_inputs: Vec<SurfaceSamplerInputs>,
     pub materials: Vec<WorldPassMaterial>,
@@ -103,10 +100,7 @@ impl WorldDrawGpuPlan {
                     source_layout: "packed payload published for extract",
                 },
             ) {
-                asset_world::WorldVertexPayload::Iw4(rows)
-                | asset_world::WorldVertexPayload::Iw5(rows)
-                | asset_world::WorldVertexPayload::T5(rows)
-                | asset_world::WorldVertexPayload::T6(rows) => {
+                asset_world::WorldVertexPayload::Captured { rows, .. } => {
                     self.vertex_share = Some(Arc::new(rows));
                 }
                 unavailable => self.packed_vertices = unavailable,
@@ -161,9 +155,8 @@ impl WorldDrawGpuPlan {
         scene.retained_texture_uvs.clear();
 
         let mut materials = Vec::new();
-        let mut batch_to_mat = vec![u32::MAX; scene.batches.len()];
 
-        for (batch_i, batch) in scene.batches.iter().enumerate() {
+        for batch in &scene.batches {
             let runtime = batch
                 .material
                 .and_then(|id| scene.runtime_material_catalog.derived(id));
@@ -183,7 +176,7 @@ impl WorldDrawGpuPlan {
                 .get(usize::from(batch.reflection_probe_index))
                 .and_then(Clone::clone);
 
-            let (ambient, directional, sun_mask) = if batch.lightmapped {
+            let (ambient, directional) = if batch.lightmapped {
                 lightmap_handles
                     .get(usize::from(batch.lightmap_index))
                     .and_then(|page| page.as_ref())
@@ -191,12 +184,11 @@ impl WorldDrawGpuPlan {
                         (
                             Some(page.ambient_diagnostic.clone()),
                             Some(page.directional_diagnostic.clone()),
-                            Some(page.sun_mask_diagnostic.clone()),
                         )
                     })
-                    .unwrap_or((None, None, None))
+                    .unwrap_or((None, None))
             } else {
-                (None, None, None)
+                (None, None)
             };
 
             let mat = WorldPassMaterial {
@@ -206,7 +198,6 @@ impl WorldDrawGpuPlan {
                 probe,
                 ambient,
                 directional,
-                sun_mask,
                 sun: batch.sun,
                 alpha_mode: AlphaMode::Opaque,
                 draw_mode: None,
@@ -218,18 +209,13 @@ impl WorldDrawGpuPlan {
                 falloff_end: runtime.map(|m| m.falloff_end()).unwrap_or([0.0; 4]),
                 cull_mode: runtime.and_then(|m| super::super::runtime_cull_face(m.cull_mode)),
             };
-            let idx = materials.len() as u32;
             materials.push(mat);
-            if let Some(slot) = batch_to_mat.get_mut(batch_i) {
-                *slot = idx;
-            }
         }
 
         let Some(cull) = scene.cull.as_ref() else {
             let upload_pending = !vertices.is_empty();
             let mut plan = Self {
                 packed_vertices,
-                surface_material: Vec::new(),
                 surface_sampler_inputs: Vec::new(),
                 materials,
                 upload_pending,
@@ -246,17 +232,6 @@ impl WorldDrawGpuPlan {
         let indices = cull.packed_indices.clone();
         let surface_ranges = cull.surface_index_ranges.clone();
 
-        let surface_material: Vec<u32> = cull
-            .surface_batch_ranges
-            .iter()
-            .zip(surface_ranges.iter())
-            .map(|(&(batch, _, _), &(_, count))| {
-                if count == 0 {
-                    return u32::MAX;
-                }
-                batch_to_mat.get(batch).copied().unwrap_or(u32::MAX)
-            })
-            .collect();
         let surface_sampler_inputs = cull
             .surface_batch_ranges
             .iter()
@@ -279,7 +254,6 @@ impl WorldDrawGpuPlan {
         let upload_pending = !vertices.is_empty() && !indices.is_empty();
         let mut plan = Self {
             packed_vertices,
-            surface_material,
             surface_sampler_inputs,
             materials,
             upload_pending,

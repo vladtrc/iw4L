@@ -1,30 +1,50 @@
 use super::super::args::{arg, int, kind, string};
 use super::player::player;
 use crate::LocalPlayerProfile;
-use crate::script::{
-    MatchScript,
-    Namespace::{Function, Method},
-    NativeRegistry, Value,
-};
-
-const SP_FIELDS: &[(&str, i32)] = &[
-    ("haseverplayed_sp", 0),
-    ("takecoverwarnings", -1),
-    ("highestmission", 0),
-    ("autoaim", 0),
-    ("invertedpitch", 0),
-    ("cheatpoints", 0),
-    ("missionhighestdifficulty", 0),
-];
-
-fn sp_default(name: &str) -> Option<Value> {
-    SP_FIELDS
-        .iter()
-        .find(|(field, _)| name.eq_ignore_ascii_case(field))
-        .map(|(_, value)| Value::Int(*value))
-}
+use crate::script::{Namespace::Method, NativeRegistry, Value};
 
 pub(crate) fn register(registry: &mut NativeRegistry) {
+    for name in ["updategamerprofile", "updategamerprofileall"] {
+        registry.register(crate::script::Namespace::Function, name, |world, _, _| {
+            world.resource_mut::<LocalPlayerProfile>().request_save();
+            Ok(Value::Undefined)
+        });
+    }
+    registry.register(Method, "getplayerintelisfound", |world, receiver, args| {
+        if player(world, receiver)? != 0 {
+            return Err("local player profile unavailable".into());
+        }
+        let number = int(args, 0)?;
+        Ok(Value::Int(i32::from(
+            world
+                .resource::<LocalPlayerProfile>()
+                .intel_is_found(number),
+        )))
+    });
+    registry.register(Method, "setplayerintelfound", |world, receiver, args| {
+        if player(world, receiver)? != 0 {
+            return Err("local player profile unavailable".into());
+        }
+        let number = int(args, 0)?;
+        world
+            .resource_mut::<LocalPlayerProfile>()
+            .set_intel_found(number);
+        Ok(Value::Undefined)
+    });
+    registry.register(Method, "getplayersetting", |world, receiver, args| {
+        let client = player(world, receiver)?;
+        let name = string(args, 0)?;
+        if name.to_ascii_lowercase().starts_with("gameskill") {
+            let key = format!("g_gameskill_player_{}", client + 1);
+            return world
+                .resource::<crate::script::MatchScript>()
+                .dvars
+                .get(&key)
+                .map(|value| Value::String(value.as_str().into()))
+                .ok_or_else(|| format!("missing player setting dvar {key}"));
+        }
+        Err(format!("unknown player setting {name}"))
+    });
     registry.register(
         Method,
         "getlocalplayerprofiledata",
@@ -33,17 +53,11 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
                 return Ok(Value::Undefined);
             }
             let name = string(args, 0)?;
-            if let Some(value) = world.resource::<LocalPlayerProfile>().get(&name) {
-                return Ok(Value::Int(i32::from(value)));
-            }
-            let fresh = sp_default(&name)
-                .ok_or_else(|| format!("unknown local player profile field {name}"))?;
-            let stored = world
-                .resource::<MatchScript>()
-                .sp_profile
-                .get(&name.to_ascii_lowercase())
-                .cloned();
-            Ok(stored.unwrap_or(fresh))
+            world
+                .resource::<LocalPlayerProfile>()
+                .get_int(&name)
+                .map(Value::Int)
+                .ok_or_else(|| format!("unknown local player profile field {name}"))
         },
     );
     registry.register(
@@ -57,61 +71,21 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
                 return Err("setlocalplayerprofiledata expects at least two arguments".into());
             }
             let name = string(args, 0)?;
-            if world.resource::<LocalPlayerProfile>().get(&name).is_none() {
-                if sp_default(&name).is_none() {
-                    return Err(format!("unknown local player profile field {name}"));
-                }
-                let value = arg(args, 1)?.clone();
-                world
-                    .resource_mut::<MatchScript>()
-                    .sp_profile
-                    .insert(name.to_ascii_lowercase(), value);
-                return Ok(Value::Undefined);
+            if world
+                .resource::<LocalPlayerProfile>()
+                .get_int(&name)
+                .is_none()
+            {
+                return Err(format!("unknown local player profile field {name}"));
             }
             let value = match arg(args, 1)? {
-                Value::Int(value) => *value as u8,
+                Value::Int(value) => *value,
                 other => return Err(format!("parameter 2 is {}, not an int", kind(other))),
             };
-            world.resource_mut::<LocalPlayerProfile>().set(&name, value);
+            world
+                .resource_mut::<LocalPlayerProfile>()
+                .set_int(&name, value);
             Ok(Value::Undefined)
         },
     );
-    registry.register(Method, "getplayerintelisfound", |world, receiver, args| {
-        if player(world, receiver)? != 0 {
-            return Ok(Value::Int(0));
-        }
-        let num = int(args, 0)?;
-        let key = format!("intel_{num}");
-        let found = world
-            .resource::<MatchScript>()
-            .sp_profile
-            .get(&key)
-            .is_some_and(|v| v != &Value::Int(0));
-        Ok(Value::Int(found.into()))
-    });
-    registry.register(Method, "setplayerintelfound", |world, receiver, args| {
-        if player(world, receiver)? != 0 {
-            return Ok(Value::Undefined);
-        }
-        let num = int(args, 0)?;
-        let key = format!("intel_{num}");
-        let mut match_script = world.resource_mut::<MatchScript>();
-        if match_script.sp_profile.get(&key).is_none() {
-            match_script.sp_profile.insert(key, Value::Int(1));
-            let cur = match match_script.sp_profile.get("cheatpoints") {
-                Some(Value::Int(points)) => *points,
-                _ => 0,
-            };
-            match_script
-                .sp_profile
-                .insert("cheatpoints".into(), Value::Int(cur + 1));
-        }
-        Ok(Value::Undefined)
-    });
-    registry.register(Function, "updategamerprofile", |_, _, _| {
-        Ok(Value::Undefined)
-    });
-    registry.register(Function, "updategamerprofileall", |_, _, _| {
-        Ok(Value::Undefined)
-    });
 }

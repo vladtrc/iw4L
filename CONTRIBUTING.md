@@ -42,7 +42,7 @@ cargo fmt --all
 cargo clippy --workspace --all-targets
 ```
 
-`CONTEXT.md` documents how the maintainer works — artifacts, iterations, agent
+`AGENT.md` links to how the maintainer works — artifacts, iterations, agent
 clones. It is a maintainer's workflow, not a requirement for contributing: you
 do not need `make mr`, the iteration naming, or anything under `context/` to
 change the runtime.

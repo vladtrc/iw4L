@@ -1,8 +1,7 @@
-#[path = "sab_media.rs"]
-pub(crate) mod sab_media;
-
-#[path = "t5_stream.rs"]
-pub(crate) mod t5_stream;
+#[path = "pcm/external_media.rs"]
+pub(crate) mod external_media;
+#[path = "pcm/native_decode.rs"]
+pub(crate) mod native_decode;
 
 use crate::decode_budget::{DecodeReservation, DecodeSamples};
 use crate::media::PcmBuffer;
@@ -10,8 +9,9 @@ use crate::media::PcmBuffer;
 #[derive(Debug)]
 pub(crate) enum DecodeError {
     Decode,
+    Native(asset_audio::NativeAudioError),
     Read,
-    UnsupportedCodec(asset_audio::SabCodec),
+    UnsupportedCodec(asset_audio::ExternalAudioCodec),
     MetadataMismatch,
     Pcm(crate::media::PcmError),
 }

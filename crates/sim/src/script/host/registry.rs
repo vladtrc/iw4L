@@ -7,7 +7,7 @@ use crate::script::{Namespace, RoundScript, Value};
 pub type Native = fn(&mut World, &Value, &[Value]) -> Result<Value, String>;
 
 #[derive(Resource, Clone)]
-pub struct NativeRegistry(BTreeMap<(Namespace, String), Native>);
+pub struct NativeRegistry(BTreeMap<Namespace, BTreeMap<String, Native>>);
 impl Default for NativeRegistry {
     fn default() -> Self {
         let mut registry = Self(BTreeMap::new());
@@ -29,7 +29,9 @@ impl Default for NativeRegistry {
             if !args.is_empty() {
                 return Err("gettime expects no arguments".into());
             }
-            let tick = world.resource::<crate::step::StepRequest>().tick;
+            let tick = world
+                .get_resource::<crate::step::StepRequest>()
+                .map_or(crate::Tick(0), |request| request.tick);
             let ms = u64::from(tick.0) * u64::from(crate::MATCH_TICK_MS);
             i32::try_from(ms)
                 .map(Value::Int)
@@ -47,42 +49,75 @@ impl Default for NativeRegistry {
         });
         natives::iw4::register(&mut registry);
         natives::cinematic::register(&mut registry);
-        natives::sp_pending::register(&mut registry);
         super::audio::register(&mut registry);
         natives::math::register(&mut registry);
+        super::path_nodes::register(&mut registry);
+        super::spawners::register(&mut registry);
+        super::sentients::register(&mut registry);
+        super::actors::register(&mut registry);
+        super::entity_damage::register(&mut registry);
+        super::ai_events::register(&mut registry);
+        super::drones::register(&mut registry);
+        super::look_at::register(&mut registry);
+        super::animations::register(&mut registry);
         natives::engine::register(&mut registry);
         natives::player::register(&mut registry);
+        super::model_state::register(&mut registry);
         natives::skill::register(&mut registry);
         natives::local_profile::register(&mut registry);
+        natives::local_input::register(&mut registry);
         super::objectives::register(&mut registry);
         super::weapons::register(&mut registry);
         super::vehicles::register(&mut registry);
         super::physics::register(&mut registry);
-        natives::t5::register(&mut registry);
         super::controls::register(&mut registry);
         super::client_effects::register(&mut registry);
         super::guidance::register(&mut registry);
         super::turrets::register(&mut registry);
         super::triggers::register(&mut registry);
         super::spectators::register(&mut registry);
-        super::script_anim::register(&mut registry);
-        super::actors::register(&mut registry);
-        super::vehicles::campaign::register_sp(&mut registry);
-        super::weapons::campaign::register_sp(&mut registry);
-        super::mission::register(&mut registry);
-        super::controls::campaign::register(&mut registry);
-        super::entity_damage::campaign::register(&mut registry);
-        super::turrets::campaign::register(&mut registry);
         registry
     }
 }
 impl NativeRegistry {
+    pub fn validate_program(
+        &self,
+        program: &crate::script::Program,
+    ) -> Result<(), crate::script::Fault> {
+        let unbound = self.unbound_program(program);
+        if unbound.is_empty() {
+            return Ok(());
+        }
+        Err(crate::script::Fault::at(
+            &crate::script::Location {
+                module: "<runtime>".into(),
+                function: "install".into(),
+                line: 0,
+                column: 0,
+            },
+            format!("{} unbound natives: {}", unbound.len(), unbound.join(" ")),
+        ))
+    }
+
+    pub fn unbound_program<'a>(&self, program: &'a crate::script::Program) -> Vec<&'a str> {
+        let mut unbound: Vec<_> = program
+            .natives
+            .iter()
+            .filter(|builtin| self.get(builtin.namespace, builtin.name).is_none())
+            .map(|builtin| builtin.name)
+            .collect();
+        unbound.sort_unstable();
+        unbound
+    }
+
     pub fn register(&mut self, namespace: Namespace, name: &str, native: Native) {
         self.0
-            .insert((namespace, name.to_ascii_lowercase()), native);
+            .entry(namespace)
+            .or_default()
+            .insert(name.to_ascii_lowercase(), native);
     }
     pub(crate) fn get(&self, namespace: Namespace, name: &str) -> Option<Native> {
-        self.0.get(&(namespace, name.to_owned())).copied()
+        self.0.get(&namespace)?.get(name).copied()
     }
 }
 

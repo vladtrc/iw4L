@@ -1,3 +1,5 @@
+mod families;
+pub use families::*;
 mod animtree;
 mod atr_compile;
 mod clip_scheduler;
@@ -6,7 +8,6 @@ mod xanim_catalog;
 
 pub use animtree::*;
 pub use asset_core::*;
-pub use atr_compile::compile_script_tree;
 pub use clip_scheduler::*;
 pub use playeranim_parse::*;
 pub use xanim_catalog::*;
@@ -21,3 +22,5 @@ pub mod xanim_clip {
 pub mod asset_graph {
     pub use asset_core::*;
 }
+
+pub use atr_compile::compile_script_animtree;

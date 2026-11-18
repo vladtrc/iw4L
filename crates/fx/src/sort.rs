@@ -27,12 +27,11 @@ pub fn sort_new_elems_in_effect(
     if let Some(effect) = host.effect_at_mut(effect_slot) {
         effect.first_elem_handle[0] = stop;
     }
-    if stop != FX_ELEM_HANDLE_NONE {
-        if let Some(stop_slot) = elem_slot_for_handle(stop) {
-            if let Some(e) = host.elems.get_mut(stop_slot) {
-                e.prev_elem_handle = FX_ELEM_HANDLE_NONE;
-            }
-        }
+    if stop != FX_ELEM_HANDLE_NONE
+        && let Some(stop_slot) = elem_slot_for_handle(stop)
+        && let Some(e) = host.elems.get_mut(stop_slot)
+    {
+        e.prev_elem_handle = FX_ELEM_HANDLE_NONE;
     }
 
     while pending != stop {
@@ -118,17 +117,16 @@ fn sort_sprite_elem_into_effect(
         if let Some(effect) = host.effect_at_mut(effect_slot) {
             effect.first_elem_handle[0] = new_handle;
         }
-    } else if let Some(prev_slot) = elem_slot_for_handle(prev_handle) {
-        if let Some(e) = host.elems.get_mut(prev_slot) {
-            e.next_elem_handle = new_handle;
-        }
+    } else if let Some(prev_slot) = elem_slot_for_handle(prev_handle)
+        && let Some(e) = host.elems.get_mut(prev_slot)
+    {
+        e.next_elem_handle = new_handle;
     }
-    if cursor != FX_ELEM_HANDLE_NONE {
-        if let Some(cur_slot) = elem_slot_for_handle(cursor) {
-            if let Some(e) = host.elems.get_mut(cur_slot) {
-                e.prev_elem_handle = new_handle;
-            }
-        }
+    if cursor != FX_ELEM_HANDLE_NONE
+        && let Some(cur_slot) = elem_slot_for_handle(cursor)
+        && let Some(e) = host.elems.get_mut(cur_slot)
+    {
+        e.prev_elem_handle = new_handle;
     }
 }
 

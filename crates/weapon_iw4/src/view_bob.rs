@@ -210,23 +210,17 @@ pub fn crash_land_fall_height(
 }
 
 pub fn crash_land_view_dip(fall_height: f32) -> i32 {
-    if !(fall_height > LAND_VIEW_DIP_FALL_IN) {
+    if fall_height <= LAND_VIEW_DIP_FALL_IN || fall_height.is_nan() {
         return 0;
     }
     let raw = (fall_height - LAND_VIEW_DIP_FALL_IN) / LAND_VIEW_DIP_SPAN_IN * LAND_VIEW_DIP_SCALE
         + LAND_VIEW_DIP_SCALE;
     let n = libm::roundf(raw) as i32;
-    if n > LAND_VIEW_DIP_MAX {
-        LAND_VIEW_DIP_MAX
-    } else if n < 0 {
-        0
-    } else {
-        n
-    }
+    n.clamp(0, LAND_VIEW_DIP_MAX)
 }
 
 pub fn land_origin_weight(delta_ms: f32) -> Option<f32> {
-    if !(delta_ms > 0.0) {
+    if delta_ms <= 0.0 || delta_ms.is_nan() {
         return None;
     }
     if delta_ms < LAND_DEFLECT_MS {
@@ -257,7 +251,7 @@ pub fn viewweapon_land_origin_z(delta_ms: i32, land_change: f32) -> f32 {
 }
 
 pub fn view_org_bob(inputs: ViewOrgBobInputs) -> ViewOrgBob {
-    if !(inputs.xyspeed > 0.0) {
+    if inputs.xyspeed <= 0.0 || inputs.xyspeed.is_nan() {
         return ViewOrgBob::default();
     }
     let cycle = view_bob_cycle(inputs.bob_cycle);
@@ -397,13 +391,13 @@ fn view_overlay_bob_angles(angles: &mut ViewAngleBob, inputs: ViewAngleBobInputs
 
 fn view_ads_bob_angles(angles: &mut ViewAngleBob, inputs: ViewAngleBobInputs) {
     let frac = inputs.org.weapon_pos_frac;
-    if !(frac > 0.0) {
+    if frac <= 0.0 || frac.is_nan() {
         return;
     }
     if (inputs.e_flags & EFLAGS_TURRET_VEHICLE) != 0 {
         return;
     }
-    if !(inputs.ads_view_bob_mult > 0.0) {
+    if inputs.ads_view_bob_mult <= 0.0 || inputs.ads_view_bob_mult.is_nan() {
         return;
     }
     let scale = inputs.ads_view_bob_mult * frac;
@@ -414,13 +408,7 @@ fn view_ads_bob_angles(angles: &mut ViewAngleBob, inputs: ViewAngleBobInputs) {
 
 pub fn view_kick_amplitude(damage_count: i32) -> f32 {
     let scaled = damage_count as f32 * BG_VIEW_KICK_SCALE;
-    if scaled < BG_VIEW_KICK_MIN {
-        BG_VIEW_KICK_MIN
-    } else if scaled > BG_VIEW_KICK_MAX {
-        BG_VIEW_KICK_MAX
-    } else {
-        scaled
-    }
+    scaled.clamp(BG_VIEW_KICK_MIN, BG_VIEW_KICK_MAX)
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -461,7 +449,7 @@ fn view_damage_kick(angles: &mut ViewAngleBob, inputs: ViewAngleBobInputs) {
     let frac = inputs.org.weapon_pos_frac;
     let mut factor = 1.0 - frac * VIEW_DAMAGE_ADS_HALF;
     if frac != 0.0 && inputs.overlay_reticle != 0 {
-        factor = (frac * VIEW_DAMAGE_ADS_HALF + 1.0) * factor;
+        factor *= frac * VIEW_DAMAGE_ADS_HALF + 1.0;
     }
     let delta = inputs.time.wrapping_sub(inputs.damage_time) as f32;
     if delta < VIEW_DAMAGE_DEFLECT_MS {

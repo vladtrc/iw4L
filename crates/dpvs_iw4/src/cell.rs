@@ -9,6 +9,73 @@ pub struct DpvsPlanes<'a> {
 }
 
 impl<'a> DpvsPlanes<'a> {
+    pub fn winding_reaches_visible_cell(
+        &self,
+        winding: &[[f32; 3]],
+        visible: &mut impl FnMut(usize, &[[f32; 3]]) -> bool,
+    ) -> bool {
+        self.winding_visible_r(0, winding, visible, 0)
+    }
+
+    fn winding_visible_r(
+        &self,
+        mut node: usize,
+        winding: &[[f32; 3]],
+        visible: &mut impl FnMut(usize, &[[f32; 3]]) -> bool,
+        depth: usize,
+    ) -> bool {
+        if depth > self.nodes.len() {
+            return true;
+        }
+        for _ in 0..self.nodes.len() {
+            let Some(&value) = self.nodes.get(node) else {
+                return true;
+            };
+            if u32::from(value) <= self.cell_count {
+                return value != 0 && visible(usize::from(value - 1), winding);
+            }
+            let plane_index = usize::from(value) - self.cell_count as usize - 1;
+            let (Some(plane), Some(&offset)) =
+                (self.planes.get(plane_index), self.nodes.get(node + 1))
+            else {
+                return true;
+            };
+            let p = [
+                plane.normal[0],
+                plane.normal[1],
+                plane.normal[2],
+                -plane.dist,
+            ];
+            let distance = |v: &[f32; 3]| p[0] * v[0] + p[1] * v[1] + p[2] * v[2] + p[3];
+            if winding.iter().all(|v| distance(v) > 0.01) {
+                node += 2;
+            } else if winding.iter().all(|v| distance(v) < -0.01) {
+                node += usize::from(offset);
+            } else {
+                let mut fragment = [[0.0; 3]; 128];
+                let Some(n) = crate::chop::clip_winding_to_plane(winding, p, &mut fragment) else {
+                    return true;
+                };
+                if n >= 3 && self.winding_visible_r(node + 2, &fragment[..n], visible, depth + 1) {
+                    return true;
+                }
+                let Some(n) =
+                    crate::chop::clip_winding_to_plane(winding, p.map(|v| -v), &mut fragment)
+                else {
+                    return true;
+                };
+                return n >= 3
+                    && self.winding_visible_r(
+                        node + usize::from(offset),
+                        &fragment[..n],
+                        visible,
+                        depth + 1,
+                    );
+            }
+        }
+        true
+    }
+
     pub fn cell_for_point(&self, origin: [f32; 3]) -> Option<usize> {
         if self.nodes.is_empty() || self.cell_count == 0 {
             return None;

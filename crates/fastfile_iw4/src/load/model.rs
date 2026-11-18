@@ -196,6 +196,11 @@ pub(super) fn load_xmodel(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
             s.f32_at(p, s.layout(0x11c, 376))?,
         ]),
         phys_preset,
+        phys_collmap: if s.ptr_at(p, s.layout(300, 400))?.is_null() {
+            None
+        } else {
+            links.phys_collmap_geometry(p.at(s.layout(300, 400)))
+        },
     });
 
     s.pop()

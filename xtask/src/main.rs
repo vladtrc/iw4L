@@ -15,6 +15,7 @@ const TRACE_TOOLS: &[&str] = &[
     "net-feel [trace.pftrace]",
     "live <swap|replace|play-in|demo-out|demo-map> [trace.pftrace]",
     "bench [trace.pftrace]",
+    "perf-compare HASH... [--rounds N] [--warmup N] [--replay run.json]",
     "perf-overhead --pairs N --bin PATH [--workdir PATH] --zone ZONE --cmds SCRIPT [--focus SELECTOR]",
     "query [trace] <sql>",
     "frame-budget [trace.pftrace]",
@@ -30,6 +31,7 @@ const REPO_TOOLS: &[&str] = &[
     "mr fmt FILE.rs...",
     "publish-check",
     "licenses",
+    "check-workspace [--structure-only]",
 ];
 
 const SHIP_TOOLS: &[&str] = &[
@@ -92,6 +94,7 @@ fn main() -> ExitCode {
             rest.get(1).map(std::path::PathBuf::from),
         ),
         "bench" => xtask::perfetto_query::bench_gate(rest.first().map(std::path::PathBuf::from)),
+        "perf-compare" => xtask::perf_compare::run(&repo_root(), rest.to_vec()),
         "perf-overhead" => xtask::perf_overhead::run(&repo_root(), rest.to_vec()),
         "query" => xtask::perfetto_query::query_gate(rest.to_vec()),
         "frame-budget" => {
@@ -111,6 +114,7 @@ fn main() -> ExitCode {
 fn repo(cmd: &str, rest: &[String]) -> Option<Res<()>> {
     let root = repo_root();
     match cmd {
+        "check-workspace" => Some(xtask::org::check_workspace(&root, rest)),
         "licenses" => Some(xtask::licenses::run_cli(&root)),
         "mr" => Some(xtask::mrs::run_cli(&root, rest)),
         "publish-check" => Some(xtask::publish_check::run_cli(&root)),

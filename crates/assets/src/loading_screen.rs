@@ -9,6 +9,9 @@ use asset_transport::progress::LoadProgress;
 pub struct LoadingScreen {
     pub progress: LoadProgress,
     pub(crate) title: String,
+    /// The titles of a merged map's worlds, world 0 first; empty for a plain
+    /// map.
+    pub(crate) worlds: Vec<String>,
     pub(crate) mode_label: String,
     pub(crate) complete: bool,
     failure: Option<String>,
@@ -31,6 +34,7 @@ impl LoadingScreen {
         Self {
             progress,
             title: title.into(),
+            worlds: Vec::new(),
             mode_label: mode_label.into(),
             complete: false,
             failure: None,
@@ -44,6 +48,15 @@ impl LoadingScreen {
 
     pub fn title(&self) -> &str {
         &self.title
+    }
+
+    pub fn with_worlds(mut self, worlds: Vec<String>) -> Self {
+        self.worlds = worlds;
+        self
+    }
+
+    pub fn worlds(&self) -> &[String] {
+        &self.worlds
     }
 
     pub fn mode_label(&self) -> &str {
@@ -83,7 +96,7 @@ impl LoadingScreen {
         self.preview_ready
     }
 
-    pub fn tick_elapsed(&mut self, _delta: Duration) {
+    pub fn tick_elapsed(&mut self) {
         self.elapsed = self.spawned_at.elapsed();
         if let Some(at) = self.complete_at {
             self.since_complete = at.elapsed();
@@ -103,6 +116,7 @@ impl LoadingScreen {
 pub struct LoadingPreviewSource {
     pub path: PathBuf,
     pub map_name: String,
-
-    pub request_id: u64,
+    /// A merged map's other worlds, world 1 first: the preview shows every
+    /// world in a band of its own.
+    pub more: Vec<(PathBuf, String)>,
 }

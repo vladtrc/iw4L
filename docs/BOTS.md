@@ -2,9 +2,9 @@
 
 Authority tick: observation → memory → utility → task → route → motor → UserCmd.
 
-`bot dummy [N]` creates bots with no controller or perception queries. They keep
+`bot dummy [N] [enemy|friendly]` creates bots with no controller or perception queries. They keep
 their aim and weapon, accept `bot tp/give/fire`, and take damage and respawn normally.
-They retain normal bot loadouts/perks; `bot hold off` leaves dummies idle.
+An optional side selects the local player’s enemy or friendly team. They retain normal bot loadouts/perks; `bot hold off` leaves dummies idle.
 Bots submit `TickInput.cmds` like players — [`SIM-STEP.md`](SIM-STEP.md).
 
 | file | owns |

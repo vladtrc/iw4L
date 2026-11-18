@@ -3,20 +3,32 @@ use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use net::WorldObjectSyncDecoder;
-use net::{Frame, PROTOCOL_VERSION, Transport, TransportError, WireError, WireReader};
+use net::{Frame, PROTOCOL_VERSION, WireError, WireReader};
 use sim::RNG_DOMAIN_SCHEME;
 
 pub const MAGIC: [u8; 8] = *b"IW4LDEMO";
 
-pub const ZONE_FIELD_LEN: usize = 32;
+pub const RECORDING_FORMAT_VERSION: u32 = 1;
+pub const ZONE_FIELD_LEN: usize = 65;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MatchRecordIdentity {
     pub rng_scheme: u32,
     pub root_seed: u64,
     pub content_digest: u64,
 
     pub zone: [u8; ZONE_FIELD_LEN],
+}
+
+impl Default for MatchRecordIdentity {
+    fn default() -> Self {
+        Self {
+            rng_scheme: 0,
+            root_seed: 0,
+            content_digest: 0,
+            zone: [0; ZONE_FIELD_LEN],
+        }
+    }
 }
 
 impl MatchRecordIdentity {
@@ -48,7 +60,7 @@ fn encode_zone_field(zone: &str) -> [u8; ZONE_FIELD_LEN] {
     let mut out = [0u8; ZONE_FIELD_LEN];
     let cleaned: String = zone
         .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
         .take(ZONE_FIELD_LEN - 1)
         .collect();
     let bytes = cleaned.as_bytes();
@@ -67,14 +79,16 @@ fn looks_like_zone_field(zone: &[u8; ZONE_FIELD_LEN]) -> bool {
         return true;
     }
     let Some(end) = zone.iter().position(|&b| b == 0) else {
-        return zone.iter().all(|&b| b.is_ascii_alphanumeric() || b == b'_');
+        return zone
+            .iter()
+            .all(|&b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
     };
     if end == 0 {
         return false;
     }
     zone[..end]
         .iter()
-        .all(|&b| b.is_ascii_alphanumeric() || b == b'_')
+        .all(|&b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
         && zone[end..].iter().all(|&b| b == 0)
 }
 
@@ -87,6 +101,7 @@ pub enum ReplayError {
     Magic { found: [u8; 8] },
 
     Version { found: u32, expected: u32 },
+    FormatVersion { found: u32, expected: u32 },
     Wire(WireError),
 }
 
@@ -100,6 +115,9 @@ impl core::fmt::Display for ReplayError {
                 String::from_utf8_lossy(found),
                 String::from_utf8_lossy(&MAGIC)
             ),
+            ReplayError::FormatVersion { found, expected } => {
+                write!(f, "recording format {found}, expected {expected}")
+            }
             ReplayError::Version { found, expected } => write!(
                 f,
                 "recording is protocol {found}, this build speaks {expected}; \
@@ -110,7 +128,15 @@ impl core::fmt::Display for ReplayError {
     }
 }
 
-impl std::error::Error for ReplayError {}
+impl std::error::Error for ReplayError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            Self::Wire(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 impl From<std::io::Error> for ReplayError {
     fn from(value: std::io::Error) -> Self {
@@ -121,16 +147,6 @@ impl From<std::io::Error> for ReplayError {
 impl From<WireError> for ReplayError {
     fn from(value: WireError) -> Self {
         ReplayError::Wire(value)
-    }
-}
-
-impl From<ReplayError> for TransportError {
-    fn from(value: ReplayError) -> Self {
-        match value {
-            ReplayError::Io(e) => TransportError::Io(e),
-            ReplayError::Wire(e) => TransportError::Wire(e),
-            other => TransportError::Io(std::io::Error::other(other.to_string())),
-        }
     }
 }
 
@@ -178,11 +194,19 @@ impl RecordWriter {
         path: &Path,
         identity: MatchRecordIdentity,
     ) -> Result<Self, ReplayError> {
+        if !looks_like_zone_field(&identity.zone) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid recording map key",
+            )
+            .into());
+        }
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let mut file = BufWriter::new(File::create(path)?);
         file.write_all(&MAGIC)?;
+        file.write_all(&RECORDING_FORMAT_VERSION.to_le_bytes())?;
         file.write_all(&PROTOCOL_VERSION.to_le_bytes())?;
         let scheme = if identity.rng_scheme == 0 {
             RNG_DOMAIN_SCHEME
@@ -202,6 +226,11 @@ impl RecordWriter {
 
     pub fn write_frame(&mut self, frame: &Frame) -> Result<(), ReplayError> {
         let bytes = frame.to_bytes();
+        if bytes.len() > MAX_FRAME_LEN as usize {
+            return Err(ReplayError::Wire(WireError::Malformed(
+                "frame exceeds the recording size limit",
+            )));
+        }
         self.file.write_all(&(bytes.len() as u32).to_le_bytes())?;
         self.file.write_all(&bytes)?;
         self.frames += 1;
@@ -247,6 +276,15 @@ impl RecordReader {
         if magic != MAGIC {
             return Err(ReplayError::Magic { found: magic });
         }
+        let mut format_version = [0u8; 4];
+        file.read_exact(&mut format_version)?;
+        let format_version = u32::from_le_bytes(format_version);
+        if format_version != RECORDING_FORMAT_VERSION {
+            return Err(ReplayError::FormatVersion {
+                found: format_version,
+                expected: RECORDING_FORMAT_VERSION,
+            });
+        }
         let mut version = [0u8; 4];
         file.read_exact(&mut version)?;
         let version = u32::from_le_bytes(version);
@@ -265,8 +303,10 @@ impl RecordReader {
         let mut zone = [0u8; ZONE_FIELD_LEN];
         file.read_exact(&mut zone)?;
         if !looks_like_zone_field(&zone) {
-            file.seek(SeekFrom::Current(-(ZONE_FIELD_LEN as i64)))?;
-            zone = [0u8; ZONE_FIELD_LEN];
+            return Err(ReplayError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid recording map key",
+            )));
         }
         let identity = MatchRecordIdentity {
             rng_scheme: u32::from_le_bytes(scheme),
@@ -313,6 +353,11 @@ impl RecordReader {
         }
         let mut reader = WireReader::new(&bytes);
         let frame = Frame::decode(&mut reader, &mut self.world_decoder)?;
+        if !reader.is_empty() {
+            return Err(ReplayError::Wire(WireError::Malformed(
+                "trailing bytes in a recording frame",
+            )));
+        }
         self.frames += 1;
         self.offset += 4 + u64::from(length);
         Ok(Some(frame))
@@ -336,77 +381,5 @@ impl RecordReader {
 
     pub fn path(&self) -> &Path {
         &self.path
-    }
-}
-
-#[derive(Debug)]
-pub struct FileTransport {
-    writer: Option<RecordWriter>,
-    reader: Option<RecordReader>,
-}
-
-impl FileTransport {
-    pub fn recording(path: &Path) -> Result<Self, ReplayError> {
-        Self::recording_with_identity(path, MatchRecordIdentity::default())
-    }
-
-    pub fn recording_with_identity(
-        path: &Path,
-        identity: MatchRecordIdentity,
-    ) -> Result<Self, ReplayError> {
-        Ok(Self {
-            writer: Some(RecordWriter::create_with_identity(path, identity)?),
-            reader: None,
-        })
-    }
-
-    pub fn playback(path: &Path) -> Result<Self, ReplayError> {
-        Ok(Self {
-            writer: None,
-            reader: Some(RecordReader::open(path)?),
-        })
-    }
-
-    pub fn identity(&self) -> Option<MatchRecordIdentity> {
-        self.reader.as_ref().map(RecordReader::identity)
-    }
-
-    pub fn checkpoint(&self) -> Option<ReaderCheckpoint> {
-        self.reader.as_ref().map(RecordReader::checkpoint)
-    }
-
-    pub fn restore(&mut self, checkpoint: &ReaderCheckpoint) -> Result<(), ReplayError> {
-        self.reader
-            .as_mut()
-            .expect("restore needs a playback FileTransport")
-            .restore(checkpoint)
-    }
-
-    pub fn finish(&mut self) -> Result<Option<(u64, PathBuf)>, ReplayError> {
-        match self.writer.take() {
-            Some(writer) => writer.finish().map(Some),
-            None => Ok(None),
-        }
-    }
-}
-
-impl Transport for FileTransport {
-    fn send(&mut self, frame: &Frame) -> Result<(), TransportError> {
-        let Some(writer) = self.writer.as_mut() else {
-            return Err(TransportError::Io(std::io::Error::other(
-                "this FileTransport was opened for playback, not recording",
-            )));
-        };
-        writer.write_frame(frame).map_err(TransportError::from)
-    }
-
-    fn recv(&mut self) -> Result<Option<Frame>, TransportError> {
-        let Some(reader) = self.reader.as_mut() else {
-            return Err(TransportError::Ended);
-        };
-        match reader.read_frame().map_err(TransportError::from)? {
-            Some(frame) => Ok(Some(frame)),
-            None => Err(TransportError::Ended),
-        }
     }
 }

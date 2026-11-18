@@ -340,6 +340,11 @@ pub const EV_DISPATCH_REGISTRY: &[EntityEventRow] = &[
         dispatch: EntityEventDispatch::Observer(EntityEventAction::Rumble),
     },
     EntityEventRow {
+        name: "EV_MISSILE_REMOTE_BOOST",
+        event: EntityEventKind::MISSILE_REMOTE_BOOST,
+        dispatch: EntityEventDispatch::Observer(EntityEventAction::Sound),
+    },
+    EntityEventRow {
         name: "EV_OBITUARY",
         event: EntityEventKind::OBITUARY,
         dispatch: EntityEventDispatch::Observer(EntityEventAction::Obituary),

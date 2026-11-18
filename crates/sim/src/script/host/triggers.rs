@@ -149,7 +149,7 @@ fn attacker(
             .entities
             .get(object)
             .and_then(|entity| entity.missile_owner)
-            .filter(|owner| runtime.players.values().any(|slot| slot.object == *owner));
+            .filter(|owner| runtime.live(owner));
         return owner
             .or(runtime.engine.world)
             .map_or(Value::Undefined, Value::Object);
@@ -174,8 +174,24 @@ pub(crate) fn damage_line(
     start: [f32; 3],
     end: [f32; 3],
     amount: i32,
-    client: crate::ClientId,
+    client: Option<crate::ClientId>,
     missile: Option<crate::ProjectileId>,
+    means: &'static str,
+) {
+    let activator = world
+        .get_resource::<RoundScript>()
+        .map_or(Value::Undefined, |runtime| {
+            attacker(runtime, client, missile)
+        });
+    damage_line_from(world, start, end, amount, activator, means);
+}
+
+pub(crate) fn damage_line_from(
+    world: &mut World,
+    start: [f32; 3],
+    end: [f32; 3],
+    amount: i32,
+    activator: Value,
     means: &'static str,
 ) {
     if amount <= 0
@@ -185,13 +201,12 @@ pub(crate) fn damage_line(
     {
         return;
     }
-    let replacement = RoundScript::new(world.resource::<crate::script::MatchScript>());
-    let mut runtime = std::mem::replace(&mut *world.resource_mut::<RoundScript>(), replacement);
+    let mut runtime = std::mem::take(&mut *world.resource_mut::<RoundScript>());
     let hit = TriggerHit {
-        activator: attacker(&runtime, Some(client), missile),
+        activator,
         amount,
         direction: normalized(std::array::from_fn(|i| end[i] - start[i])),
-        point: [0.0; 3],
+        point: end,
         means,
     };
     let mut raised = Vec::new();
@@ -317,8 +332,7 @@ pub(crate) fn damage_blast(world: &mut World, blast: &TriggerBlast) {
         return;
     }
     super::presence::settle_collision(world);
-    let replacement = RoundScript::new(world.resource::<crate::script::MatchScript>());
-    let mut runtime = std::mem::replace(&mut *world.resource_mut::<RoundScript>(), replacement);
+    let mut runtime = std::mem::take(&mut *world.resource_mut::<RoundScript>());
     let activator = attacker(&runtime, blast.client, blast.missile);
     let mut raised = Vec::new();
     {
@@ -371,8 +385,7 @@ pub(crate) fn damage_blast(world: &mut World, blast: &TriggerBlast) {
 }
 
 pub(crate) fn dispatch_grenade_touches(world: &mut World) {
-    let replacement = RoundScript::new(world.resource::<crate::script::MatchScript>());
-    let mut runtime = std::mem::replace(&mut *world.resource_mut::<RoundScript>(), replacement);
+    let mut runtime = std::mem::take(&mut *world.resource_mut::<RoundScript>());
     let mut raised = Vec::new();
     {
         let frame = FrameWorld::from_world(world);
@@ -593,13 +606,58 @@ enum Fires {
 fn fires(classname: &str) -> Option<Fires> {
     match classname {
         "trigger_multiple" | "trigger_radius" | "trigger_disk" => Some(Fires::Touch),
+        name if name.starts_with("trigger_multiple_") => Some(Fires::Touch),
         "trigger_once" => Some(Fires::Once),
         "trigger_use" | "trigger_use_touch" => Some(Fires::Use),
+        name if name.starts_with("trigger_use_") => Some(Fires::Use),
         _ => None,
     }
 }
 
+// A map's boundary volumes can extend beyond its atlas slab. Geometry
+// overlap alone must never activate a trigger in a different world.
+#[derive(Clone, Copy, Debug)]
+struct Volume<'f> {
+    world: Option<usize>,
+    shape: VolumeShape<'f>,
+}
+
 fn volume<'f>(runtime: &mut RoundScript, frame: &'f FrameWorld, object: u64) -> Option<Volume<'f>> {
+    let shape = volume_shape(runtime, frame, object)?;
+    let origin = match runtime.object_field(object, "origin") {
+        Value::Vector(origin) => origin,
+        _ => [0.0; 3],
+    };
+    Some(Volume {
+        world: frame
+            .content()
+            .atlas()
+            .map(|_| crate::world_graph::world_at(origin)),
+        shape,
+    })
+}
+
+impl Volume<'_> {
+    fn in_world(&self, point: [f32; 3]) -> bool {
+        self.world
+            .is_none_or(|world| crate::world_graph::world_at(point) == world)
+    }
+
+    fn crosses(&self, start: [f32; 3], end: [f32; 3]) -> bool {
+        self.in_world(start) && self.in_world(end) && self.shape.crosses(start, end)
+    }
+
+    fn touches(&self, mins: [f32; 3], maxs: [f32; 3]) -> bool {
+        let mid = std::array::from_fn(|i| (mins[i] + maxs[i]) * 0.5);
+        self.in_world(mid) && self.shape.touches(mins, maxs)
+    }
+}
+
+fn volume_shape<'f>(
+    runtime: &mut RoundScript,
+    frame: &'f FrameWorld,
+    object: u64,
+) -> Option<VolumeShape<'f>> {
     let entity = runtime.entities.get(&object)?;
     let (cylinder, brush, trigger_model) = (entity.cylinder, entity.brush, entity.trigger_model);
     let origin = match runtime.object_field(object, "origin") {
@@ -607,7 +665,7 @@ fn volume<'f>(runtime: &mut RoundScript, frame: &'f FrameWorld, object: u64) -> 
         _ => [0.0; 3],
     };
     if let Some((radius, height)) = cylinder {
-        return Some(Volume::Cylinder {
+        return Some(VolumeShape::Cylinder {
             origin,
             radius,
             height,
@@ -615,7 +673,7 @@ fn volume<'f>(runtime: &mut RoundScript, frame: &'f FrameWorld, object: u64) -> 
     }
     if let Some(n) = trigger_model {
         let hulls = frame.clip_cmodels().triggers.get(n as usize)?;
-        return (!hulls.is_empty()).then_some(Volume::Hulls { origin, hulls });
+        return (!hulls.is_empty()).then_some(VolumeShape::Hulls { origin, hulls });
     }
     let model = frame.clip_cmodels().models.get(brush? as usize)?;
     let first = model.first_brush as usize;
@@ -625,20 +683,20 @@ fn volume<'f>(runtime: &mut RoundScript, frame: &'f FrameWorld, object: u64) -> 
         .get(first..first + usize::from(model.num_brushes))
         .unwrap_or(&[]);
     if !ids.is_empty() {
-        return Some(Volume::Brushes {
+        return Some(VolumeShape::Brushes {
             origin,
             ids,
             brushes: frame.clip_brushes(),
         });
     }
-    Some(Volume::Box {
+    Some(VolumeShape::Box {
         mins: std::array::from_fn(|i| origin[i] + model.mins[i]),
         maxs: std::array::from_fn(|i| origin[i] + model.maxs[i]),
     })
 }
 
 #[derive(Clone, Copy, Debug)]
-enum Volume<'f> {
+enum VolumeShape<'f> {
     Cylinder {
         origin: [f32; 3],
         radius: f32,
@@ -706,14 +764,14 @@ fn segment_planes(start: [f32; 3], end: [f32; 3], planes: impl Iterator<Item = [
         .all(|plane| clip_plane(start, end, plane, &mut enter, &mut exit))
 }
 
-impl Volume<'_> {
+impl VolumeShape<'_> {
     fn crosses(&self, start: [f32; 3], end: [f32; 3]) -> bool {
         if !start.into_iter().chain(end).all(f32::is_finite) {
             return false;
         }
         match *self {
-            Volume::Box { mins, maxs } => segment_planes(start, end, box_planes(mins, maxs)),
-            Volume::Brushes {
+            VolumeShape::Box { mins, maxs } => segment_planes(start, end, box_planes(mins, maxs)),
+            VolumeShape::Brushes {
                 origin,
                 ids,
                 brushes,
@@ -727,7 +785,7 @@ impl Volume<'_> {
                             && segment_planes(start, end, brush.planes.iter().copied())
                     })
             }
-            Volume::Hulls { origin, hulls } => {
+            VolumeShape::Hulls { origin, hulls } => {
                 let start = std::array::from_fn(|i| start[i] - origin[i]);
                 let end = std::array::from_fn(|i| end[i] - origin[i]);
                 hulls.iter().any(|hull| {
@@ -742,7 +800,7 @@ impl Volume<'_> {
                     segment_planes(start, end, box_planes(mins, maxs).chain(slabs))
                 })
             }
-            Volume::Cylinder {
+            VolumeShape::Cylinder {
                 origin,
                 radius,
                 height,
@@ -794,7 +852,7 @@ impl Volume<'_> {
 
     fn touches(&self, mins: [f32; 3], maxs: [f32; 3]) -> bool {
         match *self {
-            Volume::Brushes {
+            VolumeShape::Brushes {
                 origin,
                 ids,
                 brushes,
@@ -811,7 +869,7 @@ impl Volume<'_> {
                         })
                     })
             }
-            Volume::Cylinder {
+            VolumeShape::Cylinder {
                 origin,
                 radius,
                 height,
@@ -823,10 +881,10 @@ impl Volume<'_> {
                 (origin[2] + height * 0.5 - mid[2]).abs() < height * 0.5 + half[2]
                     && dx * dx + dy * dy < reach * reach
             }
-            Volume::Box { mins: lo, maxs: hi } => {
+            VolumeShape::Box { mins: lo, maxs: hi } => {
                 (0..3).all(|i| mins[i] <= hi[i] && maxs[i] >= lo[i])
             }
-            Volume::Hulls { origin, hulls } => {
+            VolumeShape::Hulls { origin, hulls } => {
                 let mid: [f32; 3] = std::array::from_fn(|i| (mins[i] + maxs[i]) * 0.5 - origin[i]);
                 let half: [f32; 3] = std::array::from_fn(|i| (maxs[i] - mins[i]) * 0.5);
                 hulls.iter().any(|hull| {
@@ -879,8 +937,21 @@ fn toucher(runtime: &mut RoundScript, frame: &FrameWorld, object: u64) -> ([f32;
 
 pub(crate) fn entity_bounds(world: &mut World, object: u64) -> ([f32; 3], [f32; 3]) {
     let runtime = world.resource::<RoundScript>();
-    if runtime.player_client(object).is_some() {
-        return (PLAYER_MINS, PLAYER_MAXS);
+    if let Some(client) = runtime.player_client(object) {
+        let frame = FrameWorld::from_world(world);
+        let mut maxs = PLAYER_MAXS;
+        if let Some(ps) = frame.player(crate::ClientId(client)) {
+            use movement_iw4::StanceSurface;
+            maxs[2] = match movement_iw4::stance_surface_type(ps) {
+                StanceSurface::Stand => movement_iw4::STAND_MAXS_Z,
+                StanceSurface::Crouch | StanceSurface::LastStand => movement_iw4::CROUCH_MAXS_Z,
+                StanceSurface::Prone => movement_iw4::PRONE_MAXS_Z,
+            };
+        }
+        return (PLAYER_MINS, maxs);
+    }
+    if runtime.actors.contains_key(&object) {
+        return super::actors::spatial::ACTOR_BOUNDS.abs_bounds([0.0; 3]);
     }
     let Some(entity) = runtime.entities.get(&object) else {
         return ([0.0; 3], [0.0; 3]);
@@ -889,15 +960,84 @@ pub(crate) fn entity_bounds(world: &mut World, object: u64) -> ([f32; 3], [f32; 
         return ([-radius, -radius, 0.0], [radius, radius, height]);
     }
     let brush = entity.brush;
+    let trigger_model = entity.trigger_model;
+    let presence = entity.presence;
     let frame = FrameWorld::from_world(world);
+    if let Some(hulls) =
+        trigger_model.and_then(|index| frame.clip_cmodels().triggers.get(index as usize))
+        && !hulls.is_empty()
+    {
+        let mins = std::array::from_fn(|axis| {
+            hulls
+                .iter()
+                .map(|hull| hull.mid[axis] - hull.half[axis])
+                .fold(f32::INFINITY, f32::min)
+        });
+        let maxs = std::array::from_fn(|axis| {
+            hulls
+                .iter()
+                .map(|hull| hull.mid[axis] + hull.half[axis])
+                .fold(f32::NEG_INFINITY, f32::max)
+        });
+        return (mins, maxs);
+    }
+    if let Some(body) = presence.and_then(|presence| {
+        frame
+            .entity_collision_capabilities()
+            .iter()
+            .find(|row| row.owner.script_model() == Some(presence))
+            .and_then(|row| row.body)
+    }) {
+        return body.bounds.abs_bounds([0.0; 3]);
+    }
     brush
         .and_then(|n| frame.clip_cmodels().models.get(n as usize))
         .map_or(([0.0; 3], [0.0; 3]), |model| (model.mins, model.maxs))
 }
 
+pub(crate) fn world_bounds(world: &mut World, object: u64) -> Result<([f32; 3], [f32; 3]), String> {
+    super::presence::settle_collision(world);
+    let (origin, angles, cylinder) = {
+        let mut runtime = world.resource_mut::<RoundScript>();
+        let entity = runtime
+            .entities
+            .get(&object)
+            .ok_or("volume entity is no longer live")?;
+        let cylinder = entity.cylinder.is_some();
+        let Value::Vector(origin) = runtime.object_field(object, "origin") else {
+            return Err("volume requires an origin".into());
+        };
+        let angles = match runtime.object_field(object, "angles") {
+            Value::Vector(value) => value,
+            _ => [0.; 3],
+        };
+        (origin, angles, cylinder)
+    };
+    let (mins, maxs) = entity_bounds(world, object);
+    if !origin
+        .into_iter()
+        .chain(angles)
+        .chain(mins)
+        .chain(maxs)
+        .all(f32::is_finite)
+        || (0..3).any(|axis| mins[axis] > maxs[axis])
+    {
+        return Err("volume bounds must be finite and ordered".into());
+    }
+    let midpoint = std::array::from_fn(|axis| (mins[axis] + maxs[axis]) * 0.5);
+    let half: [f32; 3] = std::array::from_fn(|axis| (maxs[axis] - mins[axis]) * 0.5);
+    let axis = math_iw4::angles_to_axis(if cylinder { [0.; 3] } else { angles });
+    let center = math_iw4::matrix_transform_vector43(midpoint, axis, origin);
+    let extent: [f32; 3] =
+        std::array::from_fn(|i| (0..3).map(|j| axis[j][i].abs() * half[j]).sum());
+    Ok((
+        std::array::from_fn(|i| center[i] - extent[i]),
+        std::array::from_fn(|i| center[i] + extent[i]),
+    ))
+}
+
 pub(crate) fn is_touching(world: &mut World, a: u64, b: u64) -> bool {
-    let replacement = RoundScript::new(world.resource::<crate::script::MatchScript>());
-    let mut runtime = std::mem::replace(&mut *world.resource_mut::<RoundScript>(), replacement);
+    let mut runtime = std::mem::take(&mut *world.resource_mut::<RoundScript>());
     let touching = {
         let frame = FrameWorld::from_world(world);
         [(a, b), (b, a)].into_iter().find_map(|(trigger, other)| {
@@ -911,10 +1051,12 @@ pub(crate) fn is_touching(world: &mut World, a: u64, b: u64) -> bool {
 }
 
 pub(crate) fn dispatch_triggers(world: &mut World) {
-    refresh_claims(world);
-    let replacement = RoundScript::new(world.resource::<crate::script::MatchScript>());
-    let mut runtime = std::mem::replace(&mut *world.resource_mut::<RoundScript>(), replacement);
+    // Re-evaluate the same target used by the hint after any script movement
+    // or usability changes earlier in this tick.
+    super::physics::select_usables(world);
+    let mut runtime = std::mem::take(&mut *world.resource_mut::<RoundScript>());
     let mut raised = Vec::new();
+    let mut turret_presses = Vec::new();
     {
         let mut frame = FrameWorld::from_world(world);
         let mut players: Vec<(u32, u64, bool)> = Vec::new();
@@ -942,12 +1084,43 @@ pub(crate) fn dispatch_triggers(world: &mut World) {
             .map(|(client, _, _)| *client)
             .collect();
         for (client, player) in &pressed {
-            if let Some(usable) = runtime.use_selected.get(client)
-                && eligible(&runtime, &frame, *usable, *client, true)
-                && fires(&runtime.entities[usable].classname) != Some(Fires::Use)
-            {
-                raised.push((*usable, *player));
+            let mounted = runtime
+                .engine
+                .turrets
+                .iter()
+                .find(|(_, t)| t.active_user == Some(*player))
+                .map(|(id, _)| *id);
+            if let Some(object) = mounted.or_else(|| {
+                runtime
+                    .use_selected
+                    .get(client)
+                    .copied()
+                    .filter(|id| runtime.engine.turrets.contains_key(id))
+            }) {
+                turret_presses.push((object, *client, *player));
+                continue;
             }
+            let Some(&usable) = runtime.use_selected.get(client) else {
+                continue;
+            };
+            if !eligible(&runtime, &frame, usable, *client, true) {
+                continue;
+            }
+            let entity = &runtime.entities[&usable];
+            // A use target is selected within reach; its small authored hull
+            // is not a volume the player's body must enter. Touch-use triggers
+            // retain that separate contact requirement below.
+            if &*entity.classname == "trigger_use_touch" {
+                continue;
+            }
+            if fires(&entity.classname) == Some(Fires::Use)
+                && runtime.require_look_at.contains(&usable)
+                && !volume(&mut runtime, &frame, usable)
+                    .is_some_and(|volume| looks_into(&frame, *client, &volume))
+            {
+                continue;
+            }
+            raised.push((usable, *player));
         }
         let triggers: Vec<(u64, Fires)> = runtime
             .entities
@@ -956,6 +1129,10 @@ pub(crate) fn dispatch_triggers(world: &mut World) {
             .filter_map(|(object, e)| Some((*object, fires(&e.classname)?)))
             .collect();
         for (trigger, kind) in triggers {
+            if kind == Fires::Use && &*runtime.entities[&trigger].classname != "trigger_use_touch" {
+                // Ordinary use triggers fire only as the selected use target.
+                continue;
+            }
             let Some(volume) = volume(&mut runtime, &frame, trigger) else {
                 continue;
             };
@@ -984,6 +1161,9 @@ pub(crate) fn dispatch_triggers(world: &mut World) {
         }
     }
     *world.resource_mut::<RoundScript>() = runtime;
+    for (object, client, player) in turret_presses {
+        super::turrets::toggle(world, object, crate::ClientId(client), player);
+    }
     raised.sort_unstable();
     raised.dedup();
     for (trigger, player) in raised {
@@ -994,4 +1174,194 @@ pub(crate) fn dispatch_triggers(world: &mut World) {
             vec![Value::Object(player)],
         );
     }
+}
+
+pub(crate) fn contact_point(
+    world: &mut World,
+    object: u64,
+    point: [f32; 3],
+) -> Result<bool, String> {
+    if !point.into_iter().all(f32::is_finite) {
+        return Err("contact point must be finite".into());
+    }
+    super::presence::settle_collision(world);
+    world.resource_scope(|world, mut runtime: bevy_ecs::prelude::Mut<RoundScript>| {
+        let entity = runtime
+            .entities
+            .get(&object)
+            .ok_or("volume entity is no longer live")?;
+        let (cylinder, presence, brush) = (entity.cylinder, entity.presence, entity.brush);
+        let origin = match runtime.object_field(object, "origin") {
+            Value::Vector(v) => v,
+            _ => [0.0; 3],
+        };
+        let angles = match runtime.object_field(object, "angles") {
+            Value::Vector(v) => v,
+            _ => [0.0; 3],
+        };
+        if !origin.into_iter().chain(angles).all(f32::is_finite) {
+            return Err("volume pose must be finite".into());
+        }
+        let frame = FrameWorld::from_world(world);
+        let axis = math_iw4::angles_to_axis(angles);
+        let offset: [f32; 3] = std::array::from_fn(|i| point[i] - origin[i]);
+        let local: [f32; 3] = std::array::from_fn(|i| (0..3).map(|j| axis[i][j] * offset[j]).sum());
+        if let Some(volume) = volume(&mut runtime, &frame, object) {
+            if !volume.in_world(point) {
+                return Ok(false);
+            }
+            let sample = if cylinder.is_some() {
+                point
+            } else {
+                std::array::from_fn(|i| local[i] + origin[i])
+            };
+            return match volume.shape {
+                VolumeShape::Box { .. } if brush.is_some() => {
+                    let model = &frame.clip_cmodels().models[brush.unwrap() as usize];
+                    if model.num_brushes == 0 {
+                        Ok(false)
+                    } else {
+                        Err("brush volume lacks retained brush planes".into())
+                    }
+                }
+                VolumeShape::Brushes {
+                    origin,
+                    ids,
+                    brushes,
+                } => Ok(ids
+                    .iter()
+                    .filter_map(|&id| brushes.get(usize::from(id)))
+                    .any(|brush| {
+                        brush.contents != 0
+                            && !brush.planes.is_empty()
+                            && brush.planes.iter().all(|plane| {
+                                (0..3)
+                                    .map(|i| plane[i] * (sample[i] - origin[i]))
+                                    .sum::<f32>()
+                                    <= plane[3]
+                            })
+                    })),
+                _ => Ok(volume.shape.touches(sample, sample)),
+            };
+        }
+        let body = presence.and_then(|presence| {
+            frame
+                .entity_collision_capabilities()
+                .iter()
+                .find(|row| row.owner.script_model() == Some(presence))
+                .and_then(|row| row.body)
+        });
+        let body = body.ok_or("volume entity has no retained contact geometry")?;
+        let trace = body.clip(
+            &frame.content(),
+            trace_iw4::Trace {
+                fraction: 1.0,
+                ..Default::default()
+            },
+            movement_iw4::GroundTraceInput {
+                start: point,
+                end: point,
+                mins: [0.0; 3],
+                maxs: [0.0; 3],
+                tracemask: u32::MAX,
+            },
+        );
+        Ok(trace.allsolid != 0)
+    })
+}
+
+/// Exact contact intervals with retained brush/hull planes, including live pose.
+/// Used by AI danger volumes independently of solidity or trigger dispatch.
+pub(crate) fn brush_intervals(
+    world: &mut World,
+    object: u64,
+    start: [f32; 3],
+    end: [f32; 3],
+) -> Result<Vec<(f32, f32)>, String> {
+    super::presence::settle_collision(world);
+    world.resource_scope(|world, mut runtime: bevy_ecs::prelude::Mut<RoundScript>| {
+        let entity = runtime
+            .entities
+            .get(&object)
+            .ok_or("badplace brush no longer exists")?;
+        let brush = entity.brush;
+        if brush.is_none() && entity.trigger_model.is_none() {
+            return Err("BadPlace_Brush requires a brush or trigger model".into());
+        }
+        let Value::Vector(origin) = runtime.object_field(object, "origin") else {
+            return Err("brush origin must be a vector".into());
+        };
+        let Value::Vector(angles) = runtime.object_field(object, "angles") else {
+            return Err("brush angles must be a vector".into());
+        };
+        if !origin
+            .into_iter()
+            .chain(angles)
+            .chain(start)
+            .chain(end)
+            .all(f32::is_finite)
+        {
+            return Err("brush query must be finite".into());
+        }
+        let axis = math_iw4::angles_to_axis(angles);
+        let transform = |point: [f32; 3]| -> [f32; 3] {
+            std::array::from_fn(|i| {
+                origin[i]
+                    + (0..3)
+                        .map(|j| axis[i][j] * (point[j] - origin[j]))
+                        .sum::<f32>()
+            })
+        };
+        let (start, end) = (transform(start), transform(end));
+        let frame = FrameWorld::from_world(world);
+        let shape = volume_shape(&mut runtime, &frame, object)
+            .ok_or("brush volume geometry is not retained")?;
+        let clip = |a, b, planes: &[[f32; 4]]| {
+            let (mut enter, mut exit) = (0., 1.);
+            planes
+                .iter()
+                .all(|&plane| clip_plane(a, b, plane, &mut enter, &mut exit))
+                .then_some((enter, exit))
+        };
+        match shape {
+            VolumeShape::Brushes {
+                origin,
+                ids,
+                brushes,
+            } => {
+                let a = std::array::from_fn(|i| start[i] - origin[i]);
+                let b = std::array::from_fn(|i| end[i] - origin[i]);
+                Ok(ids
+                    .iter()
+                    .filter_map(|&id| brushes.get(usize::from(id)))
+                    .filter(|brush| !brush.planes.is_empty())
+                    .filter_map(|brush| clip(a, b, &brush.planes))
+                    .collect())
+            }
+            VolumeShape::Hulls { origin, hulls } => {
+                let a = std::array::from_fn(|i| start[i] - origin[i]);
+                let b = std::array::from_fn(|i| end[i] - origin[i]);
+                Ok(hulls
+                    .iter()
+                    .filter_map(|hull| {
+                        let mins = std::array::from_fn(|i| hull.mid[i] - hull.half[i]);
+                        let maxs = std::array::from_fn(|i| hull.mid[i] + hull.half[i]);
+                        let planes: Vec<_> = box_planes(mins, maxs)
+                            .chain(hull.slabs.iter().flat_map(|&(n, d, h)| {
+                                [[n[0], n[1], n[2], d + h], [-n[0], -n[1], -n[2], -d + h]]
+                            }))
+                            .collect();
+                        clip(a, b, &planes)
+                    })
+                    .collect())
+            }
+            VolumeShape::Box { .. }
+                if brush
+                    .is_some_and(|i| frame.clip_cmodels().models[i as usize].num_brushes == 0) =>
+            {
+                Ok(Vec::new())
+            }
+            _ => Err("brush volume lacks retained brush planes".into()),
+        }
+    })
 }

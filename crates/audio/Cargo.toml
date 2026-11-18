@@ -19,7 +19,7 @@ frame.workspace = true
 entity_iw4.workspace = true
 net.workspace = true
 sim.workspace = true
-hud_iw4 = { path = "../hud_iw4" }
+hud_iw4 = { workspace = true }
 playerstate_iw4.workspace = true
 gamemode_iw4.workspace = true
 perf.workspace = true

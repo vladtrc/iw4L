@@ -28,11 +28,13 @@ pub(crate) struct Occupant {
     pub id: u64,
     pub policy: AdmissionPolicy,
     pub priority: f32,
+    pub channel_voice: bool,
 }
 
 pub(crate) fn plan(
     request: &AdmissionPolicy,
     occupants: &[Occupant],
+    channel_voice: bool,
 ) -> Result<Vec<u64>, AdmissionFailure> {
     let mut victims = std::collections::BTreeSet::new();
     let same_bank = |occupant: &Occupant| occupant.policy.bank_revision == request.bank_revision;
@@ -95,11 +97,12 @@ pub(crate) fn plan(
             }
         }
     }
-    if let Some(channel) = request.channel {
+    if let Some(channel) = request.channel.filter(|_| channel_voice) {
         let remaining = occupants
             .iter()
             .filter(|occupant| {
                 same_bank(occupant)
+                    && occupant.channel_voice
                     && occupant
                         .policy
                         .channel

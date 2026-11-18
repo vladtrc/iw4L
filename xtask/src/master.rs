@@ -294,14 +294,14 @@ fn hand_out(ssh: &Ssh, name: &str, port: u16, label: &str, ca: &Ca, path: &Path)
         return Ok(());
     }
     let host = ssh.host();
-    let descriptor = updater::Community {
+    let descriptor = community::Community {
         schema: 1,
         name: format!("IW4L {name}"),
-        master: updater::Master {
+        master: community::Master {
             address: format!("{host}:{port}"),
             server_name: label.into(),
         },
-        updates: updater::Updates {
+        updates: community::Updates {
             url: format!("https://{host}:{port}/updates/manifest.toml"),
             ca_pem: std::fs::read_to_string(ca.ca_cert()).map_err(|e| e.to_string())?,
         },

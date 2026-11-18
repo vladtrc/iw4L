@@ -81,6 +81,26 @@ pub struct CellPortalGraph<'a> {
     pub portals: &'a [&'a [PortalView<'a>]],
 }
 
+/// Borrow a map's native portal storage directly. Implementations retain the
+/// graph at load time; walking must not rebuild all cell/edge rows per view.
+pub trait PortalGraph {
+    fn cell_count(&self) -> usize;
+    fn cell_portals(&self, cell: usize) -> impl Iterator<Item = PortalView<'_>>;
+}
+
+impl PortalGraph for CellPortalGraph<'_> {
+    fn cell_count(&self) -> usize {
+        self.portals.len()
+    }
+
+    fn cell_portals(&self, cell: usize) -> impl Iterator<Item = PortalView<'_>> {
+        self.portals
+            .get(cell)
+            .into_iter()
+            .flat_map(|edges| edges.iter().copied())
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Queued {
     pub cell: u16,
@@ -304,71 +324,83 @@ pub(crate) fn finalize_queued_hull_no_frustum(item: &mut Queued, view_dir: [f32;
 
 pub type CellVisit<'a> = dyn FnMut(usize, &CellClipPlanes) + 'a;
 
-pub fn visit_cells(
-    graph: &CellPortalGraph<'_>,
-    camera_cell: usize,
-    eye: [f32; 3],
-    view_plane: [f32; 4],
-    clip_planes: &[[f32; 4]],
-    walk_limit: u32,
-    out: &mut VisBits<'_>,
-    scratch: &mut WalkScratch,
-    mut cell_clips: Option<&mut [CellClipPlanes]>,
-    bevels: Option<&PortalBevels>,
-    mut on_visit: Option<&mut CellVisit<'_>>,
-) -> WalkStats {
-    let mut stats = WalkStats::default();
-    let near = clip_planes.first().copied();
-    let far = clip_planes.get(1).copied();
-    out.clear();
-    for p in scratch.path.iter_mut() {
-        *p = false;
-    }
-    if graph.portals.is_empty() || camera_cell >= graph.portals.len() {
-        return stats;
-    }
-    if camera_cell >= scratch.path.len() {
-        return stats;
-    }
+#[derive(Clone, Copy, Debug)]
+pub struct PortalWalkView<'a> {
+    pub camera_cell: usize,
+    pub eye: [f32; 3],
+    pub view_plane: [f32; 4],
+    pub clip_planes: &'a [[f32; 4]],
+    pub bevels: Option<&'a PortalBevels>,
+}
 
-    reset_hull_pool(scratch);
-    scratch.path[camera_cell] = true;
-    let mut seed = Queued {
-        cell: camera_cell as u16,
-        parent_plane: [0.0; 4],
-        has_parent: false,
-        clip_n: 0,
-        clip: [[0.0; 4]; MAX_CLIP_PLANES],
-        ..Queued::EMPTY
-    };
-    ancestor_set(&mut seed.ancestor_bits, camera_cell);
-    let limit = effective_portal_walk_limit(walk_limit);
+impl WalkScratch {
+    pub fn visit_cells(
+        &mut self,
+        graph: &impl PortalGraph,
+        view: PortalWalkView<'_>,
+        walk_limit: u32,
+        out: &mut VisBits<'_>,
+        mut cell_clips: Option<&mut [CellClipPlanes]>,
+        mut on_visit: Option<&mut CellVisit<'_>>,
+    ) -> WalkStats {
+        let PortalWalkView {
+            camera_cell,
+            eye,
+            view_plane,
+            clip_planes,
+            bevels,
+        } = view;
+        let mut stats = WalkStats::default();
+        let near = clip_planes.first().copied();
+        let far = clip_planes.get(1).copied();
+        out.clear();
+        for p in self.path.iter_mut() {
+            *p = false;
+        }
+        if graph.cell_count() == 0 || camera_cell >= graph.cell_count() {
+            return stats;
+        }
+        if camera_cell >= self.path.len() {
+            return stats;
+        }
 
-    let mut popped = 0u32;
-    let mut first = true;
-
-    loop {
-        let (mut item, recycle) = if first {
-            first = false;
-            (seed, None)
-        } else {
-            let Some(node) = heap_pop(&mut scratch.heap, &mut scratch.heap_n) else {
-                break;
-            };
-            popped += 1;
-            if limit == Some(popped) {
-                stats.walk_limit_hits += 1;
-                break;
-            }
-            let slot = usize::from(node.slot);
-            (scratch.queue[slot], Some(slot))
+        reset_hull_pool(self);
+        self.path[camera_cell] = true;
+        let mut seed = Queued {
+            cell: camera_cell as u16,
+            parent_plane: [0.0; 4],
+            has_parent: false,
+            clip_n: 0,
+            clip: [[0.0; 4]; MAX_CLIP_PLANES],
+            ..Queued::EMPTY
         };
-        if recycle.is_some() {
-            if item.hull_axis.is_some() {
+        ancestor_set(&mut seed.ancestor_bits, camera_cell);
+        let limit = effective_portal_walk_limit(walk_limit);
+
+        let mut popped = 0u32;
+        let mut first = true;
+
+        loop {
+            let (mut item, recycle) = if first {
+                first = false;
+                (seed, None)
+            } else {
+                let Some(node) = heap_pop(&mut self.heap, &mut self.heap_n) else {
+                    break;
+                };
+                popped += 1;
+                if limit == Some(popped) {
+                    stats.walk_limit_hits += 1;
+                    break;
+                }
+                let slot = usize::from(node.slot);
+                (self.queue[slot], Some(slot))
+            };
+            if recycle.is_some() && item.hull_axis.is_some() {
                 if !finalize_queued_hull_clip(&mut item, eye, near, far, bevels) {
                     stats.hull_fail += 1;
                     if let Some(slot) = recycle {
-                        free_hull_slot(scratch, slot);
+                        free_hull_slot(self, slot);
                     }
                     continue;
                 }
@@ -376,149 +408,143 @@ pub fn visit_cells(
                     stats.child_clip_bevel_unread += 1;
                 }
             }
-        }
-        let cell = usize::from(item.cell);
-        if !out.get(cell) {
-            out.set(cell);
-            stats.cells_visited += 1;
-            if let Some(slots) = cell_clips.as_mut() {
-                if let Some(slot) = slots.get_mut(cell) {
+            let cell = usize::from(item.cell);
+            if !out.get(cell) {
+                out.set(cell);
+                stats.cells_visited += 1;
+                if let Some(slots) = cell_clips.as_mut()
+                    && let Some(slot) = slots.get_mut(cell)
+                {
                     record_cell_clip(&item, clip_planes, slot);
                 }
             }
-        }
-        if let Some(visit) = on_visit.as_mut() {
-            let mut planes = CellClipPlanes::EMPTY;
-            record_cell_clip(&item, clip_planes, &mut planes);
-            visit(cell, &planes);
-        }
-        let cell_planes = queued_clip_planes(&item, clip_planes);
-        let Some(edges) = graph.portals.get(cell).copied() else {
-            if let Some(slot) = recycle {
-                free_hull_slot(scratch, slot);
+            if let Some(visit) = on_visit.as_mut() {
+                let mut planes = CellClipPlanes::EMPTY;
+                record_cell_clip(&item, clip_planes, &mut planes);
+                visit(cell, &planes);
             }
-            continue;
-        };
-        for (edge_i, edge) in edges.iter().enumerate() {
-            stats.portals_seen += 1;
-            let neighbor = usize::from(edge.neighbor);
-            if neighbor >= graph.portals.len() || neighbor >= scratch.path.len() {
-                continue;
-            }
-            if cell_is_ancestor(&item, neighbor) {
-                stats.skip_ancestor += 1;
-                continue;
-            }
-            let dist = portal_eye_dist(edge.plane, eye);
-            if dist > 0.0 {
-                stats.skip_facing += 1;
-                continue;
-            }
-            if portal_behind_any_plane(edge.vertices, cell_planes) {
-                stats.skip_clip += 1;
-                continue;
-            }
-            let mut wind = [[0.0f32; 3]; crate::COM_CONVEX_HULL_MAX];
-            let wn = if item.has_parent {
-                if portal_behind_plane(item.parent_plane, edge.vertices) {
-                    stats.chop_empty += 1;
+            let cell_planes = queued_clip_planes(&item, clip_planes);
+            for (edge_i, edge) in graph.cell_portals(cell).enumerate() {
+                stats.portals_seen += 1;
+                let neighbor = usize::from(edge.neighbor);
+                if neighbor >= graph.cell_count() || neighbor >= self.path.len() {
                     continue;
                 }
-                let chopped = chop_portal(
-                    edge.vertices,
-                    Some(item.parent_plane),
-                    cell_planes,
-                    &mut scratch.buf_a,
-                    &mut scratch.buf_b,
-                );
-                if chopped < 3 {
-                    stats.chop_empty += 1;
+                if cell_is_ancestor(&item, neighbor) {
+                    stats.skip_ancestor += 1;
                     continue;
                 }
-                let n = chopped.min(crate::COM_CONVEX_HULL_MAX);
-                wind[..n].copy_from_slice(&scratch.buf_a[..n]);
-                n
-            } else {
-                let n = edge.vertices.len().min(crate::COM_CONVEX_HULL_MAX);
-                wind[..n].copy_from_slice(&edge.vertices[..n]);
-                n
-            };
-            if !portal_admits_eye(edge.plane, &wind[..wn], eye) {
-                stats.hull_fail += 1;
-                continue;
-            }
-            if dist > -0.125 {
-                stats.stepped_through += 1;
-            }
-            if let Some(axis) = edge.hull_axis {
-                let from = cell as u16;
-                let eidx = edge_i as u16;
-                if let Some(qi) = find_queued_portal(scratch, from, eidx) {
-                    stats.hull_union += 1;
-                    if !add_winding_to_hull(&mut scratch.queue[qi], &wind[..wn]) {
-                        stats.hull_overflow += 1;
+                let dist = portal_eye_dist(edge.plane, eye);
+                if dist > 0.0 {
+                    stats.skip_facing += 1;
+                    continue;
+                }
+                if portal_behind_any_plane(edge.vertices, cell_planes) {
+                    stats.skip_clip += 1;
+                    continue;
+                }
+                let mut wind = [[0.0f32; 3]; crate::COM_CONVEX_HULL_MAX];
+                let wn = if item.has_parent {
+                    if portal_behind_plane(item.parent_plane, edge.vertices) {
+                        stats.chop_empty += 1;
+                        continue;
                     }
-                    continue;
-                }
-                let mut q = Queued {
-                    cell: edge.neighbor,
-                    parent_plane: edge.plane,
-                    has_parent: true,
-                    clip_n: 0,
-                    clip: [[0.0; 4]; MAX_CLIP_PLANES],
-                    hull: PortalHullPoints::EMPTY,
-                    hull_axis: Some(axis),
-                    from_cell: from,
-                    edge: eidx,
-                    parent_idx: u16::MAX,
-                    ancestor_bits: child_ancestor_bits(&item, edge.neighbor),
+                    let chopped = chop_portal(
+                        edge.vertices,
+                        Some(item.parent_plane),
+                        cell_planes,
+                        &mut self.buf_a,
+                        &mut self.buf_b,
+                    );
+                    if chopped < 3 {
+                        stats.chop_empty += 1;
+                        continue;
+                    }
+                    let n = chopped.min(crate::COM_CONVEX_HULL_MAX);
+                    wind[..n].copy_from_slice(&self.buf_a[..n]);
+                    n
+                } else {
+                    let n = edge.vertices.len().min(crate::COM_CONVEX_HULL_MAX);
+                    wind[..n].copy_from_slice(&edge.vertices[..n]);
+                    n
                 };
-                if !add_winding_to_hull(&mut q, &wind[..wn]) {
-                    stats.hull_overflow += 1;
+                if !portal_admits_eye(edge.plane, &wind[..wn], eye) {
+                    stats.hull_fail += 1;
                     continue;
                 }
-                try_enqueue(scratch, q, edge.vertices, view_plane, &mut stats);
-                continue;
+                if dist > -0.125 {
+                    stats.stepped_through += 1;
+                }
+                if let Some(axis) = edge.hull_axis {
+                    let from = cell as u16;
+                    let eidx = edge_i as u16;
+                    if let Some(qi) = find_queued_portal(self, from, eidx) {
+                        stats.hull_union += 1;
+                        if !add_winding_to_hull(&mut self.queue[qi], &wind[..wn]) {
+                            stats.hull_overflow += 1;
+                        }
+                        continue;
+                    }
+                    let mut q = Queued {
+                        cell: edge.neighbor,
+                        parent_plane: edge.plane,
+                        has_parent: true,
+                        clip_n: 0,
+                        clip: [[0.0; 4]; MAX_CLIP_PLANES],
+                        hull: PortalHullPoints::EMPTY,
+                        hull_axis: Some(axis),
+                        from_cell: from,
+                        edge: eidx,
+                        parent_idx: u16::MAX,
+                        ancestor_bits: child_ancestor_bits(&item, edge.neighbor),
+                    };
+                    if !add_winding_to_hull(&mut q, &wind[..wn]) {
+                        stats.hull_overflow += 1;
+                        continue;
+                    }
+                    try_enqueue(self, q, edge.vertices, view_plane, &mut stats);
+                    continue;
+                }
+                let mut child_clip = [[0.0f32; 4]; MAX_CLIP_PLANES];
+                let clip_n =
+                    portal_clip_planes(&wind[..wn], eye, false, near, far, &mut child_clip, bevels);
+                if clip_n == 0 {
+                    continue;
+                }
+                if wn >= 11 && bevels.is_none() {
+                    stats.child_clip_bevel_unread += 1;
+                }
+                try_enqueue(
+                    self,
+                    Queued {
+                        cell: edge.neighbor,
+                        parent_plane: edge.plane,
+                        has_parent: true,
+                        clip_n: clip_n as u8,
+                        clip: child_clip,
+                        parent_idx: u16::MAX,
+                        ancestor_bits: child_ancestor_bits(&item, edge.neighbor),
+                        ..Queued::EMPTY
+                    },
+                    edge.vertices,
+                    view_plane,
+                    &mut stats,
+                );
             }
-            let mut child_clip = [[0.0f32; 4]; MAX_CLIP_PLANES];
-            let clip_n =
-                portal_clip_planes(&wind[..wn], eye, false, near, far, &mut child_clip, bevels);
-            if clip_n == 0 {
-                continue;
+            if let Some(slot) = recycle {
+                free_hull_slot(self, slot);
             }
-            if wn >= 11 && bevels.is_none() {
-                stats.child_clip_bevel_unread += 1;
-            }
-            try_enqueue(
-                scratch,
-                Queued {
-                    cell: edge.neighbor,
-                    parent_plane: edge.plane,
-                    has_parent: true,
-                    clip_n: clip_n as u8,
-                    clip: child_clip,
-                    parent_idx: u16::MAX,
-                    ancestor_bits: child_ancestor_bits(&item, edge.neighbor),
-                    ..Queued::EMPTY
-                },
-                edge.vertices,
-                view_plane,
-                &mut stats,
-            );
         }
-        if let Some(slot) = recycle {
-            free_hull_slot(scratch, slot);
-        }
-    }
 
-    for p in scratch.path.iter_mut() {
-        *p = false;
+        for p in self.path.iter_mut() {
+            *p = false;
+        }
+        stats
     }
-    stats
 }
 
 pub fn visit_cells_facing(
-    graph: &CellPortalGraph<'_>,
+    graph: &impl PortalGraph,
     camera_cell: usize,
     eye: [f32; 3],
     out: &mut VisBits<'_>,
@@ -526,7 +552,7 @@ pub fn visit_cells_facing(
 ) -> WalkStats {
     let mut stats = WalkStats::default();
     out.clear();
-    if graph.portals.is_empty() || camera_cell >= graph.portals.len() || queue.is_empty() {
+    if graph.cell_count() == 0 || camera_cell >= graph.cell_count() || queue.is_empty() {
         return stats;
     }
 
@@ -539,13 +565,10 @@ pub fn visit_cells_facing(
     while head < tail {
         let cell = queue[head];
         head += 1;
-        let Some(edges) = graph.portals.get(cell).copied() else {
-            continue;
-        };
-        for edge in edges {
+        for edge in graph.cell_portals(cell) {
             stats.portals_seen += 1;
             let neighbor = usize::from(edge.neighbor);
-            if neighbor >= graph.portals.len() {
+            if neighbor >= graph.cell_count() {
                 continue;
             }
             if out.get(neighbor) {

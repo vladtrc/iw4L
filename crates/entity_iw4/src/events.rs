@@ -92,6 +92,7 @@ entity_events! {
     STOP_FX_ON_TAG = 0x55;
     PHYS_EXPLOSION_SPHERE = 0x56;
     DETONATE = 0x5e;
+    MISSILE_REMOTE_BOOST = 0x61;
     OBITUARY = 0x62;
     FOOTSTEP_SPRINT = 0x6b;
     FOOTSTEP_RUN = 0x6c;
@@ -267,6 +268,7 @@ pub fn entity_event_action(
         | EntityEventKind::PREP_OFFHAND
         | EntityEventKind::USE_OFFHAND
         | EntityEventKind::DETONATE
+        | EntityEventKind::MISSILE_REMOTE_BOOST
         | EntityEventKind::MELEE_SWIPE
         | EntityEventKind::MELEE_HIT
         | EntityEventKind::MELEE_MISS => EntityEventAction::Sound,

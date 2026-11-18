@@ -6,7 +6,10 @@ mod bullet;
 mod surface;
 mod trace;
 
-pub use box_trace::{BrushRef, trace_box, trace_box_into, trace_capsule, trace_capsule_hit};
+pub use box_trace::{
+    BrushRef, TraceShape, trace_box, trace_box_into, trace_capsule, trace_capsule_hit, trace_shape,
+    trace_shape_into,
+};
 pub use bullet::BulletFireParams;
 pub use surface::surface_type_from_flags;
 pub use trace::{

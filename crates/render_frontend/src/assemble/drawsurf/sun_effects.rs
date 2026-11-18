@@ -11,9 +11,8 @@ pub struct SunEffectsFrameInput {
     pub frame: Option<SunEffectsFrame>,
 }
 
-#[derive(Default)]
+#[derive(Resource, Default)]
 pub(crate) struct SunEffectsCameraTrack {
-    context: Option<frame::PresentationContext>,
     camera_key: u64,
     origin: Vec3,
     armed: bool,
@@ -21,31 +20,18 @@ pub(crate) struct SunEffectsCameraTrack {
 
 const CAMERA_CUT_ORIGIN: f32 = 512.0;
 
+#[expect(
+    clippy::type_complexity,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 pub(crate) fn publish_sun_effects_frame(
     mut published: ResMut<SunEffectsFrameInput>,
-    mut track: Local<SunEffectsCameraTrack>,
+    mut track: ResMut<SunEffectsCameraTrack>,
     sun: Option<Res<MapSunEffects>>,
     prepared: Option<Res<PreparedSceneView>>,
     clock: Option<Res<FrameClock>>,
-    world_generation: Option<Res<frame::WorldGeneration>>,
     cameras: Query<(Entity, &GlobalTransform), (With<Camera3d>, Without<FpvLens>)>,
-    context: (
-        Option<Res<frame::InstalledMatch>>,
-        Option<Res<net::EntityEventCursor>>,
-    ),
 ) {
-    let current = context
-        .0
-        .as_ref()
-        .zip(context.1.as_ref())
-        .map(|(installed, timeline)| {
-            frame::PresentationContext::new(installed.load_key, timeline.timeline())
-        });
-    let context_changed = track.context != current;
-    if context_changed {
-        *track = SunEffectsCameraTrack::default();
-        track.context = current;
-    }
     let Some(def) = sun.and_then(|sun| sun.def) else {
         *published = SunEffectsFrameInput::default();
         *track = SunEffectsCameraTrack::default();
@@ -55,7 +41,6 @@ pub(crate) fn publish_sun_effects_frame(
         *published = SunEffectsFrameInput::default();
         return;
     };
-    let generation = world_generation.and_then(|generation| generation.0);
     let (camera_key, origin) = cameras
         .iter()
         .next()
@@ -66,10 +51,8 @@ pub(crate) fn publish_sun_effects_frame(
     } else {
         0.0
     };
-    let camera_cut = !track.armed
-        || context_changed
-        || track.camera_key != camera_key
-        || origin_delta > CAMERA_CUT_ORIGIN;
+    let camera_cut =
+        !track.armed || track.camera_key != camera_key || origin_delta > CAMERA_CUT_ORIGIN;
     track.camera_key = camera_key;
     track.origin = origin;
     track.armed = true;
@@ -94,7 +77,6 @@ pub(crate) fn publish_sun_effects_frame(
         .filter(|dt| *dt > 0)
         .unwrap_or(10);
     published.frame = Some(SunEffectsFrame {
-        world_generation: generation,
         camera_key,
         camera_cut,
         dt_ms,

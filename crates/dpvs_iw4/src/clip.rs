@@ -249,22 +249,22 @@ pub fn portal_clip_planes(
             written += 1;
         }
     }
-    if let Some(near) = near {
-        if written < out.len() {
-            let mut plane = near;
-            let dist = nearest_point_on_winding(plane, winding);
-            if dist > 0.0 {
-                plane[3] -= dist;
-            }
-            out[written] = plane;
-            written += 1;
+    if let Some(near) = near
+        && written < out.len()
+    {
+        let mut plane = near;
+        let dist = nearest_point_on_winding(plane, winding);
+        if dist > 0.0 {
+            plane[3] -= dist;
         }
+        out[written] = plane;
+        written += 1;
     }
-    if let Some(far) = far {
-        if written < out.len() {
-            out[written] = far;
-            written += 1;
-        }
+    if let Some(far) = far
+        && written < out.len()
+    {
+        out[written] = far;
+        written += 1;
     }
     written
 }
@@ -311,7 +311,7 @@ pub fn rebuild_portal_hull_winding(
     out: &mut [[f32; 3]],
 ) -> usize {
     let n = verts.len();
-    if n < 3 || n > crate::convex_hull::COM_CONVEX_HULL_MAX || out.is_empty() {
+    if !(3..=crate::convex_hull::COM_CONVEX_HULL_MAX).contains(&n) || out.is_empty() {
         return 0;
     }
     let mut uv = [[0.0f32; 2]; crate::convex_hull::COM_CONVEX_HULL_MAX];

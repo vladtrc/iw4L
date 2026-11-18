@@ -45,16 +45,6 @@ pub struct ClipBorder {
     pub length: f32,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct MeshWalkCensus {
-    pub tris_tested: u32,
-    pub aabb_nodes_visited: u32,
-
-    pub forest_fallback: u8,
-
-    pub aabb_roots: u32,
-}
-
 /// The collision mesh tables as read from a zone: immutable once the walk that
 /// produced them is over, and shared from there by everyone who traces against
 /// the map rather than copied per consumer.
@@ -168,6 +158,29 @@ struct Capsule {
     offset_z: f32,
 }
 
+#[derive(Clone, Copy)]
+struct CapsuleSweep {
+    cap: Capsule,
+    shape: trace_iw4::TraceShape,
+    start: [f32; 3],
+    delta: [f32; 3],
+    cull_mins: [f32; 3],
+    cull_maxs: [f32; 3],
+    mask: u32,
+}
+
+#[derive(Clone, Copy)]
+struct CollisionSurface {
+    surface_flags: u32,
+    contents: u32,
+}
+
+struct MeshTriangle {
+    vertices: [[f32; 3]; 3],
+    edge_walkable: [bool; 3],
+    surface: CollisionSurface,
+}
+
 impl Capsule {
     fn from_bounds(mins: [f32; 3], maxs: [f32; 3]) -> Self {
         let offset = [
@@ -190,32 +203,16 @@ impl Capsule {
 }
 
 pub fn trace_through_mesh(mesh: &ClipMeshRef<'_>, ext: &TraceExtents) -> Trace {
-    trace_through_mesh_with_census(mesh, ext).0
-}
-
-pub fn trace_through_mesh_with_census(
-    mesh: &ClipMeshRef<'_>,
-    ext: &TraceExtents,
-) -> (Trace, MeshWalkCensus) {
     let mut best = Trace {
         fraction: 1.0,
         endpos: ext.end,
         ..Trace::default()
     };
-    let mut census = MeshWalkCensus::default();
-    trace_through_mesh_into(mesh, ext, &mut best, &mut census);
-    (best, census)
+    trace_through_mesh_into(mesh, ext, &mut best);
+    best
 }
 
-pub fn trace_through_mesh_into(
-    mesh: &ClipMeshRef<'_>,
-    ext: &TraceExtents,
-    best: &mut Trace,
-    census: &mut MeshWalkCensus,
-) {
-    census.aabb_roots = census
-        .aabb_roots
-        .saturating_add(mesh.aabb_roots.len() as u32);
+pub fn trace_through_mesh_into(mesh: &ClipMeshRef<'_>, ext: &TraceExtents, best: &mut Trace) {
     if mesh.tri_indices.len() < 3 || mesh.verts.is_empty() {
         return;
     }
@@ -240,53 +237,65 @@ pub fn trace_through_mesh_into(
     ];
     let delta = [end[0] - start[0], end[1] - start[1], end[2] - start[2]];
 
-    let r = cap.radius + cap.offset_z + SURFACE_CLIP_EPSILON;
-    let cull_mins = [
-        start[0].min(end[0]) - r,
-        start[1].min(end[1]) - r,
-        start[2].min(end[2]) - r,
-    ];
-    let cull_maxs = [
-        start[0].max(end[0]) + r,
-        start[1].max(end[1]) + r,
-        start[2].max(end[2]) + r,
-    ];
+    let cull_half = match ext.shape {
+        trace_iw4::TraceShape::Capsule => [cap.radius + cap.offset_z + SURFACE_CLIP_EPSILON; 3],
+        trace_iw4::TraceShape::Box { half_size, axes } => core::array::from_fn(|i| {
+            (0..3).map(|j| half_size[j] * axes[j][i].abs()).sum::<f32>() + SURFACE_CLIP_EPSILON
+        }),
+    };
+    let cull_mins = core::array::from_fn(|i| start[i].min(end[i]) - cull_half[i]);
+    let cull_maxs = core::array::from_fn(|i| start[i].max(end[i]) + cull_half[i]);
 
+    let sweep = CapsuleSweep {
+        cap,
+        shape: ext.shape,
+        start,
+        delta,
+        cull_mins,
+        cull_maxs,
+        mask: ext.mask,
+    };
     let position_test = delta == [0.0; 3];
-    let trace_borders = (delta[0] != 0.0 || delta[1] != 0.0) && cap.offset_z != 0.0;
-    let tri = |ti: usize, vert_base: usize, best: &mut Trace, census: &mut MeshWalkCensus| {
+    let trace_borders = matches!(ext.shape, trace_iw4::TraceShape::Capsule)
+        && (delta[0] != 0.0 || delta[1] != 0.0)
+        && cap.offset_z != 0.0;
+    let tri = |ti: usize, vert_base: usize, best: &mut Trace| {
         if position_test {
-            position_test_tri(
-                mesh, cap, start, cull_mins, cull_maxs, ti, vert_base, ext.mask, best, census,
-            );
+            position_test_tri(mesh, &sweep, ti, vert_base, best);
         } else {
-            test_tri(
-                mesh, cap, start, delta, cull_mins, cull_maxs, ti, vert_base, ext.mask, best,
-                census,
-            );
+            test_tri(mesh, &sweep, ti, vert_base, best);
         }
     };
 
+    let partition = |part: &ClipPartition, best: &mut Trace| {
+        let start_ti = part.first_tri as usize;
+        let end_ti = start_ti.saturating_add(part.tri_count as usize);
+        let vert_base = part.first_vert_segment as usize * VERTS_PER_SEGMENT;
+        for ti in start_ti..end_ti {
+            tri(ti, vert_base, best);
+            if best.allsolid != 0 {
+                return true;
+            }
+        }
+        if trace_borders {
+            border_through_partition(mesh, part, cap, start, delta, ext.mask, best);
+        }
+        false
+    };
     if !mesh.aabb_trees.is_empty() {
-        walk_aabb_forest(mesh, cull_mins, cull_maxs, census, &mut |part, census| {
-            let start_ti = part.first_tri as usize;
-            let end_ti = start_ti.saturating_add(part.tri_count as usize);
-            let vert_base = part.first_vert_segment as usize * VERTS_PER_SEGMENT;
-            for ti in start_ti..end_ti {
-                tri(ti, vert_base, best, census);
-                if best.allsolid != 0 {
-                    return true;
-                }
-            }
-            if trace_borders {
-                border_through_partition(mesh, part, cap, start, delta, ext.mask, best);
-            }
-            false
+        walk_aabb_forest(mesh, cull_mins, cull_maxs, &mut |part| {
+            partition(part, best)
         });
+    } else if !mesh.partitions.is_empty() {
+        for part in mesh.partitions {
+            if partition(part, best) {
+                break;
+            }
+        }
     } else {
         let tri_count = mesh.tri_indices.len() / 3;
         for ti in 0..tri_count {
-            tri(ti, 0, best, census);
+            tri(ti, 0, best);
             if best.allsolid != 0 {
                 break;
             }
@@ -315,15 +324,13 @@ fn walk_aabb_forest(
     mesh: &ClipMeshRef<'_>,
     cull_mins: [f32; 3],
     cull_maxs: [f32; 3],
-    census: &mut MeshWalkCensus,
-    on_partition: &mut dyn FnMut(&ClipPartition, &mut MeshWalkCensus) -> bool,
+    on_partition: &mut dyn FnMut(&ClipPartition) -> bool,
 ) {
     let mut stack = Vec::new();
     for &root in mesh.aabb_roots {
         stack.push(root as usize);
     }
     while let Some(idx) = stack.pop() {
-        census.aabb_nodes_visited = census.aabb_nodes_visited.saturating_add(1);
         let Some(node) = mesh.aabb_trees.get(idx) else {
             continue;
         };
@@ -349,7 +356,7 @@ fn walk_aabb_forest(
         if part.first_tri < 0 {
             continue;
         }
-        if on_partition(part, census) {
+        if on_partition(part) {
             return;
         }
     }
@@ -381,18 +388,20 @@ fn node_overlaps_sweep(
 
 fn test_tri(
     mesh: &ClipMeshRef<'_>,
-    cap: Capsule,
-    start: [f32; 3],
-    delta: [f32; 3],
-    cull_mins: [f32; 3],
-    cull_maxs: [f32; 3],
+    sweep: &CapsuleSweep,
     ti: usize,
-
     vert_base: usize,
-    mask: u32,
     best: &mut Trace,
-    census: &mut MeshWalkCensus,
 ) {
+    let CapsuleSweep {
+        cap,
+        shape,
+        start,
+        delta,
+        cull_mins,
+        cull_maxs,
+        mask,
+    } = *sweep;
     let Some(i0) = mesh.tri_indices.get(ti.saturating_mul(3)).copied() else {
         return;
     };
@@ -421,23 +430,39 @@ fn test_tri(
         }
         cflags
     };
-    census.tris_tested = census.tris_tested.saturating_add(1);
     let edge_walkable = [0, 1, 2].map(|k| {
         let bit = ti * 3 + k;
         mesh.tri_edge_is_walkable
             .get(bit >> 3)
             .is_some_and(|b| b & (1 << (bit & 7)) != 0)
     });
+    if let trace_iw4::TraceShape::Box { half_size, axes } = shape {
+        box_through_triangle(
+            start,
+            delta,
+            half_size,
+            axes,
+            [v0, v1, v2],
+            CollisionSurface {
+                surface_flags: mesh.tri_surface_flags.get(ti).copied().unwrap_or(0),
+                contents,
+            },
+            best,
+        );
+        return;
+    }
     capsule_through_triangle(
         cap,
         start,
         delta,
-        v0,
-        v1,
-        v2,
-        edge_walkable,
-        mesh.tri_surface_flags.get(ti).copied().unwrap_or(0),
-        contents,
+        MeshTriangle {
+            vertices: [v0, v1, v2],
+            edge_walkable,
+            surface: CollisionSurface {
+                surface_flags: mesh.tri_surface_flags.get(ti).copied().unwrap_or(0),
+                contents,
+            },
+        },
         best,
     );
 }
@@ -473,7 +498,17 @@ fn border_through_partition(
         return;
     };
     for border in borders {
-        capsule_through_border(cap, start, delta, border, surface_flags, contents, best);
+        capsule_through_border(
+            cap,
+            start,
+            delta,
+            border,
+            CollisionSurface {
+                surface_flags,
+                contents,
+            },
+            best,
+        );
     }
 }
 
@@ -482,7 +517,11 @@ fn border_point(border: &ClipBorder, along: f32) -> [f32; 2] {
     [ny * along + nx * dist, ny * dist - nx * along]
 }
 
-fn border_hit(trace: &mut Trace, border: &ClipBorder, surface_flags: u32, contents: u32) {
+fn border_hit(trace: &mut Trace, border: &ClipBorder, surface: CollisionSurface) {
+    let CollisionSurface {
+        surface_flags,
+        contents,
+    } = surface;
     trace.normal = [border.dist_eq[0], border.dist_eq[1], 0.0];
     trace.walkable = 0;
     trace.contents = contents;
@@ -497,8 +536,7 @@ fn capsule_through_border(
     start: [f32; 3],
     delta: [f32; 3],
     border: &ClipBorder,
-    surface_flags: u32,
-    contents: u32,
+    surface: CollisionSurface,
     trace: &mut Trace,
 ) {
     let [nx, ny, dist] = border.dist_eq;
@@ -538,7 +576,7 @@ fn capsule_through_border(
         let c = offset_len_sq - radius * radius;
         if c < 0.0 {
             if cap.offset_z >= fabsf(z - start[2]) {
-                border_hit(trace, border, surface_flags, contents);
+                border_hit(trace, border, surface);
                 trace.fraction = 0.0;
                 if offset_len_sq < cap.radius * cap.radius {
                     trace.startsolid = 1;
@@ -567,31 +605,13 @@ fn capsule_through_border(
     let edge_z = s * border.z_slope + border.z_base - endpos[2];
     if cap.offset_z >= edge_z {
         if edge_z >= -cap.offset_z {
-            border_hit(trace, border, surface_flags, contents);
+            border_hit(trace, border, surface);
             trace.fraction = t;
         } else if edge_z > -cap.offset_z - cap.radius {
-            sphere_through_border(
-                cap,
-                start,
-                delta,
-                border,
-                -cap.offset_z,
-                surface_flags,
-                contents,
-                trace,
-            );
+            sphere_through_border(cap, start, delta, border, -cap.offset_z, surface, trace);
         }
     } else if edge_z < cap.offset_z + cap.radius {
-        sphere_through_border(
-            cap,
-            start,
-            delta,
-            border,
-            cap.offset_z,
-            surface_flags,
-            contents,
-            trace,
-        );
+        sphere_through_border(cap, start, delta, border, cap.offset_z, surface, trace);
     }
 }
 
@@ -601,8 +621,7 @@ fn sphere_through_border(
     delta: [f32; 3],
     border: &ClipBorder,
     offset_z: f32,
-    surface_flags: u32,
-    contents: u32,
+    surface: CollisionSurface,
     trace: &mut Trace,
 ) {
     let p0 = border_point(border, border.start);
@@ -611,16 +630,8 @@ fn sphere_through_border(
     let v1 = [p1[0], p1[1], border.z_slope * border.length + border.z_base];
     let v0_v1 = [v0[0] - v1[0], v0[1] - v1[1], v0[2] - v1[2]];
     let sphere_start = [start[0], start[1], start[2] + offset_z];
-    let vert = match sphere_through_edge(
-        cap.radius,
-        sphere_start,
-        delta,
-        v0,
-        v0_v1,
-        surface_flags,
-        contents,
-        trace,
-    ) {
+    let vert = match sphere_through_edge(cap.radius, sphere_start, delta, v0, v0_v1, surface, trace)
+    {
         EdgeHit::Hits => {
             trace.walkable = 0;
             return;
@@ -629,30 +640,24 @@ fn sphere_through_border(
         EdgeHit::MayV0 => v0,
         EdgeHit::MayV1 => v1,
     };
-    sphere_through_vertex(
-        cap.radius,
-        sphere_start,
-        delta,
-        vert,
-        false,
-        surface_flags,
-        contents,
-        trace,
-    );
+    sphere_through_vertex(cap.radius, sphere_start, delta, vert, false, surface, trace);
 }
 
 fn position_test_tri(
     mesh: &ClipMeshRef<'_>,
-    cap: Capsule,
-    center: [f32; 3],
-    cull_mins: [f32; 3],
-    cull_maxs: [f32; 3],
+    sweep: &CapsuleSweep,
     ti: usize,
     vert_base: usize,
-    mask: u32,
     best: &mut Trace,
-    census: &mut MeshWalkCensus,
 ) {
+    let CapsuleSweep {
+        cap,
+        start: center,
+        cull_mins,
+        cull_maxs,
+        mask,
+        ..
+    } = *sweep;
     let Some(idx) = mesh
         .tri_indices
         .get(ti.saturating_mul(3)..ti.saturating_mul(3) + 3)
@@ -678,7 +683,21 @@ fn position_test_tri(
         }
         cflags
     };
-    census.tris_tested = census.tris_tested.saturating_add(1);
+    if let trace_iw4::TraceShape::Box { half_size, axes } = sweep.shape {
+        box_through_triangle(
+            center,
+            [0.; 3],
+            half_size,
+            axes,
+            [v0, v1, v2],
+            CollisionSurface {
+                surface_flags: mesh.tri_surface_flags.get(ti).copied().unwrap_or(0),
+                contents,
+            },
+            best,
+        );
+        return;
+    }
     let top = [center[0], center[1], center[2] + cap.offset_z];
     let bottom = [center[0], center[1], center[2] - cap.offset_z];
     if segment_triangle_dist_sq(top, bottom, v0, v1, v2) >= cap.radius * cap.radius {
@@ -817,14 +836,18 @@ fn capsule_through_triangle(
     cap: Capsule,
     start: [f32; 3],
     delta: [f32; 3],
-    v0: [f32; 3],
-    v1: [f32; 3],
-    v2: [f32; 3],
-    edge_walkable: [bool; 3],
-    surface_flags: u32,
-    contents: u32,
+    triangle: MeshTriangle,
     trace: &mut Trace,
 ) {
+    let MeshTriangle {
+        vertices: [v0, v1, v2],
+        edge_walkable,
+        surface,
+    } = triangle;
+    let CollisionSurface {
+        surface_flags,
+        contents,
+    } = surface;
     let v0_v1 = [v0[0] - v1[0], v0[1] - v1[1], v0[2] - v1[2]];
     let v0_v2 = [v0[0] - v2[0], v0[1] - v2[1], v0[2] - v2[2]];
     let mut area_n = cross(v0_v2, v0_v1);
@@ -885,16 +908,7 @@ fn capsule_through_triangle(
     let neg_v = dot(trace_plane, v0_v1);
     if neg_v < 0.0 {
         missed_edge = true;
-        match sphere_through_edge(
-            cap.radius,
-            sphere_start,
-            delta,
-            v0,
-            v0_v1,
-            surface_flags,
-            contents,
-            trace,
-        ) {
+        match sphere_through_edge(cap.radius, sphere_start, delta, v0, v0_v1, surface, trace) {
             EdgeHit::Hits => {
                 trace.walkable = u8::from(edge_walkable[2]);
                 return;
@@ -913,16 +927,7 @@ fn capsule_through_triangle(
     let u = dot(trace_plane, v0_v2);
     if u > 0.0 {
         missed_edge = true;
-        match sphere_through_edge(
-            cap.radius,
-            sphere_start,
-            delta,
-            v0,
-            v0_v2,
-            surface_flags,
-            contents,
-            trace,
-        ) {
+        match sphere_through_edge(cap.radius, sphere_start, delta, v0, v0_v2, surface, trace) {
             EdgeHit::Hits => {
                 trace.walkable = u8::from(edge_walkable[1]);
                 return;
@@ -941,16 +946,7 @@ fn capsule_through_triangle(
     if proj > (u - neg_v) {
         missed_edge = true;
         let v1_v2 = [v1[0] - v2[0], v1[1] - v2[1], v1[2] - v2[2]];
-        match sphere_through_edge(
-            cap.radius,
-            sphere_start,
-            delta,
-            v1,
-            v1_v2,
-            surface_flags,
-            contents,
-            trace,
-        ) {
+        match sphere_through_edge(cap.radius, sphere_start, delta, v1, v1_v2, surface, trace) {
             EdgeHit::Hits => {
                 trace.walkable = u8::from(edge_walkable[0]);
                 return;
@@ -975,8 +971,7 @@ fn capsule_through_triangle(
                 delta,
                 vert,
                 vert_walkable,
-                surface_flags,
-                contents,
+                surface,
                 trace,
             );
         }
@@ -1011,10 +1006,13 @@ fn sphere_through_edge(
     delta: [f32; 3],
     v0: [f32; 3],
     v0_v1: [f32; 3],
-    surface_flags: u32,
-    contents: u32,
+    surface: CollisionSurface,
     trace: &mut Trace,
 ) -> EdgeHit {
+    let CollisionSurface {
+        surface_flags,
+        contents,
+    } = surface;
     let start_delta = [
         sphere_start[0] - v0[0],
         sphere_start[1] - v0[1],
@@ -1109,10 +1107,13 @@ fn sphere_through_vertex(
     delta: [f32; 3],
     vert: [f32; 3],
     is_walkable: bool,
-    surface_flags: u32,
-    contents: u32,
+    surface: CollisionSurface,
     trace: &mut Trace,
 ) {
+    let CollisionSurface {
+        surface_flags,
+        contents,
+    } = surface;
     let start_delta = [
         sphere_start[0] - vert[0],
         sphere_start[1] - vert[1],
@@ -1245,4 +1246,31 @@ pub fn flatten_tri_material_index(
         }
     }
     out
+}
+
+fn box_through_triangle(
+    start: [f32; 3],
+    delta: [f32; 3],
+    half: [f32; 3],
+    axes: [[f32; 3]; 3],
+    vertices: [[f32; 3]; 3],
+    surface: CollisionSurface,
+    best: &mut Trace,
+) {
+    let Some(hit) = crate::box_query::sweep_triangle(start, delta, half, axes, vertices) else {
+        return;
+    };
+    let startsolid = best.startsolid | u8::from(hit.startsolid);
+    let allsolid = best.allsolid | u8::from(hit.allsolid);
+    if hit.fraction < f64::from(best.fraction) {
+        best.fraction = hit.fraction as f32;
+        best.normal = hit.normal.map(|v| v as f32);
+        best.contents = surface.contents;
+        best.surface_flags = surface.surface_flags;
+        best.walkable = u8::from(!hit.startsolid && best.normal[2] >= WALKABLE_NORMAL_Z);
+        best.hit_type = HITTYPE_ENTITY;
+        best.hit_id = ENTITYNUM_WORLD;
+    }
+    best.startsolid = startsolid;
+    best.allsolid = allsolid;
 }

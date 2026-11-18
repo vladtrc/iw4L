@@ -8,51 +8,60 @@ pub struct WorldDrawPolicy {
 }
 
 impl WorldDrawPolicy {
-    pub const fn for_family(family: asset_core::FamilyId) -> Self {
-        match family {
-            asset_core::FamilyId::Iw4 => Self::iw4(),
-            asset_core::FamilyId::Iw5 => Self::iw5(),
-            asset_core::FamilyId::T5 => Self::t5(),
-            asset_core::FamilyId::T6 => Self::t6(),
-        }
-    }
     pub const fn iw4() -> Self {
         Self {
-            family: asset_core::FamilyId::Iw4,
+            family: asset_core::FamilyId::IW4,
             resolve_specular_env: true,
             lightmap_requires_image: false,
             decode_color_at_convert: false,
             sun_sample_size_near: 0.25,
         }
     }
+}
 
-    pub const fn t5() -> Self {
-        Self {
-            family: asset_core::FamilyId::T5,
-            resolve_specular_env: false,
-            lightmap_requires_image: true,
-            decode_color_at_convert: true,
-            sun_sample_size_near: 0.25,
-        }
-    }
+/// Completes authored objective scene models from a family's common model catalog.
+pub type ObjectiveModelCompletion =
+    fn(&mut crate::MapXModelSceneCatalog, &[&str], &asset_model::WorldWeaponCatalog);
 
-    pub const fn iw5() -> Self {
-        Self {
-            family: asset_core::FamilyId::Iw5,
-            resolve_specular_env: false,
-            lightmap_requires_image: false,
-            decode_color_at_convert: false,
-            sun_sample_size_near: 0.25,
-        }
-    }
+#[derive(Clone, Copy)]
+pub struct WorldFamily {
+    pub draw: WorldDrawPolicy,
+    pub complete_objective_models: Option<ObjectiveModelCompletion>,
+    pub normalize_entities: fn(&str) -> String,
+    pub spawn_points: fn(&str) -> Vec<crate::SpawnPoint>,
+}
 
-    pub const fn t6() -> Self {
-        Self {
-            family: asset_core::FamilyId::T6,
-            sun_sample_size_near: 0.5,
-            resolve_specular_env: true,
-            lightmap_requires_image: false,
-            decode_color_at_convert: false,
-        }
+pub const REFERENCE_WORLD_FAMILY: WorldFamily = WorldFamily {
+    draw: WorldDrawPolicy::iw4(),
+    complete_objective_models: None,
+    normalize_entities: |text| text.to_owned(),
+    spawn_points: crate::parse_reference_spawn_points,
+};
+
+#[derive(Default)]
+pub struct WorldFamilies(std::collections::BTreeMap<asset_core::FamilyId, WorldFamily>);
+
+impl WorldFamilies {
+    pub fn register(&mut self, family: asset_core::FamilyId, policy: WorldFamily) {
+        assert_eq!(
+            family, policy.draw.family,
+            "world policy belongs to another family"
+        );
+        assert!(
+            self.0.insert(family, policy).is_none(),
+            "duplicate world family"
+        );
     }
+}
+
+static FAMILIES: std::sync::OnceLock<WorldFamilies> = std::sync::OnceLock::new();
+
+pub fn install_world_families(families: WorldFamilies) -> Result<(), &'static str> {
+    FAMILIES
+        .set(families)
+        .map_err(|_| "world families already installed")
+}
+
+pub fn world_family(family: asset_core::FamilyId) -> Option<&'static WorldFamily> {
+    FAMILIES.get()?.0.get(&family)
 }

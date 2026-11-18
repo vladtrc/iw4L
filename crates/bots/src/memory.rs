@@ -30,6 +30,7 @@ impl Memory {
                 continue;
             }
             row.source = KnowledgeSource::LastSeen;
+            row.origin = row.physical_origin;
             events.push(BotEvent::LostSight { id: row.id });
         }
         for seen in &obs.seen {

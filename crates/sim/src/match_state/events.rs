@@ -1,9 +1,8 @@
 use crate::identities::{DamageSource, EventSequence, LifeSequence};
-use crate::input::{ActionRequestId, ClassId};
+use crate::input::ClassId;
 use crate::world::{ClientId, Tick};
 
 use super::MatchEndReason;
-use super::loadout::{ClassRejectReason, ConfigurationChangeRejectReason, GiveRejectReason};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EventAudience {
@@ -20,7 +19,7 @@ impl EventAudience {
             Self::All => true,
             Self::AllExcept(excluded) => *excluded != id,
             Self::Client(c) => *c == id,
-            Self::Clients(cs) => cs.iter().any(|c| *c == id),
+            Self::Clients(cs) => cs.contains(&id),
         }
     }
 
@@ -100,42 +99,6 @@ pub struct PelletFxRecord {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SimEvent {
-    ClassAccepted {
-        request_id: ActionRequestId,
-        class_id: ClassId,
-        revision: u32,
-    },
-    ClassRejected {
-        request_id: ActionRequestId,
-        class_id: ClassId,
-        revision: u32,
-        reason: ClassRejectReason,
-    },
-
-    GiveAccepted {
-        request_id: ActionRequestId,
-        weapon: u32,
-    },
-
-    GiveRejected {
-        request_id: ActionRequestId,
-        weapon: u32,
-        reason: GiveRejectReason,
-    },
-
-    ConfigurationChangeAccepted {
-        request_id: ActionRequestId,
-        from: u32,
-        to: u32,
-    },
-
-    ConfigurationChangeRejected {
-        request_id: ActionRequestId,
-        from: u32,
-        to: u32,
-        reason: ConfigurationChangeRejectReason,
-    },
-
     Spawned {
         class_id: ClassId,
         spawn_index: u32,
@@ -185,38 +148,6 @@ pub struct SimEventRow {
 
 pub const SIM_EVENT_ROSTER: &[SimEventRow] = &[
     SimEventRow {
-        variant: "ClassAccepted",
-        reliable: true,
-        control_fact: "authority's verdict on a class request, carrying the revision the client \
-                       must echo; the client proposed it and cannot know the answer",
-    },
-    SimEventRow {
-        variant: "ClassRejected",
-        reliable: true,
-        control_fact: "the refusal and its reason; without it a client waits forever on a \
-                       transaction authority already closed",
-    },
-    SimEventRow {
-        variant: "GiveAccepted",
-        reliable: true,
-        control_fact: "console/dev give verdict — the held weapon index authority settled on",
-    },
-    SimEventRow {
-        variant: "GiveRejected",
-        reliable: true,
-        control_fact: "the refusal and its reason, so the console prints why rather than nothing",
-    },
-    SimEventRow {
-        variant: "ConfigurationChangeAccepted",
-        reliable: true,
-        control_fact: "authority accepted the held weapon's configuration transition",
-    },
-    SimEventRow {
-        variant: "ConfigurationChangeRejected",
-        reliable: true,
-        control_fact: "authority refused a stale or invalid configuration transition",
-    },
-    SimEventRow {
         variant: "Spawned",
         reliable: true,
         control_fact: "which authored spawn authority picked and the life sequence it opened; \
@@ -259,12 +190,6 @@ pub const SIM_EVENT_ROSTER: &[SimEventRow] = &[
 
 pub fn sim_event_is_reliable(event: &SimEvent) -> bool {
     let variant = match event {
-        SimEvent::ClassAccepted { .. } => "ClassAccepted",
-        SimEvent::ClassRejected { .. } => "ClassRejected",
-        SimEvent::GiveAccepted { .. } => "GiveAccepted",
-        SimEvent::GiveRejected { .. } => "GiveRejected",
-        SimEvent::ConfigurationChangeAccepted { .. } => "ConfigurationChangeAccepted",
-        SimEvent::ConfigurationChangeRejected { .. } => "ConfigurationChangeRejected",
         SimEvent::Spawned { .. } => "Spawned",
         SimEvent::Died { .. } => "Died",
         SimEvent::ScoreChanged { .. } => "ScoreChanged",

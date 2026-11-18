@@ -7,8 +7,11 @@ publish = false
 description = "Trace gates, the ship commands (release/publish/provision/master) and the LOC report. No engine crates."
 
 [dependencies]
-updater = { path = "../crates/updater" }
+community.workspace = true
+updater.workspace = true
 toml = "0.9"
+proc-macro2 = "1"
+syn = { version = "2", features = ["full", "visit"] }
 master_protocol.workspace = true
 serde_json.workspace = true
 serde.workspace = true

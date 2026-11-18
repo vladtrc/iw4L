@@ -43,13 +43,17 @@ pub fn skin_model_filtered(
     surface_rigid: impl Fn(usize) -> bool,
     lod: u8,
 ) -> Option<Vec<PosedModelSurface>> {
-    let blended = blend_skel_vertices_inner::<true>(
-        skel,
-        bone_to_local,
-        |surface| surface_is_visible(surface),
-        surface_rigid,
-        lod,
-    );
+    let blended = {
+        let _scope = perf::span!("present_pose_vertices", "iw4l.render");
+        blend_skel_vertices_inner::<true>(
+            skel,
+            bone_to_local,
+            &surface_is_visible,
+            surface_rigid,
+            lod,
+        )
+    };
+    let _scope = perf::span!("present_pose_meshes", "iw4l.render");
     meshes_from_blended(skel, hide_tags, surface_is_visible, lod, blended)
 }
 
@@ -90,10 +94,16 @@ fn blend_skel_vertices_inner<const DECODED: bool>(
 ) -> BlendedSkel {
     let (active_vert, rigid_vert) =
         vertex_stream_masks(skel, lod, surface_is_visible, surface_rigid);
-    let mut positions = DECODED.then(|| skel.positions.to_vec()).unwrap_or_default();
-    let mut normals = DECODED
-        .then(|| skel.normals().collect::<Vec<_>>())
-        .unwrap_or_default();
+    let mut positions = if DECODED {
+        skel.positions.to_vec()
+    } else {
+        Vec::new()
+    };
+    let mut normals = if DECODED {
+        skel.normals().collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     let mut posed_packed =
         (skel.packed_vertices.len() == skel.positions.len()).then(|| skel.packed_vertices.to_vec());
     let max_bone = skel
@@ -256,7 +266,7 @@ pub(crate) fn meshes_from_blended(
             surface_index: 0,
             mesh,
             material: None,
-            packed_vertices: posed_packed.unwrap_or_default(),
+            packed_vertices: posed_packed.unwrap_or(Vec::new()),
             owner: FpvSurfOwner::Gun,
             model: 0,
         }]);
@@ -346,7 +356,7 @@ pub(crate) fn meshes_from_blended(
             .as_ref()
             .and_then(|vertices| vertices.get(first_vertex..vertex_end))
             .map(<[_]>::to_vec)
-            .unwrap_or_default();
+            .unwrap_or(Vec::new());
         out.push(PosedModelSurface {
             surface_index,
             mesh,
@@ -468,8 +478,8 @@ pub(crate) fn packed_skin_shape(
             let source = surface.src_first_vertex + local;
             let vertex = &mut vertices[surface.dest_first_vertex + local];
             if let Some(row) = skel.packed_vertices.get(source) {
-                for (word, bytes) in vertex.packed.iter_mut().zip(row.chunks_exact(4)) {
-                    *word = u32::from_le_bytes(bytes.try_into().unwrap());
+                for (word, bytes) in vertex.packed.iter_mut().zip(row.as_chunks::<4>().0.iter()) {
+                    *word = u32::from_le_bytes(*bytes);
                 }
             }
             if !active.get(source).copied().unwrap_or(false) {
@@ -518,7 +528,7 @@ pub fn smodel_surfaces_from_blended(
             surface_index: 0,
             vert_n: vertex_n,
             indices: skel.indices.to_vec(),
-            packed_vertices: posed_packed.unwrap_or_default(),
+            packed_vertices: posed_packed.unwrap_or(Vec::new()),
         }]);
     }
     let lod_range = skel.surfaces_for_lod(lod);
@@ -562,7 +572,7 @@ pub fn smodel_surfaces_from_blended(
             .as_ref()
             .and_then(|vertices| vertices.get(first_vertex..vertex_end))
             .map(<[_]>::to_vec)
-            .unwrap_or_default();
+            .unwrap_or(Vec::new());
         out.push(PosedSmodelSurface {
             surface_index,
             vert_n: vertex_count,

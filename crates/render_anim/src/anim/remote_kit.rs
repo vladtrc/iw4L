@@ -1,5 +1,6 @@
 use super::*;
 use crate::anim::world_weapon::{ItemComposition, PreparedItemCompositions};
+use std::collections::HashMap;
 
 pub fn kit_dobj_radius(radii: impl IntoIterator<Item = f32>) -> Option<f32> {
     radii
@@ -67,7 +68,7 @@ struct RemoteKitOwner {
 #[derive(bevy::prelude::Resource, Default)]
 pub(crate) struct PreparedRemoteKits {
     owner: Option<RemoteKitOwner>,
-    kits: HashMap<(bool, u32, u8), Option<PreparedRemoteKit>>,
+    kits: HashMap<(asset_model::SoldierKit, u32, u8), Option<PreparedRemoteKit>>,
     built: HashMap<KitModels, Option<Arc<xmodel_runtime::DObj>>>,
 }
 
@@ -109,76 +110,86 @@ impl PreparedRemoteKits {
         }
     }
 
-    pub(crate) fn get(&self, axis: bool, weapon: u32, camo: u8) -> Option<&PreparedRemoteKit> {
+    pub(crate) fn get(
+        &self,
+        soldier: &asset_game::SoldierPresentation,
+        weapon: u32,
+        camo: u8,
+    ) -> Option<&PreparedRemoteKit> {
         self.kits
-            .get(&(axis, weapon, camo))
+            .get(&(soldier.kit().clone(), weapon, camo))
             .and_then(Option::as_ref)
     }
 
+    pub(crate) fn prepare_batch<'a>(
+        &'a mut self,
+        bodies: &'a assets::PreparedBodies,
+        weapons: &'a assets::PreparedWeapons,
+        world_weapons: &'a assets::PreparedWorldWeapons,
+    ) -> RemoteKitBatch<'a> {
+        self.reset_for(bodies, weapons, world_weapons);
+        RemoteKitBatch {
+            cache: self,
+            bodies,
+            weapons,
+            world_weapons,
+        }
+    }
+}
+
+pub(crate) struct RemoteKitBatch<'a> {
+    cache: &'a mut PreparedRemoteKits,
+    bodies: &'a assets::PreparedBodies,
+    weapons: &'a assets::PreparedWeapons,
+    world_weapons: &'a assets::PreparedWorldWeapons,
+}
+
+impl RemoteKitBatch<'_> {
     pub(crate) fn prepare(
         &mut self,
-        bodies: &assets::PreparedBodies,
-        soldiers: &asset_game::SoldierPresentations,
-        weapons: &assets::PreparedWeapons,
-        world_weapons: &assets::PreparedWorldWeapons,
+        soldier: &asset_game::SoldierPresentation,
         compositions: &mut PreparedItemCompositions,
-        axis: bool,
         handle: asset_game::WeaponHandle,
         camo: u8,
     ) {
-        self.reset_for(bodies, weapons, world_weapons);
-        let Ok(bound) = weapons.registry().bind(handle) else {
+        let Ok(bound) = self.weapons.registry().bind(handle) else {
             return;
         };
         let weapon = bound.wire_id();
-        if self.kits.contains_key(&(axis, weapon, camo)) {
+        let key = (soldier.kit().clone(), weapon, camo);
+        if self.cache.kits.contains_key(&key) {
             return;
         }
         let shared = if weapon == 0 || bound.world_facts().is_some_and(|facts| facts.is_shield()) {
             None
         } else {
-            match compositions.prepare(weapons, world_weapons, handle, camo) {
+            match compositions.prepare(self.weapons, self.world_weapons, handle, camo) {
                 Ok(shared) => Some(shared),
                 Err(_) => {
-                    self.kits.insert((axis, weapon, camo), None);
+                    self.cache.kits.insert(key, None);
                     return;
                 }
             }
         };
-        let Ok(soldier) = soldiers.side(axis) else {
-            self.kits.insert((axis, weapon, camo), None);
-            return;
-        };
-        if !soldier.owns_bodies(&bodies.0) {
-            self.kits.insert((axis, weapon, camo), None);
+        if !soldier.owns_bodies(&self.bodies.0) {
+            self.cache.kits.insert(key, None);
             return;
         }
-        let kit = self.compile(
-            bodies,
-            soldier,
-            weapons,
-            world_weapons,
-            weapon,
-            camo,
-            shared.as_deref(),
-        );
-        self.kits.insert((axis, weapon, camo), kit);
+        let kit = self.compile(soldier, weapon, camo, shared.as_deref());
+        self.cache.kits.insert(key, kit);
     }
 
     fn compile(
         &mut self,
-        bodies: &assets::PreparedBodies,
         soldier: &asset_game::SoldierPresentation,
-        weapons: &assets::PreparedWeapons,
-        world_weapons: &assets::PreparedWorldWeapons,
         weapon: u32,
         camo: u8,
         shared: Option<&ItemComposition>,
     ) -> Option<PreparedRemoteKit> {
         let (models, radius) = occupy_remote_kit_dobj(
             soldier,
-            Some(weapons),
-            Some(world_weapons),
+            Some(self.weapons),
+            Some(self.world_weapons),
             weapon,
             true,
             None,
@@ -193,8 +204,8 @@ impl PreparedRemoteKits {
             .collect();
         let dobj = select_remote_models(
             soldier,
-            Some(weapons),
-            Some(world_weapons),
+            Some(self.weapons),
+            Some(self.world_weapons),
             weapon,
             camo,
             None,
@@ -226,7 +237,8 @@ impl PreparedRemoteKits {
                     ))
                 })
                 .collect::<Option<KitModels>>()?;
-            self.built
+            self.cache
+                .built
                 .entry(key)
                 .or_insert_with(|| {
                     xmodel_runtime::DObj::build(&set.dobj_models)
@@ -236,8 +248,8 @@ impl PreparedRemoteKits {
                 .clone()
         });
         Some(PreparedRemoteKit {
-            bodies: bodies.0.clone(),
-            world: world_weapons.0.clone(),
+            bodies: self.bodies.0.clone(),
+            world: self.world_weapons.0.clone(),
             sources,
             radius,
             hide_part_bits: kit_hide_part_bits(&models),
@@ -549,7 +561,7 @@ pub(crate) fn select_remote_models<'a>(
     }
     Ok(RemoteModelSet {
         body_name: kit.body.clone(),
-        head_name: kit.head.clone().unwrap_or_default(),
+        head_name: kit.head.clone().unwrap_or(String::new()),
         body,
         head,
         gun,
@@ -564,8 +576,7 @@ pub(crate) fn select_remote_models<'a>(
 pub fn ensure_remote_dobj(
     models: &RemoteModelSet<'_>,
     e_type: i32,
-    persist_key: u32,
-    trees: &mut RemoteBodyTrees,
+    tree_slot: &mut Option<PersistentRemoteTree>,
     prepared: Option<&std::sync::Arc<xmodel_runtime::DObj>>,
 ) -> Result<(), String> {
     let gun_name = models
@@ -587,7 +598,7 @@ pub fn ensure_remote_dobj(
         gun_name,
         &attachment_names,
     );
-    let slot = trees.get_mut(persist_key).expect("tree slot inserted");
+    let slot = tree_slot.as_mut().expect("tree slot inserted");
     let same_prepared = models.shield.is_some()
         || slot
             .dobj

@@ -29,6 +29,7 @@ struct SpotGpuTarget {
 pub(super) struct ShadowmapSpotGpu {
     rt10: Option<SpotGpuTarget>,
     rt11: Option<SpotGpuTarget>,
+    clear_pipeline: Option<bevy::render::render_resource::RenderPipeline>,
     smodel_index_epochs: [Vec<Buffer>; lighting_iw4::SPOT_SHADOW_SM_LIGHT_CAP],
     smodel_index_epoch_bytes: [Vec<u64>; lighting_iw4::SPOT_SHADOW_SM_LIGHT_CAP],
     xmodel_index_epochs: [Vec<Buffer>; lighting_iw4::SPOT_SHADOW_SM_LIGHT_CAP],
@@ -36,6 +37,10 @@ pub(super) struct ShadowmapSpotGpu {
 }
 
 impl ShadowmapSpotGpu {
+    pub(super) fn clear_pipeline(&self) -> Option<&bevy::render::render_resource::RenderPipeline> {
+        self.clear_pipeline.as_ref()
+    }
+
     pub(crate) fn color_view(&self, render_target_id: u8) -> Option<&TextureView> {
         match render_target_id {
             GFX_SPOT_SHADOW_RT_LARGE => self.rt10.as_ref().map(|t| &t.color_view),
@@ -174,6 +179,79 @@ fn ensure_one(
 }
 
 pub(super) fn ensure_shadowmap_spot_targets(gpu: &mut ShadowmapSpotGpu, device: &RenderDevice) {
+    if gpu.clear_pipeline.is_none() {
+        gpu.clear_pipeline = Some(create_slot_clear_pipeline(device));
+    }
     ensure_one(&mut gpu.rt10, device, GFX_SPOT_SHADOW_RT_LARGE);
     ensure_one(&mut gpu.rt11, device, GFX_SPOT_SHADOW_RT_SMALL);
+}
+
+const SLOT_CLEAR_SHADER: &str = r#"
+@vertex fn vs(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
+    let p = array<vec2<f32>, 3>(vec2(-1., -1.), vec2(3., -1.), vec2(-1., 3.));
+    return vec4(p[index], 1., 1.);
+}
+@fragment fn fs() -> @location(0) f32 { return 1.; }
+"#;
+
+fn create_slot_clear_pipeline(
+    device: &RenderDevice,
+) -> bevy::render::render_resource::RenderPipeline {
+    use bevy::render::render_resource::*;
+    let shader = device.create_and_validate_shader_module(ShaderModuleDescriptor {
+        label: Some("spot shadow tile clear"),
+        source: ShaderSource::Wgsl(SLOT_CLEAR_SHADER.into()),
+    });
+    let layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+        label: Some("spot shadow tile clear"),
+        bind_group_layouts: &[],
+        immediate_size: 0,
+    });
+    device.create_render_pipeline(&RawRenderPipelineDescriptor {
+        label: Some("spot shadow tile clear"),
+        layout: Some(&layout),
+        vertex: RawVertexState {
+            module: &shader,
+            entry_point: Some("vs"),
+            buffers: &[],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(RawFragmentState {
+            module: &shader,
+            entry_point: Some("fs"),
+            targets: &[Some(ColorTargetState {
+                format: SHADOWMAP_SPOT_COLOR_FORMAT,
+                blend: None,
+                write_mask: ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: PrimitiveState {
+            cull_mode: None,
+            ..Default::default()
+        },
+        depth_stencil: Some(DepthStencilState {
+            format: SHADOWMAP_SPOT_DEPTH_FORMAT,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(CompareFunction::Always),
+            stencil: StencilState {
+                front: StencilFaceState {
+                    compare: CompareFunction::Always,
+                    pass_op: StencilOperation::Replace,
+                    ..Default::default()
+                },
+                back: StencilFaceState {
+                    compare: CompareFunction::Always,
+                    pass_op: StencilOperation::Replace,
+                    ..Default::default()
+                },
+                read_mask: 0xff,
+                write_mask: 0xff,
+            },
+            bias: Default::default(),
+        }),
+        multisample: Default::default(),
+        multiview_mask: None,
+        cache: None,
+    })
 }

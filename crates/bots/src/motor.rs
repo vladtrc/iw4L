@@ -82,6 +82,10 @@ impl Motor {
         if self.armed != Some(obs.self_state.life_sequence) {
             self.yaw = obs.self_state.viewangles[1];
             self.pitch = angle_subtract(obs.self_state.viewangles[0], 0.0);
+            self.yaw_vel = 0.0;
+            self.pitch_vel = 0.0;
+            self.acquire_yaw = 0.0;
+            self.last_look = None;
             self.armed = Some(obs.self_state.life_sequence);
         }
         let dt = dt_ms.max(1) as f32;

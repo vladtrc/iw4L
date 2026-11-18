@@ -51,9 +51,7 @@ pub fn adjust_angles(kb: &mut KbuttonSet, input: AdjustAnglesInput) -> (f32, f32
 }
 
 fn capped_speed(dvar: f32, cgame_max: f32) -> f32 {
-    if cgame_max <= 0.0 {
-        dvar
-    } else if dvar < cgame_max {
+    if cgame_max <= 0.0 || dvar < cgame_max {
         dvar
     } else {
         cgame_max

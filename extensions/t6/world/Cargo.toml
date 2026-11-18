@@ -1,0 +1,24 @@
+[package]
+name = "ext_t6_world"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anim_iw4.workspace = true
+asset_anim.workspace = true
+asset_core.workspace = true
+asset_iw4.workspace = true
+asset_material.workspace = true
+asset_model.workspace = true
+asset_transport.workspace = true
+asset_world.workspace = true
+bevy.workspace = true
+clipmap_iw4.workspace = true
+dpvs_iw4.workspace = true
+ext_t6_fastfile.workspace = true
+lighting_iw4.workspace = true
+xmodel_runtime.workspace = true
+
+[lints]
+workspace = true

@@ -76,7 +76,10 @@ impl GpuStream {
         }
         let limits = device.limits();
         let limit = limits.max_buffer_size;
-        if bytes.next_multiple_of(RANGE_GRANULE as u64) > limit {
+        if bytes
+            .checked_next_multiple_of(RANGE_GRANULE as u64)
+            .is_none_or(|aligned| aligned > limit)
+        {
             self.buffer = None;
             self.capacity = 0;
             return false;
@@ -131,7 +134,9 @@ pub(super) fn aligned_stream_span(
         return None;
     }
     let start = start / RANGE_GRANULE * RANGE_GRANULE;
-    let end = end.next_multiple_of(RANGE_GRANULE).min(total);
+    let end = end
+        .checked_next_multiple_of(RANGE_GRANULE)
+        .map_or(total, |aligned| aligned.min(total));
     if start >= end {
         None
     } else {

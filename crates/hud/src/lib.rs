@@ -1,6 +1,9 @@
+mod actor_overlay;
 mod ammo;
 mod blood;
 mod breath_hint;
+mod campaign_controls;
+mod campaign_objectives;
 mod chrome;
 mod compass;
 mod connection_notice;
@@ -11,7 +14,6 @@ mod emp_static;
 mod expr_cache;
 mod flash;
 mod font_overlay;
-mod gaps;
 mod gpu_list;
 mod hud_elems;
 mod hudelem;
@@ -40,24 +42,34 @@ pub use draw2d::{
     Draw2dCmd, Draw2dCmdCensus, Draw2dList, Draw2dOp, Draw2dProvenance, Draw2dQuad,
     TEXT_STYLE_HUDELEM, TextRunFx, tessellate, tessellate_fonts,
 };
-pub use gaps::{GapCause, HudGap, HudPresentationGaps};
 pub use gpu_list::{
     HudTessBatch, HudTessGpuFrame, HudTessTechnique, HudTessVertex, ShellshockScreen,
 };
 pub use hudelem::HudElemSoundLatch;
 pub use menus::{MenuState, ScriptMenus};
 pub use overhead_names::{
-    OverheadPosedHead, OverheadPosedModelFrame, OverheadPosedPlayerFrame,
+    OverheadNameState, OverheadPosedHead, OverheadPosedModelFrame,
     OverheadPosedPlayerFramePublished,
 };
 pub use plugin::HudPlugin;
-pub use presentation_scale::{
-    HorizontalAlign, PlacedRect, PresentationScale, ScaleClass, VIRTUAL_HEIGHT, VIRTUAL_WIDTH,
-    VerticalAlign,
-};
+pub use presentation_scale::{PresentationScale, ScaleClass, VIRTUAL_HEIGHT};
 pub use splash::PendingSplash;
 pub use surface::Hud2dSurface;
 
 mod use_hint;
 
 pub use killfeed::team_name_color;
+
+pub(crate) fn gameplay_hud_visible(presentation: &net::LocalPresentation<'_>) -> bool {
+    let Some(snapshot) = presentation.snapshot() else {
+        return false;
+    };
+    let Some(ps) = presentation.player() else {
+        return false;
+    };
+    let dvars = snapshot.meta.script_dvars(presentation.client_id());
+    dvars.int("hud_drawhud").unwrap_or(1) != 0
+        && dvars.int("cg_drawhud").unwrap_or(1) != 0
+        && (!snapshot.meta.objectives.campaign_mode
+            || ps.other_flags & playerstate_iw4::other_flags::SP_HIDE_HUD == 0)
+}

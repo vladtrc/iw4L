@@ -22,62 +22,9 @@ impl ClassRejectReason {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GiveRejectReason {
-    NotAlive,
-
-    InvalidWeapon,
-
-    UnknownWeaponId,
-
-    UnsupportedWeapon,
-
-    EmptyCombatProfile,
-}
-
-impl GiveRejectReason {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::NotAlive => "not_alive",
-            Self::InvalidWeapon => "invalid_weapon",
-            Self::UnknownWeaponId => "unknown_weapon_id",
-            Self::UnsupportedWeapon => "unsupported_weapon",
-            Self::EmptyCombatProfile => "empty_combat_profile",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ConfigurationChangeRejectReason {
-    NotAlive,
-    StaleSource,
-    InvalidTarget,
-    DifferentFamily,
-    Busy,
-    NoInventorySlot,
-    AmmoTableFull,
-    SharedAmmoConflict,
-}
-
-impl ConfigurationChangeRejectReason {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::NotAlive => "not_alive",
-            Self::StaleSource => "stale_source",
-            Self::InvalidTarget => "invalid_target",
-            Self::DifferentFamily => "different_family",
-            Self::Busy => "busy",
-            Self::NoInventorySlot => "no_inventory_slot",
-            Self::AmmoTableFull => "ammo_table_full",
-            Self::SharedAmmoConflict => "shared_ammo_conflict",
-        }
-    }
-}
-
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LoadoutSpec {
     pub class_id: ClassId,
-    pub revision: u32,
     pub primary: u32,
     pub secondary: u32,
     pub primary_attachments: [u32; 4],
@@ -115,11 +62,8 @@ pub struct PersonalClass {
 }
 
 impl PersonalClass {
-    pub fn definition(self, id: ClassId, revision: u32) -> Option<ClassDef> {
-        if revision == 0 {
-            return None;
-        }
-        let mut def = ClassDef::primary_secondary(id, revision, self.weapons[0], self.weapons[1]);
+    pub fn definition(self, id: ClassId) -> Option<ClassDef> {
+        let mut def = ClassDef::primary_secondary(id, self.weapons[0], self.weapons[1]);
         def.lethal = self.weapons[2];
         def.tactical = self.weapons[3];
         def.camos = self.camos;
@@ -138,7 +82,6 @@ impl PersonalClass {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClassDef {
     pub id: ClassId,
-    pub revision: u32,
     pub primary: u32,
     pub secondary: u32,
 
@@ -154,10 +97,9 @@ pub struct ClassDef {
 }
 
 impl ClassDef {
-    pub fn primary_secondary(id: ClassId, revision: u32, primary: u32, secondary: u32) -> Self {
+    pub fn primary_secondary(id: ClassId, primary: u32, secondary: u32) -> Self {
         Self {
             id,
-            revision,
             primary,
             secondary,
             primary_attachments: [0; 4],

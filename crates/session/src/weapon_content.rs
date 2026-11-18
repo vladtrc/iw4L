@@ -25,22 +25,18 @@ pub(crate) fn compile(
     aliases: Vec<(String, u32)>,
     pen_table: weapon_iw4::PenetrationDepthTable,
     pen_table_loaded: bool,
-) -> Result<PreparedSimWeapons, sim::SimWeaponContentRefusal> {
+    profile: asset_core::RuntimeProfile,
+) -> Result<PreparedSimWeapons, &'static str> {
     let rules = WeaponHostRules::default();
     let aliases: Vec<_> = weapons.native_script_aliases().chain(aliases).collect();
     let mut refused = Vec::new();
     let groups = weapons.configuration_transition_groups();
-    let campaign = asset_transport::campaign_zone_set();
     let rows = weapons.published_weapons().map(|weapon| {
         let id = weapon.wire_id();
-        let execution = match weapons.configuration_admission(id) {
-            Ok(()) => compile_combat(weapons, weapon, rules, global_location, &mut refused),
-            Err(reason) if id != 0 => {
-                refused.push(format!("{}({reason:?})", weapons.name_of(id)));
-                Err(format!("{reason:?}"))
-            }
-            Err(reason) => Err(format!("{reason:?}")),
-        };
+        let execution = weapons
+            .configuration_admission(id)
+            .map_err(|reason| format!("{reason:?}"))
+            .and_then(|()| compile_combat(weapons, weapon, rules, global_location, &mut refused));
         let setup = weapons.describe_configuration(id).and_then(|selection| {
             let family = selection.family.as_ref()?;
             Some(sim::WeaponSetup {
@@ -67,6 +63,16 @@ pub(crate) fn compile(
             })
             .unwrap_or(sim::WeaponScriptSounds::default());
         sim::SimWeaponRow {
+            ai_accuracy: weapons
+                .ai_accuracy_of(id)
+                .copied()
+                .unwrap_or(weapon_iw4::AiAccuracyGraphs::default()),
+            silenced: weapons.silenced_of(id),
+            thermal_scope: weapon.hud_facts().is_some_and(|facts| facts.thermal_scope),
+            item: weapon.item_ammo_facts().map(|ammo| sim::WeaponItemFacts {
+                ammo,
+                alternate: weapons.alternate_of(id),
+            }),
             unlock_requirement: weapons.weapon_unlock_requirement(id).map_err(str::to_owned),
             wire_id: id,
             scales: weapon.movement_scales(),
@@ -83,16 +89,25 @@ pub(crate) fn compile(
             penetration: weapons
                 .penetration_facts_of(id)
                 .unwrap_or(weapon_iw4::BulletPenFacts::default()),
-            script_name: if campaign {
-                weapons.name_of(id).to_owned()
-            } else {
-                weapons.script_name_of(id)
-            },
+            script_name: weapons.script_name_of(id),
             setup,
+            clip_model: weapons.clip_model_of(id).unwrap_or("").to_owned(),
             world_model: (
                 weapons.world_model_of(id).unwrap_or("").to_owned(),
                 weapons.hide_tags_of(id).to_vec(),
             ),
+            world_model_attachments: weapons
+                .attachment_world_model_edges_of(id)
+                .iter()
+                .zip(weapons.attachment_world_mounts_of(id))
+                .filter_map(|(edge, mount)| {
+                    let entry = world_models.get_at(edge.bound_index()?)?;
+                    entry.skel.pose.as_ref()?;
+                    Some((entry.skel.name.clone(), mount.as_ref()?.clone()))
+                })
+                .collect(),
+            world_model_variants: weapons.world_model_variants_of(id).to_vec(),
+            world_knife_model: weapons.world_knife_model_of(id).map(str::to_owned),
             shield_model,
             projectile_model: weapons.projectile_model_of(id).unwrap_or("").to_owned(),
             melee_only: weapons.melee_only_of(id),
@@ -100,17 +115,16 @@ pub(crate) fn compile(
             equipment: weapons
                 .equipment_facts_of(id)
                 .unwrap_or(sim::EquipmentRuntimeFacts::default()),
-            ai_accuracy: weapons.ai_accuracy_of(id).copied().unwrap_or_default(),
-            silenced: weapons.silenced_of(id),
-            thermal_scope: weapons.thermal_scope_of(id),
         }
     });
-    let ranks = if campaign {
-        gamemode_iw4::progression::RankProgression::capture(&CampaignRanks)
-    } else {
-        weapons.rank_progression()
-    }
-    .map_err(|_| sim::SimWeaponContentRefusal::InvalidProgression)?;
+    let ranks = match profile {
+        asset_core::RuntimeProfile::Multiplayer => Some(
+            weapons
+                .rank_progression()
+                .map_err(|_| "invalid rank progression")?,
+        ),
+        asset_core::RuntimeProfile::Campaign => None,
+    };
     let content =
         sim::SimWeaponContent::compile(rows, aliases, pen_table, pen_table_loaded, ranks)?;
     if !refused.is_empty() {
@@ -125,17 +139,6 @@ pub(crate) fn compile(
         revision: weapons.revision(),
         content,
     })
-}
-
-struct CampaignRanks;
-
-impl gamemode_iw4::progression::ProgressionTable for CampaignRanks {
-    fn rows(&self) -> usize {
-        1
-    }
-    fn cell(&self, _: usize, _: usize) -> &str {
-        "0"
-    }
 }
 
 fn compile_combat(

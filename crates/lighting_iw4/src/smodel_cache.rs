@@ -627,14 +627,17 @@ impl<'a> StaticModelCache<'a> {
 
     pub fn cache_surface(
         &mut self,
-        bank: u8,
-        size_class: u8,
+        spec: SmcLodCacheSpec,
         smodel_index: u16,
-        lod: u8,
         cache_index: u16,
         verts: u32,
         enabled: bool,
     ) -> CacheStaticModelSurface {
+        let SmcLodCacheSpec {
+            bank,
+            size_class,
+            lod_slot: lod,
+        } = spec;
         if !enabled {
             return CacheStaticModelSurface::Refused;
         }

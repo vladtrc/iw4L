@@ -104,15 +104,26 @@ fn pretess_index_count(runs: &[&[u16]]) -> Option<u32> {
     (total > 0).then_some(total)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SmodelPretessSpace {
+    pub command_used: usize,
+    pub command_capacity: usize,
+    pub index_used: u32,
+    pub index_capacity: u32,
+}
+
 pub fn smodel_cmd_reserve(
-    cmd_used: usize,
-    cmd_cap: usize,
-    dest_used: u32,
-    dest_total: u32,
+    space: SmodelPretessSpace,
     runs: &[&[u16]],
     first_cache_index: u16,
     instance_count: u16,
 ) -> Result<SmodelPretessAlloc, SmodelPretessAllocError> {
+    let SmodelPretessSpace {
+        command_used: cmd_used,
+        command_capacity: cmd_cap,
+        index_used: dest_used,
+        index_capacity: dest_total,
+    } = space;
     if cmd_used.saturating_add(SMODEL_PRETESS_CMD_BYTES) > cmd_cap {
         return Err(SmodelPretessAllocError::CmdOverflow);
     }
@@ -160,12 +171,14 @@ pub fn smodel_cached_cmd_plan(
     cache_indices: &[u16],
     r_pretess: bool,
     device_lost: bool,
-    cmd_used: usize,
-    cmd_cap: usize,
-    dest_used: u32,
-    dest_total: u32,
+    space: SmodelPretessSpace,
     runs: &[&[u16]],
 ) -> SmodelCachedCmdPlan {
+    let SmodelPretessSpace {
+        command_used: cmd_used,
+        command_capacity: cmd_cap,
+        ..
+    } = space;
     if source != SmodelSurfPath::Cached {
         return SmodelCachedCmdPlan {
             dest: source,
@@ -188,15 +201,7 @@ pub fn smodel_cached_cmd_plan(
     let batch = &cache_indices[..consumed];
     let instance_count = u16::try_from(consumed).unwrap_or(u16::MAX);
     if !device_lost && r_pretess {
-        match smodel_cmd_reserve(
-            cmd_used,
-            cmd_cap,
-            dest_used,
-            dest_total,
-            runs,
-            batch[0],
-            instance_count,
-        ) {
+        match smodel_cmd_reserve(space, runs, batch[0], instance_count) {
             Ok(alloc) => {
                 return SmodelCachedCmdPlan {
                     dest: SmodelSurfPath::Pretess,

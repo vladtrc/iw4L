@@ -1,8 +1,8 @@
 # IW4L
 
-IW4L is an open-source runtime for Call of Duty: Modern Warfare 2 (2009), written in
-Rust with [Bevy](https://bevy.org/). Point it at a copy of MW2 you already own and it
-loads that installation's maps, models, textures and weapons into its own engine. You
+IW4L is an open-source IW4-compatible engine, written in Rust with
+[Bevy](https://bevy.org/). Point it at an IW4-compatible installation you already own
+and it loads that installation's maps, models, textures and weapons. You
 can try implemented movement and combat on multiplayer maps, then inspect or change how
 those systems work.
 
@@ -14,8 +14,7 @@ those systems work.
 ## What you can try
 
 Explore maps, fight bots, and record and replay demos. Gameplay remains incomplete;
-expect missing behavior, bugs and desyncs. The asset readers also cover MW3 and Black
-Ops.
+expect missing behavior, bugs and desyncs. The asset readers also cover IW5, T5 and T6 formats.
 
 APIs, configuration, caches and the wire protocol change between commits;
 multiplayer peers must run the same build.
@@ -24,9 +23,9 @@ multiplayer peers must run the same build.
 
 1. Download `iw4l-windows.zip` from [Releases](../../releases) and extract it into an
    empty writable folder. The archive password is `t.me/contextrot`.
-2. Launch `iw4l.exe`. It finds MW2 in your Steam libraries and creates a
+2. Launch `iw4l.exe`. It finds compatible IW4 data in your Steam libraries and creates a
    `Modern Warfare 2.lnk` shortcut next to itself. For an install outside Steam, create
-   that shortcut to your MW2 folder yourself.
+   that shortcut to your IW4 data folder yourself.
 
 For online play, put the `.iw4l-server` file you received from a server operator next
 to `iw4l.exe`. With it the game finds that master and updates itself on launch. Details:
@@ -38,7 +37,7 @@ Install Rust through rustup and GNU Make. [Build dependencies](docs/BUILD.md) co
 Linux's C/C++ toolchain and system libraries, and macOS's Xcode command line tools.
 [Windows instructions](docs/WINDOWS.md) cover building and arranging a portable folder.
 
-You need your own installed MW2 Multiplayer data. IW4L
+You need your own installed IW4 multiplayer data. IW4L
 distributes no game assets and reads installations without patching or replacing their
 files. Caches, demos and logs go under `iw4l-artifacts/`; Linux settings use a separate
 configuration directory described in the [run guide](docs/RUN.md).
@@ -61,7 +60,7 @@ This builds the optimized `play` profile and starts a local match with three bot
 | Assets | Native FastFile readers convert game data into a shared intermediate representation. |
 | Shaders | Retail Direct3D 9 Shader Model 3 bytecode is translated to WGSL. |
 | Rendering | World geometry, models and effects feed one sorted draw-surface list. |
-| Simulation | Server authority, client prediction and replay share one simulation step over explicit Bevy ECS state. |
+| Simulation | Explicit server frame over Bevy ECS state; client prediction replays player commands using shared movement and weapon primitives. |
 | Networking | Custom UDP traffic; a QUIC master provides browsing and relaying. The host simulates the match. |
 
 ## Where to go next

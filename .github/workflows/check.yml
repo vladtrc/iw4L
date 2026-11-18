@@ -1,0 +1,77 @@
+name: Checks
+
+on:
+  pull_request:
+  push:
+    branches: [master, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: 2
+
+jobs:
+  quality:
+    name: Format, Clippy and workspace boundaries
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Linux dependencies
+        run: sudo apt-get update && sudo apt-get install -y g++ pkg-config libx11-dev libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
+      - name: Rust components
+        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo xtask check-workspace --structure-only
+      - run: cargo xtask publish-check
+
+  features:
+    name: Launcher / ${{ matrix.game }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - game: iw4
+            flags: ''
+          - game: iw5
+            flags: '--features iw5'
+          - game: t5
+            flags: '--features t5'
+          - game: t6
+            flags: '--features t6'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Linux dependencies
+        run: sudo apt-get update && sudo apt-get install -y g++ pkg-config libx11-dev libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
+      - name: Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+      - run: cargo check --locked -p launcher --all-targets --no-default-features ${{ matrix.flags }}
+
+  windows:
+    name: Windows / MSVC build
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+      - run: cargo build --locked --profile play -p launcher

@@ -5,27 +5,107 @@ impl WeaponCatalog {
         self.strings = strings;
     }
 
-    pub fn set_capture_ns(&mut self, ns: crate::AssetNamespace) {
+    pub fn set_capture_ns(&mut self, ns: crate::FamilyId) {
         self.capture_ns = Some(ns);
     }
 
-    pub fn retain(&mut self, mut keep: impl FnMut(crate::AssetNamespace, &str) -> bool) {
-        self.entries
-            .retain(|entry| keep(entry.namespace, &entry.name));
-    }
-
-    pub fn capture_vehicle(&mut self, stream: &ZoneStream<'_>) {
-        let Some((Some(name), turret)) = stream.vehicle() else {
+    pub fn capture_vehicle(
+        &mut self,
+        stream: &ZoneStream<'_>,
+        presets: &asset_world::PhysPresetCatalog,
+    ) {
+        let Some(geometry) = stream.vehicle() else {
+            return;
+        };
+        let Some(name) = geometry.name else {
             return;
         };
         let Some(name) = read_name(stream, name) else {
             return;
         };
-        if let Some(turret) = turret.and_then(|ptr| read_name(stream, ptr)) {
+        if let Some(turret) = geometry
+            .turret_weapon
+            .and_then(|ptr| read_name(stream, ptr))
+        {
             self.vehicle_turrets.insert(name.clone(), turret);
         }
-        self.vehicle_accel
-            .insert(name.clone(), stream.vehicle_accel());
+        let (kind, physics_enabled, suspension_travel) = stream.vehicle_wheels();
+        let physics = physics_enabled
+            .then(|| {
+                let p = geometry.header;
+                let preset = presets.at_slot(p.at(stream.layout(176, 200)))?;
+                let field = |at| stream.f32_at(p, stream.layout(at, at + 32)).ok();
+                Some(asset_core::VehiclePhysics {
+                    mass: preset.mass,
+                    bounce: preset.bounce,
+                    friction: preset.friction,
+                    impulse_scale: preset.bullet_force_scale,
+                    max_velocity: field(204)?,
+                    collision_momentum: field(300)?,
+                    collision_launch_scale: field(304)?,
+                    wrecked_mass_scale: field(308)?,
+                    wrecked_friction: field(312)?,
+                    jolt_threshold: field(316)?,
+                })
+                .filter(|facts| facts.valid())
+            })
+            .flatten();
+        let wheel_count = match kind {
+            0 => Some(4),
+            1 | 3 => Some(6),
+            2 | 4 | 5 => Some(0),
+            _ => None,
+        };
+        if let Some(motion) = wheel_count
+            .map(|wheel_count| asset_core::VehicleMotion {
+                kind,
+                physics,
+                acceleration: stream.vehicle_accel(),
+                wheel_count,
+                physics_enabled,
+                suspension_travel,
+            })
+            .filter(|motion| motion.valid())
+        {
+            self.vehicle_motion.insert(name.clone(), motion);
+        } else {
+            diag::warn!(
+                Zone,
+                "vehicle {name}: invalid motion or wheel contact inputs"
+            );
+        }
+        let (names, durations, blend_speed) = stream.vehicle_engine();
+        let [
+            idle_low,
+            idle_high,
+            engine_low,
+            engine_high,
+            startup,
+            shutdown,
+            idle,
+            sustain,
+            ramp_up,
+            ramp_down,
+        ] = names.map(|ptr| ptr.and_then(|ptr| read_name(stream, ptr)));
+        self.vehicle_engine.insert(
+            name.clone(),
+            asset_core::VehicleEngineSounds {
+                idle_low,
+                idle_high,
+                engine_low,
+                engine_high,
+                blend_speed,
+                startup,
+                shutdown,
+                idle,
+                sustain,
+                ramp_up,
+                ramp_down,
+                startup_ms: durations[0].max(0),
+                ramp_up_ms: durations[1].max(0),
+                ramp_down_ms: durations[2].max(0),
+            },
+        );
         let (icons, size) = stream.vehicle_compass();
         self.vehicle_compass
             .insert(name, (icons.map(str::to_owned), size));
@@ -44,141 +124,49 @@ impl WeaponCatalog {
             Some((name, image))
         };
         for entry in &mut self.entries {
-            if let Some(slot) = entry.reticle_center_slot {
-                if let Some((name, image)) = names_of(slot) {
-                    entry.reticle.center_material = Some(name);
-                    entry.reticle.center_image = image;
-                }
-            }
-            if entry.reticle.center_image.is_none() {
-                if let Some(name) = entry.reticle.center_material.as_deref() {
-                    if let Some(index) = materials.material_index_by_ns(ns, name) {
-                        if let Some(material) = materials.materials.get(index.order()) {
-                            entry.reticle.center_image =
-                                materials.hud_image_name(material).map(str::to_owned);
-                        }
-                    }
-                }
-            }
-            if let Some(slot) = entry.reticle_side_slot {
-                if let Some((name, image)) = names_of(slot) {
-                    entry.reticle.side_material = Some(name);
-                    entry.reticle.side_image = image;
-                }
-            }
-            if entry.reticle.side_image.is_none() {
-                if let Some(name) = entry.reticle.side_material.as_deref() {
-                    if let Some(index) = materials.material_index_by_ns(ns, name) {
-                        if let Some(material) = materials.materials.get(index.order()) {
-                            entry.reticle.side_image =
-                                materials.hud_image_name(material).map(str::to_owned);
-                        }
-                    }
-                }
-            }
-            if let Some(slot) = entry.overlay_material_slot {
-                if let Some((name, image)) = names_of(slot) {
-                    entry.overlay_material = Some(name);
-                    entry.overlay_image = image;
-                }
-            }
-            if entry.overlay_image.is_none() {
-                if let Some(name) = entry.overlay_material.as_deref() {
-                    if let Some(index) = materials.material_index_by_ns(ns, name) {
-                        if let Some(material) = materials.materials.get(index.order()) {
-                            entry.overlay_image =
-                                materials.hud_image_name(material).map(str::to_owned);
-                        }
-                    }
-                }
-            }
-            if let Some(slot) = entry.pickup_icon_slot {
-                if let Some((name, image)) = names_of(slot) {
-                    entry.pickup_icon = Some(name);
-                    entry.pickup_icon_image = image;
-                }
-            }
-            if let Some(slot) = entry.hud_icon_slot {
-                if let Some((name, image)) = names_of(slot) {
-                    entry.hud_icon = Some(name);
-                    if entry.hud_icon_image.is_none() {
-                        entry.hud_icon_image = image;
-                    }
-                }
-            }
-            if entry.hud_icon_image.is_none() {
-                if let Some(name) = entry.hud_icon.as_deref() {
-                    if let Some(index) = materials.material_index_by_ns(ns, name) {
-                        if let Some(material) = materials.materials.get(index.order()) {
-                            entry.hud_icon_image =
-                                materials.hud_image_name(material).map(str::to_owned);
-                        }
-                    }
-                }
-            }
-            if let Some(slot) = entry.kill_icon_slot {
-                if let Some((name, image)) = names_of(slot) {
-                    if entry.kill_icon.is_none() {
-                        entry.kill_icon = Some(name);
-                    }
-                    if entry.kill_icon_image.is_none() {
-                        entry.kill_icon_image = image;
-                    }
-                }
-            }
-            if entry.kill_icon_image.is_none() {
-                if let Some(name) = entry.kill_icon.as_deref() {
-                    if let Some(index) = materials.material_index_by_ns(ns, name) {
-                        if let Some(material) = materials.materials.get(index.order()) {
-                            entry.kill_icon_image =
-                                materials.hud_image_name(material).map(str::to_owned);
-                        }
-                    }
-                }
-            }
-            if let Some(name) = entry.dpad_icon.as_deref()
-                && let Some(index) = materials.material_index_by_ns(ns, name)
-                && let Some(material) = materials.materials.get(index.order())
+            if let Some(slot) = entry.reticle_center_slot
+                && let Some((name, image)) = names_of(slot)
             {
-                entry.dpad_icon_image = materials.hud_image_name(material).map(str::to_owned);
-                entry.dpad_icon_atlas = material.texture_atlas;
+                entry.reticle.center_material = Some(name);
+                entry.reticle.center_image = image;
             }
-            entry.reticle.center_edge = material_hint_edge(
-                entry.reticle.center_material.as_deref(),
-                ns,
-                entry.reticle.center_authored,
-                materials,
-            );
-            entry.reticle.side_edge = material_hint_edge(
-                entry.reticle.side_material.as_deref(),
-                ns,
-                entry.reticle.side_authored,
-                materials,
-            );
-            entry.hud_material_edges.overlay = material_hint_edge(
-                entry.overlay_material.as_deref(),
-                ns,
-                entry.overlay_material_slot.is_some(),
-                materials,
-            );
-            entry.hud_material_edges.hud_icon = material_hint_edge(
-                entry.hud_icon.as_deref(),
-                ns,
-                entry.hud_icon_slot.is_some(),
-                materials,
-            );
-            entry.hud_material_edges.pickup_icon = material_hint_edge(
-                entry.pickup_icon.as_deref(),
-                ns,
-                entry.pickup_icon_slot.is_some(),
-                materials,
-            );
-            entry.hud_material_edges.kill_icon = material_hint_edge(
-                entry.kill_icon.as_deref(),
-                ns,
-                entry.kill_icon_slot.is_some(),
-                materials,
-            );
+            if let Some(slot) = entry.reticle_side_slot
+                && let Some((name, image)) = names_of(slot)
+            {
+                entry.reticle.side_material = Some(name);
+                entry.reticle.side_image = image;
+            }
+            if let Some(slot) = entry.overlay_material_slot
+                && let Some((name, image)) = names_of(slot)
+            {
+                entry.overlay_material = Some(name);
+                entry.overlay_image = image;
+            }
+            if let Some(slot) = entry.pickup_icon_slot
+                && let Some((name, image)) = names_of(slot)
+            {
+                entry.pickup_icon = Some(name);
+                entry.pickup_icon_image = image;
+            }
+            if let Some(slot) = entry.hud_icon_slot
+                && let Some((name, image)) = names_of(slot)
+            {
+                entry.hud_icon = Some(name);
+                if entry.hud_icon_image.is_none() {
+                    entry.hud_icon_image = image;
+                }
+            }
+            if let Some(slot) = entry.kill_icon_slot
+                && let Some((name, image)) = names_of(slot)
+            {
+                if entry.kill_icon.is_none() {
+                    entry.kill_icon = Some(name);
+                }
+                if entry.kill_icon_image.is_none() {
+                    entry.kill_icon_image = image;
+                }
+            }
+            link_hud_materials(entry, ns, materials);
         }
     }
 
@@ -187,99 +175,7 @@ impl WeaponCatalog {
             .capture_ns
             .expect("asset capture requires an explicit family");
         for entry in &mut self.entries {
-            if entry.reticle.center_image.is_none() {
-                if let Some(name) = entry.reticle.center_material.as_deref() {
-                    if let Some(index) = materials.material_index_by_ns(ns, name) {
-                        if let Some(material) = materials.materials.get(index.order()) {
-                            entry.reticle.center_image =
-                                materials.hud_image_name(material).map(str::to_owned);
-                        }
-                    }
-                }
-            }
-            if entry.reticle.side_image.is_none() {
-                if let Some(name) = entry.reticle.side_material.as_deref() {
-                    if let Some(index) = materials.material_index_by_ns(ns, name) {
-                        if let Some(material) = materials.materials.get(index.order()) {
-                            entry.reticle.side_image =
-                                materials.hud_image_name(material).map(str::to_owned);
-                        }
-                    }
-                }
-            }
-            if entry.overlay_image.is_none() {
-                if let Some(name) = entry.overlay_material.as_deref() {
-                    if let Some(index) = materials.material_index_by_ns(ns, name) {
-                        if let Some(material) = materials.materials.get(index.order()) {
-                            entry.overlay_image =
-                                materials.hud_image_name(material).map(str::to_owned);
-                        }
-                    }
-                }
-            }
-            if entry.hud_icon_image.is_none() {
-                if let Some(name) = entry.hud_icon.as_deref() {
-                    if let Some(index) = materials.material_index_by_ns(ns, name) {
-                        if let Some(material) = materials.materials.get(index.order()) {
-                            entry.hud_icon_image =
-                                materials.hud_image_name(material).map(str::to_owned);
-                        }
-                    }
-                }
-            }
-            if entry.kill_icon_image.is_none() {
-                if let Some(name) = entry.kill_icon.as_deref() {
-                    if let Some(index) = materials.material_index_by_ns(ns, name) {
-                        if let Some(material) = materials.materials.get(index.order()) {
-                            entry.kill_icon_image =
-                                materials.hud_image_name(material).map(str::to_owned);
-                        }
-                    }
-                }
-            }
-            if let Some(name) = entry.dpad_icon.as_deref()
-                && let Some(index) = materials.material_index_by_ns(ns, name)
-                && let Some(material) = materials.materials.get(index.order())
-            {
-                entry.dpad_icon_image = materials.hud_image_name(material).map(str::to_owned);
-                entry.dpad_icon_atlas = material.texture_atlas;
-            }
-            entry.reticle.center_edge = material_hint_edge(
-                entry.reticle.center_material.as_deref(),
-                ns,
-                entry.reticle.center_authored,
-                materials,
-            );
-            entry.reticle.side_edge = material_hint_edge(
-                entry.reticle.side_material.as_deref(),
-                ns,
-                entry.reticle.side_authored,
-                materials,
-            );
-            entry.hud_material_edges.overlay = material_hint_edge(
-                entry.overlay_material.as_deref(),
-                ns,
-                entry.overlay_material_slot.is_some(),
-                materials,
-            );
-            entry.hud_material_edges.hud_icon = material_hint_edge(
-                entry.hud_icon.as_deref(),
-                ns,
-                entry.hud_icon_slot.is_some(),
-                materials,
-            );
-            entry.hud_material_edges.pickup_icon = material_hint_edge(
-                entry.pickup_icon.as_deref(),
-                ns,
-                entry.pickup_icon_slot.is_some(),
-                materials,
-            );
-            entry.hud_material_edges.kill_icon = material_hint_edge(
-                entry.kill_icon.as_deref(),
-                ns,
-                entry.kill_icon_slot.is_some(),
-                materials,
-            );
+            link_hud_materials(entry, ns, materials);
         }
     }
 
@@ -396,9 +292,60 @@ impl WeaponCatalog {
     }
 }
 
+fn link_hud_materials(
+    entry: &mut CatalogWeapon,
+    ns: crate::FamilyId,
+    materials: &crate::MaterialDefinitions,
+) {
+    let material = |name: Option<&str>| {
+        let index = materials.material_index_by_ns(ns, name?)?;
+        materials.materials.get(index.order())
+    };
+    let image = |name: Option<&str>| {
+        material(name)
+            .and_then(|m| materials.hud_image_name(m))
+            .map(str::to_owned)
+    };
+    if entry.reticle.center_image.is_none() {
+        entry.reticle.center_image = image(entry.reticle.center_material.as_deref());
+    }
+    if entry.reticle.side_image.is_none() {
+        entry.reticle.side_image = image(entry.reticle.side_material.as_deref());
+    }
+    if entry.overlay_image.is_none() {
+        entry.overlay_image = image(entry.overlay_material.as_deref());
+    }
+    if entry.hud_icon_image.is_none() {
+        entry.hud_icon_image = image(entry.hud_icon.as_deref());
+    }
+    if entry.kill_icon_image.is_none() {
+        entry.kill_icon_image = image(entry.kill_icon.as_deref());
+    }
+    if let Some(m) = material(entry.dpad_icon.as_deref()) {
+        entry.dpad_icon_image = materials.hud_image_name(m).map(str::to_owned);
+        entry.dpad_icon_atlas = m.texture_atlas;
+    }
+    let edge = |hint: &Option<String>, authored: bool| {
+        material_hint_edge(hint.as_deref(), ns, authored, materials)
+    };
+    entry.reticle.center_edge = edge(
+        &entry.reticle.center_material,
+        entry.reticle.center_authored,
+    );
+    entry.reticle.side_edge = edge(&entry.reticle.side_material, entry.reticle.side_authored);
+    let edges = &mut entry.hud_material_edges;
+    edges.overlay = edge(
+        &entry.overlay_material,
+        entry.overlay_material_slot.is_some(),
+    );
+    edges.hud_icon = edge(&entry.hud_icon, entry.hud_icon_slot.is_some());
+    edges.pickup_icon = edge(&entry.pickup_icon, entry.pickup_icon_slot.is_some());
+    edges.kill_icon = edge(&entry.kill_icon, entry.kill_icon_slot.is_some());
+}
+
 pub(super) fn material_hint_edge(
     hint: Option<&str>,
-    namespace: crate::AssetNamespace,
+    namespace: crate::FamilyId,
     authored_slot: bool,
     materials: &crate::MaterialDefinitions,
 ) -> AssetEdge<MaterialSpace> {
@@ -414,7 +361,7 @@ pub(super) fn material_hint_edge(
 
 pub(super) fn stamp_fx_edge(
     slot: Option<Ptr>,
-    ns: crate::AssetNamespace,
+    ns: crate::FamilyId,
     fx: &crate::FxCatalog,
     edge: &mut AssetEdge<FxSpace>,
     hint: &mut Option<String>,
@@ -436,69 +383,99 @@ pub(super) fn stamp_fx_edge(
 pub(super) fn stamp_combat_fx(
     combat: &mut WeaponCombatFx,
     slots: CombatFxSlots,
-    ns: crate::AssetNamespace,
+    ns: crate::FamilyId,
     fx: &crate::FxCatalog,
     tracers: &crate::TracerCatalog,
 ) {
     combat.namespace = ns;
     stamp_fx_edge(
-        slots.view_flash,
+        slots.view_flash.filter(|_| !slots.closed),
         ns,
         fx,
         &mut combat.view_flash,
         &mut combat.view_flash_hint,
     );
     stamp_fx_edge(
-        slots.world_flash,
+        slots.world_flash.filter(|_| !slots.closed),
         ns,
         fx,
         &mut combat.world_flash,
         &mut combat.world_flash_hint,
     );
     stamp_fx_edge(
-        slots.view_shell_eject,
+        slots.view_shell_eject.filter(|_| !slots.closed),
         ns,
         fx,
         &mut combat.view_shell_eject,
         &mut combat.view_shell_eject_hint,
     );
     stamp_fx_edge(
-        slots.world_shell_eject,
+        slots.world_shell_eject.filter(|_| !slots.closed),
         ns,
         fx,
         &mut combat.world_shell_eject,
         &mut combat.world_shell_eject_hint,
     );
     stamp_fx_edge(
-        slots.view_last_shot_eject,
+        slots.view_last_shot_eject.filter(|_| !slots.closed),
         ns,
         fx,
         &mut combat.view_last_shot_eject,
         &mut combat.view_last_shot_eject_hint,
     );
     stamp_fx_edge(
-        slots.world_last_shot_eject,
+        slots.world_last_shot_eject.filter(|_| !slots.closed),
         ns,
         fx,
         &mut combat.world_last_shot_eject,
         &mut combat.world_last_shot_eject_hint,
     );
     stamp_fx_edge(
-        slots.explosion,
+        slots.explosion.filter(|_| !slots.closed),
         ns,
         fx,
         &mut combat.explosion,
         &mut combat.explosion_hint,
     );
-    let tracer = slots
-        .tracer
-        .and_then(|s| tracers.index_at_slot(s))
+    if slots.closed {
+        for (slot, edge) in [
+            (slots.view_flash, &mut combat.view_flash),
+            (slots.world_flash, &mut combat.world_flash),
+            (slots.view_shell_eject, &mut combat.view_shell_eject),
+            (slots.world_shell_eject, &mut combat.world_shell_eject),
+            (slots.view_last_shot_eject, &mut combat.view_last_shot_eject),
+            (
+                slots.world_last_shot_eject,
+                &mut combat.world_last_shot_eject,
+            ),
+            (slots.explosion, &mut combat.explosion),
+        ] {
+            if slot.is_some() && edge.is_absent() {
+                *edge = AssetEdge::Unresolved(AssetEdgeReason::CatalogMiss);
+            }
+        }
+    }
+    let tracer = combat
+        .tracer_hint
+        .as_deref()
+        .and_then(|name| tracers.index_named(ns, name))
+        .or_else(|| {
+            if !slots.closed && combat.tracer_hint.is_none() {
+                slots.tracer.and_then(|s| tracers.index_at_slot(s))
+            } else {
+                None
+            }
+        })
         .and_then(|index| Some((index, tracers.def_at(index)?)));
-    combat.tracer_hint = tracer.map(|(_, def)| def.name.clone());
-    combat.tracer = match (slots.tracer, tracer) {
-        (None, _) => AssetEdge::Absent,
+    combat.tracer_hint = combat
+        .tracer_hint
+        .clone()
+        .or_else(|| tracer.map(|(_, def)| def.name.clone()));
+    let authored = slots.tracer.is_some() || combat.tracer_hint.is_some();
+    combat.tracer = match (authored, tracer) {
         (_, Some((index, _))) => AssetEdge::bind_order(index, tracers.zone_of(index)),
-        (Some(_), None) => AssetEdge::Unresolved(AssetEdgeReason::CatalogMiss),
+        (false, None) => AssetEdge::Absent,
+        (true, None) => AssetEdge::Unresolved(AssetEdgeReason::CatalogMiss),
     };
     combat.last_shot_eject_pair_authored = slots.last_shot_pair_authored();
 }
@@ -544,7 +521,7 @@ pub(super) fn stamp_mw2_tracer(
         return;
     };
     combat.tracer_hint = Some(name.to_owned());
-    combat.tracer = match tracers.index_named(crate::AssetNamespace::Iw4, name) {
+    combat.tracer = match tracers.index_named(crate::FamilyId::IW4, name) {
         Some(index) => AssetEdge::bind_order(index, tracers.zone_of(index)),
         None => AssetEdge::Unresolved(AssetEdgeReason::CatalogMiss),
     };

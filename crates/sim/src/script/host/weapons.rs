@@ -11,11 +11,9 @@ use bevy_ecs::prelude::World;
 pub(crate) use weapon_iw4::WEAPTYPE_PROJECTILE;
 use weapon_iw4::{WEAPTYPE_GRENADE, WeaponState};
 
-pub(crate) mod campaign;
-
 const GRENADE_LINGER_MS: i64 = 30_000; // threads on the grenade keep running after it explodes
 
-pub(crate) fn is_changing_weapon(state: i32) -> bool {
+pub fn is_changing_weapon(state: i32) -> bool {
     matches!(
         WeaponState::from_i32(state),
         Ok(WeaponState::Raising
@@ -51,7 +49,7 @@ fn missile_of(world: &World, receiver: &Value) -> Result<(u64, ProjectileId, i32
     }
 }
 
-fn adopt(
+pub(crate) fn adopt(
     world: &mut World,
     projectile: &crate::ProjectileState,
     classname: &str,
@@ -85,10 +83,13 @@ fn adopt(
         None
     };
     let mut runtime = world.resource_mut::<RoundScript>();
-    let owner = runtime
-        .players
-        .get(&projectile.owner.0)
-        .map(|slot| slot.object);
+    let owner = match projectile.owner {
+        crate::ProjectileOwner::Player { client, .. } => {
+            runtime.players.get(&client.0).map(|slot| slot.object)
+        }
+        crate::ProjectileOwner::Entity { model, .. } => runtime.presented_by(model),
+        crate::ProjectileOwner::World => runtime.engine.world,
+    };
     let entity = runtime.entities.get_mut(&object).unwrap();
     entity.presence = presence;
     entity.missile_owner = owner;
@@ -125,7 +126,127 @@ pub(crate) fn launch(
     Ok(Value::Object(object))
 }
 
+pub(crate) fn launch_actor(
+    world: &mut World,
+    actor: u64,
+    weapon: u32,
+    origin: [f32; 3],
+    direction: [f32; 3],
+) -> Result<Value, String> {
+    let (owner, velocity) = {
+        let runtime = world.resource::<RoundScript>();
+        let entity = runtime
+            .entities
+            .get(&actor)
+            .ok_or("projectile shooter was deleted")?;
+        let state = runtime
+            .actors
+            .get(&actor)
+            .ok_or("projectile shooter is not an actor")?;
+        (
+            crate::ProjectileOwner::Entity {
+                model: entity.presence.ok_or("projectile actor has no presence")?,
+                number: entity.number,
+            },
+            state.motion.velocity,
+        )
+    };
+    let tick = world.resource::<crate::step::StepRequest>().tick;
+    let launch = crate::ProjectileLaunch {
+        tick,
+        origin,
+        angles: math_iw4::vect_to_angles(direction),
+        owner_velocity: velocity,
+        combat_seed: FrameWorld::from_world(world).combat_rng_mut().next_u32(),
+    };
+    let projectile = crate::missile::launch_owned(
+        &mut FrameWorld::from_world(world),
+        owner,
+        weapon,
+        launch,
+        0.0,
+    )?;
+    let grenade = FrameWorld::from_world(world)
+        .equipment_facts_for(weapon)
+        .is_some_and(|facts| facts.weap_type == WEAPTYPE_GRENADE);
+    let object = match adopt(
+        world,
+        &projectile,
+        if grenade { "grenade" } else { "rocket" },
+    ) {
+        Ok(object) => object,
+        Err(error) => {
+            let _ = FrameWorld::from_world(world).finish_projectile(projectile.entnum, None);
+            return Err(error);
+        }
+    };
+    let name = weapon_name(world, weapon);
+    {
+        let mut runtime = world.resource_mut::<RoundScript>();
+        runtime.set_object_field(object, "nativename", name.clone());
+        runtime.set_object_field(object, "weaponname", name.clone());
+    }
+    raise(
+        world,
+        Value::Object(actor),
+        if grenade {
+            "grenade_fire"
+        } else {
+            "missile_fire"
+        },
+        vec![Value::Object(object), name],
+    );
+    Ok(Value::Object(object))
+}
+
+fn query_facts(world: &mut World, args: &[Value]) -> Result<weapon_iw4::WeaponCombatFacts, String> {
+    let name = string(args, 0)?;
+    let frame = FrameWorld::from_world(world);
+    let weapon = frame
+        .weapon_index_by_script_name(&name)
+        .ok_or("unknown weapon")?;
+    frame
+        .combat_facts_for(weapon)
+        .ok_or_else(|| "weapon combat facts are unavailable".into())
+}
+
 pub(crate) fn register(registry: &mut NativeRegistry) {
+    registry.register(Function, "weaponisauto", |world, _, args| {
+        let facts = query_facts(world, args)?;
+        Ok(Value::Int(i32::from(
+            facts.weap_type == 0 && facts.fire_type == 0,
+        )))
+    });
+    registry.register(Function, "weaponissemiauto", |world, _, args| {
+        let facts = query_facts(world, args)?;
+        Ok(Value::Int(i32::from(
+            facts.weap_type == 0 && matches!(facts.fire_type, 1 | 5),
+        )))
+    });
+    registry.register(Function, "weaponburstcount", |world, _, args| {
+        let facts = query_facts(world, args)?;
+        Ok(Value::Int(match facts.fire_type {
+            2..=4 => facts.fire_type,
+            _ => 0,
+        }))
+    });
+    registry.register(Function, "weaponisboltaction", |world, _, args| {
+        Ok(Value::Int(i32::from(query_facts(world, args)?.bolt_action)))
+    });
+    registry.register(Function, "getweaponclipmodel", |world, _, args| {
+        let name = string(args, 0)?;
+        let frame = FrameWorld::from_world(world);
+        let model = match frame.weapon_index_by_script_name(&name) {
+            Some(weapon) => frame.weapon_clip_model(weapon),
+            None => {
+                if !name.is_empty() && !name.eq_ignore_ascii_case("none") {
+                    diag::warn!(Sim, "GetWeaponClipModel: unknown weapon {name}");
+                }
+                ""
+            }
+        };
+        Ok(Value::string(model))
+    });
     registry.register(Function, "getmissileowner", |world, _, args| {
         if args.len() != 1 {
             return Err("GetMissileOwner requires one missile argument".into());
@@ -136,6 +257,23 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
             .missile_owner
             .filter(|owner| runtime.players.values().any(|slot| slot.object == *owner));
         Ok(owner.map_or(Value::Undefined, Value::Object))
+    });
+    registry.register(Method, "setstablemissile", |world, receiver, args| {
+        let object = super::natives::engine::entity_id(world, receiver)?;
+        let enabled = super::args::int(args, 0)? != 0;
+        let mut runtime = world.resource_mut::<RoundScript>();
+        if !matches!(
+            runtime.entities[&object].kind,
+            EntityKind::Actor | EntityKind::Vehicle | EntityKind::Player
+        ) {
+            return Err("Type should be a sentient or a vehicle".into());
+        }
+        runtime.entities.get_mut(&object).unwrap().stable_missiles = enabled;
+        perf::instant!("gsc_missile_stability", "iw4l.sim", |ctx| {
+            ctx.arg("entity", runtime.entities[&object].number as i64);
+            ctx.arg("enabled", i64::from(enabled));
+        });
+        Ok(Value::Undefined)
     });
     registry.register(Method, "predictgrenade", |world, receiver, _| {
         let (_, id, number) = missile_of(world, receiver)?;
@@ -157,13 +295,9 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
                 .player_client_of(value)
                 .map(ClientId)
                 .ok_or("MagicBullet owner is not a player")?,
-            None => campaign::owner(world).ok_or("MagicBullet needs an owning player")?,
+            None => return Err("MagicBullet needs an owning player".into()),
         };
-        let missile = launch(world, owner, weapon, start, end)?;
-        if args.get(3).is_none() {
-            campaign::mark_ownerless(world, &missile);
-        }
-        Ok(missile)
+        launch(world, owner, weapon, start, end)
     });
     registry.register(Method, "detonate", |world, receiver, _| {
         let (_, id, number) = missile_of(world, receiver)?;
@@ -234,16 +368,13 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
 }
 
 pub(crate) fn sync_engine_events(world: &mut World) {
-    let request = world.resource::<crate::step::StepRequest>();
-    if !request.reason.advances_authority_world() {
-        return;
-    }
     let notes = std::mem::take(&mut FrameWorld::from_world(world).weapon_notes);
     let runtime = world.resource::<RoundScript>();
     if runtime.program.is_none() || runtime.fault.is_some() || !runtime.started {
         return;
     }
     notify_weapon_changes(world);
+    super::model_state::player_models::sync(world);
     for note in &notes {
         let (owner, notify, args) = match *note {
             WeaponNote::Pullback { owner, weapon } => {
@@ -267,7 +398,6 @@ pub(crate) fn sync_engine_events(world: &mut World) {
     super::triggers::dispatch_grenade_touches(world);
     super::guidance::advance(world);
     super::turrets::advance(world);
-    campaign::projectile_impacts(world, &notes);
     settle_projectiles(world, &notes);
     settle_items(world);
     super::vehicles::advance(world);
@@ -313,12 +443,7 @@ fn notify_weapon_changes(world: &mut World) {
 }
 
 pub(crate) fn publish_projectile_launches(world: &mut World) {
-    if world
-        .resource::<crate::step::StepRequest>()
-        .reason
-        .advances_authority_world()
-        && world.resource::<RoundScript>().started
-    {
+    if world.resource::<RoundScript>().started {
         adopt_fired(world);
     }
 }
@@ -339,10 +464,11 @@ fn adopt_fired(world: &mut World) {
         .filter(|p| adopted.insert(p.id))
         .collect();
     for projectile in fresh {
-        let player = super::players::player_object(world, projectile.owner.0);
-        if player == Value::Undefined {
-            continue;
-        }
+        let player = super::entity_damage::attacker_value(
+            world,
+            projectile.owner.client(),
+            projectile.owner.entity(),
+        );
         let weap_type = FrameWorld::from_world(world)
             .equipment_facts_for(projectile.weapon)
             .map_or(-1, |facts| facts.weap_type);
@@ -358,14 +484,19 @@ fn adopt_fired(world: &mut World) {
                 continue;
             }
         };
-        let weapon = super::players::event_weapon(world, projectile.owner.0, projectile.weapon);
-        super::players::note_insertion_throw(
-            world,
-            projectile.owner.0,
-            weapon,
-            projectile.weapon,
-            object,
-        );
+        let weapon = if let Some(client) = projectile.owner.client() {
+            let weapon = super::players::event_weapon(world, client.0, projectile.weapon);
+            super::players::note_insertion_throw(
+                world,
+                client.0,
+                weapon,
+                projectile.weapon,
+                object,
+            );
+            weapon
+        } else {
+            projectile.weapon
+        };
         let name = weapon_name(world, weapon);
         let model = format!("{}{}", crate::WEAPON_MODEL_PREFIX, projectile.weapon);
         let native = weapon_name(world, projectile.weapon);
@@ -375,7 +506,9 @@ fn adopt_fired(world: &mut World) {
             runtime.set_object_field(object, "weaponname", name.clone());
             runtime.set_object_field(object, "weaponmodel", Value::string(&model));
         }
-        raise(world, player, notify, vec![Value::Object(object), name]);
+        if player != Value::Undefined {
+            raise(world, player, notify, vec![Value::Object(object), name]);
+        }
     }
 }
 
@@ -392,7 +525,7 @@ fn settle_items(world: &mut World) {
             })
             .collect()
     };
-    let pickups = FrameWorld::from_world(world).item_pickups_mut().clone();
+    let pickups = FrameWorld::from_world(world).unpublished_pickups();
     for pickup in pickups {
         let Some((object, _, classname)) = items
             .iter()
@@ -418,6 +551,7 @@ fn settle_items(world: &mut World) {
             raise(world, receiver.clone(), "trigger", vec![player, swapped]);
         }
     }
+    FrameWorld::from_world(world).mark_pickups_raised();
     // Retire only after every pickup is raised: a death between two triggers on one
     // item ends the script thread still waiting on it.
     let retired = world.resource_mut::<RoundScript>().take_retired_items();
@@ -459,7 +593,7 @@ fn settle_projectiles(world: &mut World, notes: &[WeaponNote]) {
             continue;
         };
         let detonated = notes.iter().find_map(|note| match *note {
-            WeaponNote::Detonated { id: at, origin, .. } if at == id => Some(origin),
+            WeaponNote::Detonated { id: at, origin } if at == id => Some(origin),
             _ => None,
         });
         let stuck = notes
@@ -482,7 +616,20 @@ fn settle_projectiles(world: &mut World, notes: &[WeaponNote]) {
                     "angles",
                     Value::Vector(entity_iw4::evaluate_trajectory(&projectile.apos, now)),
                 );
-                drop(runtime);
+                let _ = runtime;
+                let facts = FrameWorld::from_world(world).equipment_facts_for(projectile.weapon);
+                if let Some(facts) = facts
+                    && (facts.weap_type != WEAPTYPE_GRENADE || facts.offhand_class != 0)
+                {
+                    super::ai_events::missile(
+                        world,
+                        object,
+                        &projectile,
+                        now,
+                        facts.weap_type == WEAPTYPE_GRENADE,
+                    );
+                }
+
                 if stuck {
                     raise(world, receiver, "missile_stuck", vec![Value::Undefined]);
                 }
@@ -499,7 +646,7 @@ fn settle_projectiles(world: &mut World, notes: &[WeaponNote]) {
                 if let Some(presence) = entity.presence.take() {
                     runtime.retired_presence.push((presence, true));
                 }
-                drop(runtime);
+
                 if let Some(origin) = detonated {
                     raise(
                         world,
@@ -539,3 +686,4 @@ fn settle_projectiles(world: &mut World, notes: &[WeaponNote]) {
         }
     }
 }
+pub(crate) mod items;

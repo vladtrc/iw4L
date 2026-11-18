@@ -1,20 +1,12 @@
 use super::*;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum AppearanceRefusalReason {
-    InvalidName,
-    CatalogMiss,
-    TempFieldNotAliasable,
-    Absent,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AppearanceModelStatus {
     NativeReady,
     BaseByPolicy,
     DeclaredUnavailable {
         source: String,
-        reason: AppearanceRefusalReason,
+        reason: &'static str,
     },
 }
 
@@ -31,10 +23,12 @@ fn model_status<S: asset_core::IndexSpace>(
                 AppearanceModelStatus::NativeReady
             };
         }
-        AssetEdge::Absent => AppearanceRefusalReason::Absent,
-        AssetEdge::Unresolved(AssetEdgeReason::CatalogMiss) => AppearanceRefusalReason::CatalogMiss,
+        AssetEdge::Absent => "appearance model absent",
+        AssetEdge::Unresolved(AssetEdgeReason::CatalogMiss) => {
+            "appearance model absent from catalog"
+        }
         AssetEdge::Unresolved(AssetEdgeReason::TempFieldNotAliasable) => {
-            AppearanceRefusalReason::TempFieldNotAliasable
+            "appearance model reference cannot be aliased"
         }
     };
     AppearanceModelStatus::DeclaredUnavailable {
@@ -56,7 +50,7 @@ fn resolve_model<S: asset_core::IndexSpace>(
             AssetEdge::Absent,
             AppearanceModelStatus::DeclaredUnavailable {
                 source: choice.name.clone(),
-                reason: AppearanceRefusalReason::InvalidName,
+                reason: "invalid appearance model name",
             },
         );
     }
@@ -109,8 +103,12 @@ impl PreparedWeaponAppearance {
             },
         }];
         let optional = |value: &str| (!value.is_empty()).then(|| value.to_owned());
-        match row.namespace {
-            crate::AssetNamespace::Iw4 | crate::AssetNamespace::Iw5 => {
+        match crate::weapon_policy(row.namespace)
+            .expect("weapon appearance owner required")
+            .runtime
+            .appearance
+        {
+            crate::WeaponAppearanceKind::Models => {
                 appearances.extend(
                     row.camo_models
                         .choices
@@ -148,7 +146,7 @@ impl PreparedWeaponAppearance {
                         }),
                 );
             }
-            crate::AssetNamespace::T5 | crate::AssetNamespace::T6 => {
+            crate::WeaponAppearanceKind::Materials => {
                 appearances.extend(
                     row.material_camos
                         .iter()

@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 use frame::FxSoundPublished;
-use fx::{FxGapCause, FxMsec, set_presentation_clock};
+use fx::{FxMsec, set_presentation_clock};
 use net::{
     ClientSet, FrameClock, GameActive, LastAdoptedSnapshot, advance_cg_frame_clock,
     reconcile_prediction,
@@ -14,6 +14,9 @@ pub fn register_fx_orchestration(app: &mut App) {
     app.add_systems(
         Update,
         (
+            report_particle_resolution
+                .in_set(frame::InMatch)
+                .in_set(ClientSet::Effects),
             latch_cgame_active
                 .in_set(frame::InMatch)
                 .in_set(ClientSet::Reconcile)
@@ -26,7 +29,7 @@ pub fn register_fx_orchestration(app: &mut App) {
         ),
     )
     .add_systems(
-        Update,
+        PreUpdate,
         clear_presented_vehicle_fx
             .in_set(frame::InMatch)
             .in_set(ClientSet::Receive),
@@ -96,9 +99,11 @@ fn play_pending_fx_sounds(
             .map(|elem| elem.sound_in_bank(req.random_seed, &bank.0))
         {
             None | Some(asset_game::FxBankSound::Gap) => {
-                host.0.gaps.raise(FxGapCause::ElemSoundSpawnSkipped {
-                    def_index: req.def_index,
-                });
+                diag::warn_once!(
+                    World,
+                    "elem {def_index} is Sound and its Bound alias could not play",
+                    def_index = req.def_index
+                );
             }
             Some(asset_game::FxBankSound::Silent) => {}
             Some(asset_game::FxBankSound::Play { namespace, alias }) => {
@@ -117,4 +122,23 @@ fn play_pending_fx_sounds(
 
 fn clear_presented_vehicle_fx(mut presented: ResMut<PresentedVehicleFx>) {
     presented.by_id.clear();
+}
+
+fn report_particle_resolution(
+    snapshot: Option<Res<LastAdoptedSnapshot>>,
+    mut previous: Local<Option<bool>>,
+) {
+    let requested = snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.snap.as_deref())
+        .is_some_and(|snapshot| snapshot.meta.objectives.half_res_particles);
+    if *previous != Some(requested) {
+        *previous = Some(requested);
+        if requested {
+            diag::warn!(
+                World,
+                "particle resolution: half-resolution requested; current renderer uses full scene resolution"
+            );
+        }
+    }
 }

@@ -479,6 +479,8 @@ pub struct GfxLightGridGeometry {
     pub entry_count: usize,
     pub colors: Option<Ptr>,
     pub color_count: usize,
+    pub hero_lights: Option<Ptr>,
+    pub hero_light_count: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -612,12 +614,6 @@ pub struct FxWorldGeometry {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct PathDataGeometry {
-    pub nodes: Option<Ptr>,
-    pub node_count: usize,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct GlassDataGeometry {
     pub data: Option<Ptr>,
     pub piece_count: usize,
@@ -640,6 +636,14 @@ pub struct MapEntsGeometry {
     pub entity_chars: usize,
     pub stages: Option<Ptr>,
     pub stage_count: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PathDataGeometry {
+    pub nodes: Option<Ptr>,
+    pub node_count: usize,
+    pub visibility: Option<Ptr>,
+    pub visibility_bytes: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -708,6 +712,21 @@ pub struct PhysPresetGeometry {
     pub snd_alias_prefix: Option<Ptr>,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct VehicleGeometry {
+    pub header: Ptr,
+    pub name: Option<Ptr>,
+    pub turret_weapon: Option<Ptr>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PhysCollmapGeometry {
+    pub bounds: ([f32; 3], [f32; 3]),
+    pub name: Option<Ptr>,
+    pub geoms: Option<Ptr>,
+    pub count: usize,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct XModelGeometry {
     pub name: Option<Ptr>,
@@ -773,6 +792,7 @@ pub struct XModelGeometry {
     pub bounds_half: Option<[f32; 3]>,
 
     pub phys_preset: Option<Ptr>,
+    pub phys_collmap: Option<PhysCollmapGeometry>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -828,15 +848,6 @@ pub struct XAnimPartsGeometry {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct XAnimDeltaQuatGeometry {
-    pub size: u16,
-    pub constant: Option<Ptr>,
-    pub frames: Option<Ptr>,
-    pub indices: Option<Ptr>,
-    pub indices_are_bytes: bool,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct XAnimDeltaTransGeometry {
     pub size: u16,
     pub small: u8,
@@ -844,6 +855,15 @@ pub struct XAnimDeltaTransGeometry {
     pub constant: Option<Ptr>,
 
     pub mins_step: Option<Ptr>,
+    pub frames: Option<Ptr>,
+    pub indices: Option<Ptr>,
+    pub indices_are_bytes: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct XAnimDeltaQuatGeometry {
+    pub size: u16,
+    pub constant: Option<Ptr>,
     pub frames: Option<Ptr>,
     pub indices: Option<Ptr>,
     pub indices_are_bytes: bool,
@@ -935,6 +955,7 @@ pub struct WeaponIdleCapture {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct WeaponGeometry {
+    pub item_ammo: Option<[i32; 5]>,
     pub name: Option<Ptr>,
     pub ai_vs_ai_knots: Option<(Ptr, usize)>,
     pub ai_vs_player_knots: Option<(Ptr, usize)>,
@@ -952,6 +973,12 @@ pub struct WeaponGeometry {
     pub gun_xmodel_names: [Option<Ptr>; 16],
 
     pub hand_xmodel_name: Option<Ptr>,
+
+    pub clip_model_name: Option<Ptr>,
+
+    pub knife_model_name: Option<Ptr>,
+
+    pub world_knife_model_name: Option<Ptr>,
 
     pub world_model_name: Option<Ptr>,
 
@@ -1318,6 +1345,9 @@ pub struct WeaponGeometry {
     pub damage_cone_angle: f32,
 
     pub missile_guidance: i32,
+    pub missile_drift_interval_s: f32,
+    pub missile_drift_rate_deg_s: f32,
+    pub missile_drift_start_distance: i32,
     pub ignition_delay_ms: i32,
     pub require_lock_to_fire: bool,
     pub stickiness: i32,
@@ -1440,15 +1470,20 @@ pub struct ZoneStream<'a> {
     gfx_world: Option<GfxWorldGeometry>,
     fx_world: Option<FxWorldGeometry>,
     glass_data: Option<GlassDataGeometry>,
-    path_data: Option<PathDataGeometry>,
     clip_map: Option<ClipMapGeometry>,
+    path_data: Option<PathDataGeometry>,
     map_ents: Option<MapEntsGeometry>,
     xmodel: Option<XModelGeometry>,
     phys_preset: Option<PhysPresetGeometry>,
+    phys_collmap: Option<PhysCollmapGeometry>,
     weapon: Option<WeaponGeometry>,
-    vehicle: Option<(Option<Ptr>, Option<Ptr>)>,
+    vehicle: Option<VehicleGeometry>,
     vehicle_compass: ([[u8; 128]; 2], [i32; 2]),
+    vehicle_engine: ([Option<Ptr>; 10], [i32; 3], f32),
     vehicle_accel: f32,
+    vehicle_kind: u32,
+    vehicle_physics: bool,
+    vehicle_suspension: [f32; 2],
     latest_material: Option<MaterialGeometry>,
     latest_image: Option<GfxImageGeometry>,
     latest_technique_set: Option<TechniqueSetGeometry>,
@@ -1547,15 +1582,20 @@ impl<'a> ZoneStream<'a> {
             gfx_world: None,
             fx_world: None,
             glass_data: None,
-            path_data: None,
             clip_map: None,
+            path_data: None,
             map_ents: None,
             xmodel: None,
             phys_preset: None,
+            phys_collmap: None,
             weapon: None,
             vehicle: None,
             vehicle_compass: ([[0; 128]; 2], [0; 2]),
+            vehicle_engine: ([None; 10], [0; 3], 0.0),
             vehicle_accel: 0.0,
+            vehicle_kind: 0,
+            vehicle_physics: false,
+            vehicle_suspension: [0.0; 2],
             latest_material: None,
             latest_image: None,
             latest_technique_set: None,
@@ -2030,10 +2070,7 @@ impl<'a> ZoneStream<'a> {
     }
 
     pub fn watermark(&self, block: u8) -> usize {
-        self.offsets
-            .get(block as usize)
-            .copied()
-            .unwrap_or_default()
+        self.offsets.get(block as usize).copied().unwrap_or(0)
     }
 
     pub fn tag_alloc(&mut self, tag: u32, align: usize, bytes: usize) {
@@ -2143,6 +2180,14 @@ impl<'a> ZoneStream<'a> {
         self.phys_preset
     }
 
+    pub fn record_phys_collmap(&mut self, geometry: PhysCollmapGeometry) {
+        self.phys_collmap = Some(geometry);
+    }
+
+    pub fn phys_collmap(&self) -> Option<PhysCollmapGeometry> {
+        self.phys_collmap
+    }
+
     pub fn record_weapon(&mut self, geometry: WeaponGeometry) {
         self.weapon = Some(geometry);
     }
@@ -2151,16 +2196,47 @@ impl<'a> ZoneStream<'a> {
         self.weapon
     }
 
-    pub(crate) fn record_vehicle(&mut self, name: Option<Ptr>, turret_weapon: Option<Ptr>) {
-        self.vehicle = Some((name, turret_weapon));
+    pub(crate) fn record_vehicle(&mut self, geometry: VehicleGeometry) {
+        self.vehicle = Some(geometry);
     }
 
     pub(crate) fn record_vehicle_compass(&mut self, icons: [[u8; 128]; 2], size: [i32; 2]) {
         self.vehicle_compass = (icons, size);
     }
 
-    pub(crate) fn record_vehicle_accel(&mut self, accel: f32) {
+    pub(crate) fn record_vehicle_motion(
+        &mut self,
+        accel: f32,
+        kind: u32,
+        physics: bool,
+        suspension: [f32; 2],
+    ) {
         self.vehicle_accel = accel;
+        self.vehicle_kind = kind;
+        self.vehicle_physics = physics;
+        self.vehicle_suspension = suspension;
+    }
+
+    pub fn vehicle_wheels(&self) -> (u32, bool, [f32; 2]) {
+        (
+            self.vehicle_kind,
+            self.vehicle_physics,
+            self.vehicle_suspension,
+        )
+    }
+
+    pub(crate) fn record_vehicle_engine(
+        &mut self,
+        names: [Option<Ptr>; 10],
+        durations: [i32; 3],
+        blend_speed: f32,
+    ) {
+        self.vehicle_engine = (names, durations, blend_speed);
+    }
+
+    /// Idle low/high, engine low/high, startup, shutdown, idle, sustain, ramp-up/down.
+    pub fn vehicle_engine(&self) -> ([Option<Ptr>; 10], [i32; 3], f32) {
+        self.vehicle_engine
     }
 
     pub fn vehicle_accel(&self) -> f32 {
@@ -2175,7 +2251,7 @@ impl<'a> ZoneStream<'a> {
         (icons, self.vehicle_compass.1)
     }
 
-    pub fn vehicle(&self) -> Option<(Option<Ptr>, Option<Ptr>)> {
+    pub fn vehicle(&self) -> Option<VehicleGeometry> {
         self.vehicle
     }
 

@@ -6,6 +6,7 @@ license.workspace = true
 description = "Scene occupancy storage and plugin. No frontend tess, anim, FX, or GPU."
 
 [dependencies]
+asset_core.workspace = true
 frame.workspace = true
 asset_game.workspace = true
 asset_material.workspace = true

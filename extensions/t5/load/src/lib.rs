@@ -1,0 +1,10 @@
+pub const ID: asset_core::FamilyId = asset_core::FamilyId::new("t5");
+use ext_t5_audio::sound;
+use ext_t5_gameplay::presentation;
+use ext_t5_gameplay::weapons;
+use ext_t5_material::material;
+use ext_t5_world::anim;
+use ext_t5_world::model;
+use ext_t5_world::world;
+use ext_t5_zone::zone;
+pub mod lane;

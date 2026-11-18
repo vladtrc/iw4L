@@ -91,7 +91,7 @@ const CODE_TEXTURE_SHADOWMAP_SUN: u32 = 6;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PassProgramAbi {
-    pub vertex_family: crate::VertexLayoutFamily,
+    pub vertex_layout: crate::VertexLayout,
     pub vertex_type: u8,
 
     pub attributes: Vec<VertexAttribute>,
@@ -226,9 +226,9 @@ pub enum PassAbiRefusal {
         row_count: u8,
     },
 
-    DxbcProgram,
+    InvalidProgram,
 
-    DxbcVertexInputUnrouted {
+    VertexInputRegisterUnrouted {
         register: u32,
     },
 }
@@ -238,11 +238,7 @@ pub(crate) fn build_pass_abi(
     pixel: &Sm3ProgramIr,
     decl: &RuntimeVertexDecl,
     vertex_type: u8,
-    arguments: &[RuntimeArgumentBinding],
-    custom_sampler_flags: u8,
-    t5_custom_sampler_flags: u8,
-    hardware_shadow_compare: bool,
-    depth_to_colour: bool,
+    pass: &crate::RuntimePass,
 ) -> Result<PassProgramAbi, PassAbiRefusal> {
     let attributes = routed_attributes(decl, vertex_type)?;
     let vertex_inputs = bind_vertex_inputs(vertex, &attributes)?;
@@ -251,19 +247,19 @@ pub(crate) fn build_pass_abi(
 
     let (position, varyings) = link_varyings(&vertex_declarations, &pixel_declarations, pixel)?;
 
-    let vertex_constants = constant_bindings(vertex, RuntimeShaderStage::Vertex, arguments)?;
-    let pixel_constants = constant_bindings(pixel, RuntimeShaderStage::Pixel, arguments)?;
+    let vertex_constants = constant_bindings(vertex, RuntimeShaderStage::Vertex, &pass.arguments)?;
+    let pixel_constants = constant_bindings(pixel, RuntimeShaderStage::Pixel, &pass.arguments)?;
     let samplers = sampler_bindings(
         vertex,
         pixel,
-        arguments,
-        custom_sampler_flags,
-        t5_custom_sampler_flags,
-        hardware_shadow_compare,
+        &pass.arguments,
+        pass.custom_sampler_flags,
+        pass.t5_custom_sampler_flags,
+        pass.hardware_shadow_compare,
     )?;
 
     Ok(PassProgramAbi {
-        vertex_family: decl.family,
+        vertex_layout: decl.layout,
         vertex_type,
         attributes,
         vertex_inputs,
@@ -272,11 +268,11 @@ pub(crate) fn build_pass_abi(
         vertex_constants,
         pixel_constants,
         samplers,
-        depth_to_colour,
+        depth_to_colour: pass.depth_to_colour,
     })
 }
 
-pub(crate) fn routed_attributes(
+pub fn routed_attributes(
     decl: &RuntimeVertexDecl,
     vertex_type: u8,
 ) -> Result<Vec<VertexAttribute>, PassAbiRefusal> {
@@ -289,14 +285,14 @@ pub(crate) fn routed_attributes(
     let mut seen = BTreeSet::new();
     for (location, pair) in decl.routed().iter().enumerate() {
         let [source, dest] = *pair;
-        if usize::from(source) >= decl.family.source_count() {
+        if usize::from(source) >= decl.layout.source_count() {
             return Err(PassAbiRefusal::RoutingSourceUnknown { source });
         }
         let (usage, usage_index) = decl
-            .family
+            .layout
             .destination_usage(dest)
             .ok_or(PassAbiRefusal::RoutingDestinationUnknown { dest })?;
-        let layout = decl.family.source_layout(vertex_type, source).ok_or(
+        let layout = decl.layout.source_layout(vertex_type, source).ok_or(
             PassAbiRefusal::VertexTypeMissingSource {
                 vertex_type,
                 source,
@@ -480,10 +476,10 @@ fn read_registers(program: &Sm3ProgramIr, file: Sm3RegisterFile) -> BTreeSet<Sm3
 fn program_defined_constants(program: &Sm3ProgramIr) -> BTreeSet<u16> {
     let mut defined = BTreeSet::new();
     for instruction in &program.instructions {
-        if let Sm3InstructionBody::FloatDefinition { destination, .. } = &instruction.body {
-            if destination.register.file == Sm3RegisterFile::FloatConstant {
-                defined.insert(destination.register.index);
-            }
+        if let Sm3InstructionBody::FloatDefinition { destination, .. } = &instruction.body
+            && destination.register.file == Sm3RegisterFile::FloatConstant
+        {
+            defined.insert(destination.register.index);
         }
     }
     defined
@@ -724,10 +720,10 @@ fn used_samplers(program: &Sm3ProgramIr) -> BTreeSet<u16> {
                     }
                 }
             }
-            Sm3InstructionBody::Declaration { destination, .. } => {
-                if destination.register.file == Sm3RegisterFile::Sampler {
-                    samplers.insert(destination.register.index);
-                }
+            Sm3InstructionBody::Declaration { destination, .. }
+                if destination.register.file == Sm3RegisterFile::Sampler =>
+            {
+                samplers.insert(destination.register.index);
             }
             _ => {}
         }

@@ -1,24 +1,10 @@
+use super::compiler::MaterialCompiler;
 use super::program_hash;
 use crate::{MaterialDefinitions, OwnedTechnique};
-use asset_core::AssetNamespace;
 use render_material::{
-    PassColorSpace, RuntimeArgumentBinding, RuntimePass, RuntimeShaderPair, RuntimeShaderProgramId,
+    RuntimeArgumentBinding, RuntimePass, RuntimeShaderPair, RuntimeShaderProgramId,
     RuntimeShaderStage, RuntimeTechnique, RuntimeVertexDecl, sort_pass_args,
 };
-
-pub(super) trait MaterialCompiler {
-    fn draw_rules(
-        &self,
-        material: &crate::AuthoredMaterial,
-        unlit: bool,
-    ) -> render_material::MaterialDrawRules;
-    fn compile_state(&self, words: [u32; 2]) -> render_material::CompiledPassState;
-    fn color_space(&self, slot: u8) -> PassColorSpace;
-    fn hardware_shadow_compare(&self) -> bool;
-    fn depth_to_colour(&self, _slot: u8) -> bool {
-        false
-    }
-}
 
 pub(super) fn compile_technique(
     compiler: &dyn MaterialCompiler,
@@ -54,7 +40,7 @@ pub(super) fn compile_technique(
                 .and_then(|index| source.vertex_decls.get(index))
             {
                 let record = RuntimeVertexDecl {
-                    family: authored.family,
+                    layout: authored.layout,
                     name: authored.name.to_string(),
                     stream_count: authored.stream_count,
                     has_optional_source: authored.has_optional_source,
@@ -174,19 +160,5 @@ pub(super) fn compile_technique(
         source_selection: technique.source_selection,
         flags: technique.flags,
         passes,
-    }
-}
-
-mod iw4;
-mod iw5;
-mod t5;
-mod t6;
-
-pub(super) fn compiler_for(namespace: AssetNamespace) -> &'static dyn MaterialCompiler {
-    match namespace {
-        AssetNamespace::Iw4 => &iw4::Iw4Compiler,
-        AssetNamespace::Iw5 => &iw5::Iw5Compiler,
-        AssetNamespace::T5 => &t5::T5Compiler,
-        AssetNamespace::T6 => &t6::T6Compiler,
     }
 }

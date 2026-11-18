@@ -58,6 +58,7 @@ pub struct DObj {
     pub bones: Vec<Bone>,
     pub models: Vec<ModelSlot>,
     pub duplicates: Vec<(usize, usize)>,
+    pub(crate) retarget: Option<Box<crate::retarget::PoseRetarget>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -106,7 +107,7 @@ pub fn bone_orientation(
     })
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DObjError {
     Model {
         model: String,
@@ -140,6 +141,8 @@ impl core::fmt::Display for DObjError {
     }
 }
 
+impl std::error::Error for DObjError {}
+
 #[derive(Debug, Clone)]
 pub struct ModelPoseSrc {
     pub name: String,
@@ -158,6 +161,10 @@ pub struct ModelPoseSrc {
     pub base_mat: Vec<(Quat, Vec3)>,
 
     pub root_rest: Option<(Quat, Vec3)>,
+
+    /// Rig on which this model's animation clips were authored. Mesh and hit
+    /// volume bone indices remain in the model's native skeleton.
+    pub animation_reference: Option<std::sync::Arc<ModelPoseSrc>>,
 }
 
 impl DObj {
@@ -177,6 +184,7 @@ impl DObj {
 
             let attach_to = match attach {
                 None => None,
+                Some(a) if a.tag.is_empty() => None,
                 Some(a) => {
                     let slot: &ModelSlot =
                         slots.get(a.parent_model).ok_or_else(|| DObjError::Model {
@@ -254,7 +262,7 @@ impl DObj {
                 };
 
                 bones.push(Bone {
-                    name: model.bone_names.get(bone).cloned().unwrap_or_default(),
+                    name: model.bone_names.get(bone).cloned().unwrap_or(String::new()),
                     model: index,
                     parent,
                     bind_rotation,
@@ -273,24 +281,53 @@ impl DObj {
         }
 
         let mut duplicates = Vec::new();
-        let mut first_by_name = std::collections::HashMap::<&str, usize>::new();
-        for (dest, bone) in bones.iter().enumerate() {
-            if bone.name.is_empty() {
+        for (index, (_, attach)) in models.iter().enumerate().skip(1) {
+            if attach.as_ref().is_some_and(|a| !a.tag.is_empty()) {
                 continue;
             }
-            let source = *first_by_name.entry(&bone.name).or_insert(dest);
-            // Models are appended in contiguous blocks. The first occurrence
-            // is therefore also the first occurrence in any earlier model.
-            if bones[source].model != bone.model && bone.parent != Some(source) {
-                duplicates.push((dest, source));
+            let slot = &slots[index];
+            for dest in slot.base..slot.base + slot.bone_count {
+                let name = &bones[dest].name;
+                if name.is_empty() {
+                    continue;
+                }
+                let source = slots[..index].iter().rev().find_map(|earlier| {
+                    bones[earlier.base..earlier.base + earlier.bone_count]
+                        .iter()
+                        .position(|bone| bone.name == *name)
+                        .map(|bone| earlier.base + bone)
+                });
+                if let Some(source) = source {
+                    duplicates.push((dest, source));
+                }
             }
         }
 
-        Ok(DObj {
+        let mut dobj = DObj {
             bones,
             models: slots,
             duplicates,
-        })
+            retarget: None,
+        };
+        if models
+            .iter()
+            .any(|(model, _)| model.animation_reference.is_some())
+        {
+            let mut sources = Vec::with_capacity(models.len());
+            for (model, attach) in models {
+                let source = model.animation_reference.as_deref().unwrap_or(model);
+                if source.animation_reference.is_some() {
+                    return Err(DObjError::Model {
+                        model: model.name.clone(),
+                        detail: "nested animation references are unsupported".into(),
+                    });
+                }
+                sources.push((source, attach.clone()));
+            }
+            let source = DObj::build(&sources)?;
+            dobj.retarget = Some(Box::new(crate::retarget::PoseRetarget::new(source, &dobj)));
+        }
+        Ok(dobj)
     }
 
     pub fn bone_count(&self) -> usize {
@@ -299,6 +336,24 @@ impl DObj {
 
     pub fn find(&self, name: &str) -> Option<usize> {
         self.bones.iter().position(|b| b.name == name)
+    }
+
+    /// Select each physical bone instance, including duplicate names in an
+    /// attached model. A model filter applies to the owning model, not its parent.
+    pub fn matching_bones<'a>(
+        &'a self,
+        tag: &'a str,
+        model: Option<&'a str>,
+    ) -> impl Iterator<Item = usize> + 'a {
+        self.bones
+            .iter()
+            .enumerate()
+            .filter_map(move |(index, bone)| {
+                (bone.name.eq_ignore_ascii_case(tag)
+                    && model
+                        .is_none_or(|name| self.models[bone.model].name.eq_ignore_ascii_case(name)))
+                .then_some(index)
+            })
     }
 
     pub fn all_parts(&self) -> PartBits {
@@ -396,15 +451,17 @@ impl DObj {
         (locals, controlled)
     }
 
-    pub fn apply_duplicates(&self, locals: &mut [Local]) {
-        for &(dest, source) in &self.duplicates {
-            locals[dest] = locals[source];
-        }
-    }
-
     pub fn compose(&self, locals: &[Local], placement: Mat4) -> Vec<Mat4> {
         let mut world: Vec<Mat4> = Vec::with_capacity(self.bones.len());
+        let mut duplicates = self.duplicates.iter().peekable();
         for (index, bone) in self.bones.iter().enumerate() {
+            if let Some(&&(dest, source)) = duplicates.peek()
+                && dest == index
+            {
+                world.push(world[source]);
+                duplicates.next();
+                continue;
+            }
             let scale = if bone.no_scale {
                 1.0
             } else {
@@ -456,7 +513,6 @@ impl DObj {
     ) -> Vec<Mat4> {
         let mut locals = self.calc_anim(anims, requested);
         controller(self, requested, &mut locals);
-        self.apply_duplicates(&mut locals);
         self.compose(&locals, placement)
     }
 

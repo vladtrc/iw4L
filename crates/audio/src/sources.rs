@@ -1,13 +1,12 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use crate::render_core::AudioScope;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct SourceKey {
     pub scope: AudioScope,
-    pub epoch: u64,
     pub object: u64,
     pub slot: u32,
 }
@@ -19,17 +18,16 @@ pub(crate) enum SourceRenderGroup {
 
 pub(crate) struct SourceCueRequest {
     pub bank: Arc<asset_audio::SoundCatalog>,
-    pub namespace: asset_core::AssetNamespace,
+    pub namespace: asset_core::FamilyId,
     pub alias: String,
     pub emitter: Option<u32>,
     pub scope: AudioScope,
-    pub epoch: u64,
     pub group: Option<SourceRenderGroup>,
 }
 
 pub(crate) struct SourceCue {
     pub bank: Arc<asset_audio::SoundCatalog>,
-    pub namespace: asset_core::AssetNamespace,
+    pub namespace: asset_core::FamilyId,
     pub alias: String,
     pub emitter: Option<u32>,
     pub media: crate::clip_store::MediaService,
@@ -50,17 +48,81 @@ pub(crate) struct DesiredSource {
     pub audible: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct SourceId {
+    pub key: SourceKey,
+    pub generation: u64,
+}
+
+#[derive(Clone)]
+pub(crate) struct SourceValidity(Arc<AtomicBool>);
+
+impl SourceValidity {
+    fn new() -> Self {
+        Self(Arc::new(AtomicBool::new(true)))
+    }
+
+    fn cancel(&self) {
+        self.0.store(false, Ordering::Release);
+    }
+
+    pub fn cancelled(&self) -> bool {
+        !self.0.load(Ordering::Acquire)
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct PublishedSource {
+    pub id: SourceId,
+    pub desired: DesiredSource,
+    pub validity: SourceValidity,
+}
+
 pub(crate) struct SourceScene {
     pub revision: u64,
-    pub sources: Vec<DesiredSource>,
-    pub asserted: Vec<DesiredSource>,
+    pub sources: Vec<PublishedSource>,
+    pub asserted: Vec<PublishedSource>,
+}
+
+impl SourceScene {
+    pub fn current(&self, id: SourceId) -> Option<&DesiredSource> {
+        Self::find(&self.asserted, id)
+    }
+
+    pub fn executable(&self, id: SourceId) -> Option<&DesiredSource> {
+        Self::find(&self.sources, id)
+    }
+
+    fn find(sources: &[PublishedSource], id: SourceId) -> Option<&DesiredSource> {
+        sources
+            .binary_search_by_key(&id.key, |source| source.id.key)
+            .ok()
+            .map(|index| &sources[index])
+            .filter(|source| source.id == id && !source.validity.cancelled())
+            .map(|source| &source.desired)
+    }
+
+    pub fn retain_current(&mut self, cancelled: bool) {
+        self.sources
+            .retain(|source| !cancelled && !source.validity.cancelled());
+        self.asserted
+            .retain(|source| !cancelled && !source.validity.cancelled());
+    }
 }
 
 pub(crate) const SOURCE_HISTORY: usize = 4096;
 
 struct SourceVersion {
     version: u64,
-    active: Option<DesiredSource>,
+    active: Option<PublishedSource>,
+}
+
+impl SourceVersion {
+    fn cancel(&mut self) {
+        if let Some(source) = self.active.take() {
+            source.validity.cancel();
+        }
+    }
 }
 
 pub(crate) struct SourcePublisher {
@@ -79,14 +141,12 @@ impl SourcePublisher {
     pub fn reconcile(
         &mut self,
         mut sources: Vec<DesiredSource>,
-        epoch: u64,
         cancelled: bool,
     ) -> (SourceScene, u64) {
         self.revision = self
             .revision
             .checked_add(1)
             .expect("source revision exhausted");
-        self.retain_epoch(epoch);
         sources.sort_unstable_by_key(|source| (source.key, std::cmp::Reverse(source.version)));
         sources.dedup_by_key(|source| source.key);
         let mut desired = Vec::with_capacity(sources.len().min(crate::runtime::LOGICAL_INSTANCES));
@@ -100,7 +160,7 @@ impl SourcePublisher {
         }
         let mut rejected = 0u64;
         for mut source in sources {
-            if cancelled || (source.key.scope == AudioScope::Match && source.key.epoch != epoch) {
+            if cancelled {
                 rejected += 1;
                 continue;
             }
@@ -109,45 +169,64 @@ impl SourcePublisher {
                 rejected += 1;
                 continue;
             }
-            if let Some(current) = self.versions.get_mut(&source.key) {
+            let published = if let Some(current) = self.versions.get_mut(&source.key) {
                 if source.version <= current.version {
                     let Some(active) = &current.active else {
                         rejected += 1;
                         continue;
                     };
                     if source.version < current.version {
-                        source = active.clone();
+                        source = active.desired.clone();
                         rejected += 1;
                     } else {
-                        source.cue = active.cue.clone();
-                        source.start_frame = active.start_frame;
+                        source.cue = active.desired.cue.clone();
+                        source.start_frame = active.desired.start_frame;
+                    }
+                    let mut published = active.clone();
+                    published.desired = source;
+                    published
+                } else {
+                    current.cancel();
+                    PublishedSource {
+                        id: SourceId {
+                            key: source.key,
+                            generation: self.revision,
+                        },
+                        desired: source,
+                        validity: SourceValidity::new(),
                     }
                 }
-                current.version = source.version;
-                current.active = Some(source.clone());
             } else {
                 if self.versions.len() == SOURCE_HISTORY {
                     rejected += 1;
                     continue;
                 }
-                self.versions.insert(
-                    source.key,
-                    SourceVersion {
-                        version: source.version,
-                        active: Some(source.clone()),
+                PublishedSource {
+                    id: SourceId {
+                        key: source.key,
+                        generation: self.revision,
                     },
-                );
-            }
-            present.insert(source.key);
+                    desired: source,
+                    validity: SourceValidity::new(),
+                }
+            };
+            present.insert(published.id.key);
+            self.versions.insert(
+                published.id.key,
+                SourceVersion {
+                    version: published.desired.version,
+                    active: Some(published.clone()),
+                },
+            );
             if executable {
-                desired.push(source);
+                desired.push(published);
             } else {
                 rejected += 1;
             }
         }
         for (key, current) in &mut self.versions {
             if !present.contains(key) {
-                current.active = None;
+                current.cancel();
             }
         }
         let mut asserted: Vec<_> = self
@@ -155,7 +234,7 @@ impl SourcePublisher {
             .values()
             .filter_map(|current| current.active.clone())
             .collect();
-        asserted.sort_unstable_by_key(|source| source.key);
+        asserted.sort_unstable_by_key(|source| source.id.key);
         (
             SourceScene {
                 revision: self.revision,
@@ -166,20 +245,31 @@ impl SourcePublisher {
         )
     }
 
-    pub fn retain_epoch(&mut self, epoch: u64) {
-        self.versions
-            .retain(|key, _| key.scope != AudioScope::Match || key.epoch == epoch);
+    pub fn stop_source(&mut self, key: SourceKey) {
+        if let Some(mut current) = self.versions.remove(&key) {
+            current.cancel();
+        }
+    }
+
+    pub fn stop_scope(&mut self, scope: AudioScope) {
+        self.versions.retain(|key, current| {
+            if key.scope == scope {
+                current.cancel();
+                false
+            } else {
+                true
+            }
+        });
     }
 
     pub fn cancel(&mut self) {
         for current in self.versions.values_mut() {
-            current.active = None;
+            current.cancel();
         }
     }
 }
 
-pub(crate) struct SourceInbox {
-    pending: AtomicPtr<SourceScene>,
+pub(crate) struct SourceActivity {
     pub revision: AtomicU64,
     pub pending_layers: AtomicUsize,
     pub active: AtomicUsize,
@@ -188,44 +278,15 @@ pub(crate) struct SourceInbox {
     pub dropped: AtomicU64,
 }
 
-impl SourceInbox {
+impl SourceActivity {
     pub fn new() -> Self {
         Self {
-            pending: AtomicPtr::new(std::ptr::null_mut()),
             revision: AtomicU64::new(0),
             pending_layers: AtomicUsize::new(0),
             active: AtomicUsize::new(0),
             rendered: AtomicUsize::new(0),
             virtualized: AtomicUsize::new(0),
             dropped: AtomicU64::new(0),
-        }
-    }
-
-    pub fn publish(&self, scene: SourceScene) {
-        let pending = self
-            .pending
-            .swap(Box::into_raw(Box::new(scene)), Ordering::AcqRel);
-        if !pending.is_null() {
-            // The swap gives this publisher exclusive ownership of the old box.
-            drop(unsafe { Box::from_raw(pending) });
-        }
-    }
-
-    pub fn take(&self) -> Option<SourceScene> {
-        let pending = self.pending.swap(std::ptr::null_mut(), Ordering::AcqRel);
-        if pending.is_null() {
-            None
-        } else {
-            // No publisher can reclaim the box removed by this swap.
-            Some(*unsafe { Box::from_raw(pending) })
-        }
-    }
-}
-
-impl Drop for SourceInbox {
-    fn drop(&mut self) {
-        if let Some(scene) = self.take() {
-            drop(scene);
         }
     }
 }

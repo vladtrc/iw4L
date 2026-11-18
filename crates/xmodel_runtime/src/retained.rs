@@ -25,8 +25,10 @@ pub struct TagRotation {
 pub struct DObjPoseRequest {
     pub tree: Option<XAnimTreeRuntime>,
     pub tag_rotations: Vec<TagRotation>,
+    pub root_override: Option<RootBonePose>,
     pub requested_parts: Option<PartBits>,
     pub hide_part_bits: HidePartBits,
+    pub player_controller: Option<crate::PlayerControllerInput>,
 }
 
 impl DObjPoseRequest {
@@ -34,8 +36,10 @@ impl DObjPoseRequest {
         Self {
             tree: None,
             tag_rotations: Vec::new(),
+            root_override: None,
             requested_parts: None,
             hide_part_bits: HidePartBits::from_words([0; PartBits::WORDS]),
+            player_controller: None,
         }
     }
 
@@ -47,11 +51,18 @@ impl DObjPoseRequest {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RootBonePose {
+    pub rotation: [f32; 4],
+    pub translation: [f32; 3],
+}
+
 #[derive(Clone, Debug)]
 pub struct RetainedModelCapability {
     pub key: String,
     pub pose: ModelPoseSrc,
     pub bone_collision: Vec<Option<BoneCollision>>,
+    pub bone_part_classification: Vec<u8>,
 
     pub contents: Option<u32>,
 
@@ -60,6 +71,7 @@ pub struct RetainedModelCapability {
     pub coll_surfs: Vec<CollSurfCollision>,
 
     pub movement_brushes: Vec<ModelMovementBrush>,
+    pub physics_bounds: Option<([f32; 3], [f32; 3])>,
 
     pub bounds: Option<([f32; 3], [f32; 3])>,
 
@@ -101,7 +113,8 @@ pub struct CollisionBone {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MaterializeError {
-    DObj(String),
+    DObj(DObjError),
+    MissingCapability,
     AnimatedClipHasNoMatchingTrack,
     NonFiniteBoneTransform { bone: usize },
     BoneIndexOverflow { bone: usize },
@@ -110,13 +123,40 @@ pub enum MaterializeError {
 
 impl From<DObjError> for MaterializeError {
     fn from(value: DObjError) -> Self {
-        Self::DObj(value.to_string())
+        Self::DObj(value)
     }
 }
 
 impl From<XAnimTreeError> for MaterializeError {
     fn from(value: XAnimTreeError) -> Self {
         Self::XAnimTree(value)
+    }
+}
+
+impl core::fmt::Display for MaterializeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::DObj(error) => error.fmt(f),
+            Self::MissingCapability => write!(f, "retained model capability unavailable"),
+            Self::AnimatedClipHasNoMatchingTrack => {
+                write!(f, "animated clip has no matching track")
+            }
+            Self::NonFiniteBoneTransform { bone } => {
+                write!(f, "bone {bone} has a non-finite transform")
+            }
+            Self::BoneIndexOverflow { bone } => write!(f, "bone index {bone} exceeds u16"),
+            Self::XAnimTree(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for MaterializeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::DObj(error) => Some(error),
+            Self::XAnimTree(error) => Some(error),
+            _ => None,
+        }
     }
 }
 
@@ -245,6 +285,29 @@ pub fn collision_dobj_with_controller(
         return Ok(Vec::new());
     }
     let posed = pose_dobj_with_controller(dobj, request, world_from_model, controller)?;
+    // Unclassified parts inherit across the assembled hierarchy, including
+    // duplicate attachment bones. Classification exists even without an OBB.
+    let mut classes = vec![0u8; dobj.bones.len()];
+    for (slot, (model, _)) in dobj.models.iter().zip(models.iter()) {
+        for local in 0..slot.bone_count {
+            let index = slot.base + local;
+            let raw = model
+                .bone_part_classification
+                .get(local)
+                .copied()
+                .unwrap_or(0);
+            classes[index] = if raw == 0 {
+                let parent = dobj
+                    .duplicates
+                    .iter()
+                    .find_map(|&(dest, source)| (dest == index).then_some(source))
+                    .or(dobj.bones[index].parent);
+                parent.map_or(0, |parent| classes[parent])
+            } else {
+                raw
+            };
+        }
+    }
     let mut bones = Vec::new();
     for (slot, (model, _)) in dobj.models.iter().zip(models.iter()) {
         for local in 0..slot.bone_count {
@@ -277,7 +340,7 @@ pub fn collision_dobj_with_controller(
                 .map_err(|_| MaterializeError::BoneIndexOverflow { bone: bone_index })?;
             bones.push(CollisionBone {
                 bone,
-                part_classification: collision.part_classification,
+                part_classification: classes[bone_index],
                 center,
                 axes,
                 half_size,
@@ -436,6 +499,21 @@ pub fn pose_dobj_with_controller(
     world_from_model: Mat4,
     controller: impl FnOnce(&DObj, &PartBits, &mut [Local]),
 ) -> Result<Vec<Mat4>, MaterializeError> {
+    if let Some(retarget) = &dobj.retarget {
+        // Request masks address the native model. Translate them to the source
+        // rig before sampling; controllers and additive layers run there too.
+        let mut source_request = request.clone();
+        source_request.requested_parts = request
+            .requested_parts
+            .map(|parts| retarget.source_parts(&parts));
+        let source = pose_dobj_with_controller(
+            &retarget.source,
+            &source_request,
+            Mat4::IDENTITY,
+            controller,
+        )?;
+        return Ok(retarget.apply(dobj, &source, world_from_model));
+    }
     let requested = request.requested_parts.unwrap_or_else(|| dobj.all_parts());
     let mut locals = if let Some(tree) = &request.tree {
         let (leaves, layers) = tree.active_pose()?;
@@ -454,7 +532,17 @@ pub fn pose_dobj_with_controller(
             .to_array();
         }
     }
+    if requested.get(0)
+        && let Some(root) = request.root_override
+        && let Some(local) = locals.first_mut()
+    {
+        local.rotation = root.rotation;
+        local.translation = root.translation;
+        local.control = false;
+    }
+    if let Some(input) = request.player_controller {
+        crate::apply_player_controller(dobj, &mut locals, input);
+    }
     controller(dobj, &requested, &mut locals);
-    dobj.apply_duplicates(&mut locals);
     Ok(dobj.compose(&locals, world_from_model))
 }

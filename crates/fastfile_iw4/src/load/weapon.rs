@@ -9,6 +9,21 @@ use crate::zone::{
     WeaponSwayCapture, XFILE_BLOCK_VIRTUAL, ZonePtr, ZoneStream,
 };
 
+type LoadWeaponDefOutput = Result<(
+    Ptr,
+    [Option<Ptr>; 16],
+    Option<Ptr>,
+    [Option<Ptr>; 16],
+    Option<Ptr>,
+    Option<Ptr>,
+    Option<Ptr>, // clip model name
+    Option<Ptr>, // knife model name
+    Option<Ptr>, // world knife model name
+    WeaponSoundNames,
+    Option<Ptr>,
+    Option<Ptr>,
+)>;
+
 fn authored_material_slot(
     s: &ZoneStream<'_>,
     body: Option<Ptr>,
@@ -38,6 +53,9 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
         world_model_names,
         projectile_model_name,
         rocket_model_name,
+        clip_model_name,
+        knife_model_name,
+        world_knife_model_name,
         sound_names,
         sz_xanims_right,
         sz_xanims_left,
@@ -51,14 +69,29 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
                 [None; 16],
                 None,
                 None,
+                None,
+                None,
+                None,
                 WeaponSoundNames::default(),
                 None,
                 None,
             )
         }
         _ if s.begin_body(p.at(s.layout(4, 8)))? => {
-            let (body, gun0, hand0, world0, proj0, rocket0, sounds, anim_r, anim_l) =
-                load_weapon_def(s, links, ai_vs_ai_knots, ai_vs_player_knots)?;
+            let (
+                body,
+                gun0,
+                hand0,
+                world0,
+                proj0,
+                rocket0,
+                clip0,
+                knife0,
+                world_knife0,
+                sounds,
+                anim_r,
+                anim_l,
+            ) = load_weapon_def(s, links, ai_vs_ai_knots, ai_vs_player_knots)?;
             (
                 Some(body),
                 gun0,
@@ -66,6 +99,9 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
                 world0,
                 proj0,
                 rocket0,
+                clip0,
+                knife0,
+                world_knife0,
                 sounds,
                 anim_r,
                 anim_l,
@@ -76,6 +112,9 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
             [None; 16],
             None,
             [None; 16],
+            None,
+            None,
+            None,
             None,
             None,
             WeaponSoundNames::default(),
@@ -277,6 +316,9 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
             projectile_speed_forward: s.i32_at(body, s.layout(0x40c, 1384))?,
             projectile_activate_dist: s.i32_at(body, s.layout(0x410, 1388))?,
             missile_guidance: s.i32_at(body, s.layout(0x460, 1516))?,
+            missile_drift_interval_s: s.f32_at(body, s.layout(0x5a8, 1888))?,
+            missile_drift_rate_deg_s: s.f32_at(body, s.layout(0x5ac, 1892))?,
+            missile_drift_start_distance: s.i32_at(body, s.layout(0x5b0, 1896))?,
             ignition_delay_ms: s.i32_at(body, s.layout(0x468, 1524))?,
             require_lock_to_fire: s.u8_at(body, s.layout(0x656, 2142))? != 0,
             stickiness: s.i32_at(body, s.layout(0x438, 1456))?,
@@ -357,7 +399,7 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
         alternate_drop_time_ms: weap_def
             .map(|body| s.i32_at(body, s.layout(0x290, 984)))
             .transpose()?
-            .unwrap_or_default(),
+            .unwrap_or(0),
         view_flash_slot: authored_material_slot(s, weap_def, s.layout(0x48, 112))?,
         world_flash_slot: authored_material_slot(s, weap_def, s.layout(0x4c, 120))?,
         view_shell_eject_slot: authored_material_slot(s, weap_def, s.layout(0x110, 512))?,
@@ -408,6 +450,9 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
             Ok(ZonePtr::Offset(q)) => Some(s.resolve_alias(q)),
             _ => None,
         }),
+        clip_model_name,
+        knife_model_name,
+        world_knife_model_name,
         sz_xanims,
         sz_xanims_right,
         sz_xanims_left,
@@ -583,6 +628,9 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
         explosion_outer_damage: body_facts.explosion_outer_damage,
         damage_cone_angle: body_facts.damage_cone_angle,
         missile_guidance: body_facts.missile_guidance,
+        missile_drift_interval_s: body_facts.missile_drift_interval_s,
+        missile_drift_rate_deg_s: body_facts.missile_drift_rate_deg_s,
+        missile_drift_start_distance: body_facts.missile_drift_start_distance,
         ignition_delay_ms: body_facts.ignition_delay_ms,
         require_lock_to_fire: body_facts.require_lock_to_fire,
         stickiness: body_facts.stickiness,
@@ -594,6 +642,17 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
         parallel_bounce: body_facts.parallel_bounce,
         perpendicular_bounce: body_facts.perpendicular_bounce,
         location_damage_mult: body_facts.location_damage_mult,
+        item_ammo: weap_def
+            .map(|body| {
+                Ok([
+                    s.i32_at(body, s.layout(0x3dc, 0x538))?,
+                    s.i32_at(p, s.layout(0x58, 0x78))?,
+                    s.i32_at(body, s.layout(0x3e0, 0x53c))?,
+                    s.i32_at(body, s.layout(0x3e4, 0x540))?,
+                    s.i32_at(body, s.layout(0x228, 0x370))?,
+                ])
+            })
+            .transpose()?,
         start_ammo: body_facts.start_ammo,
         min_damage: body_facts.min_damage,
         min_player_damage: body_facts.min_player_damage,
@@ -741,6 +800,9 @@ struct WeapDefScalars {
     explosion_outer_damage: i32,
     damage_cone_angle: f32,
     missile_guidance: i32,
+    missile_drift_interval_s: f32,
+    missile_drift_rate_deg_s: f32,
+    missile_drift_start_distance: i32,
     ignition_delay_ms: i32,
     require_lock_to_fire: bool,
     stickiness: i32,
@@ -853,17 +915,7 @@ fn load_weapon_def(
     links: &mut dyn AssetLinkSink,
     ai_vs_ai_knots: usize,
     ai_vs_player_knots: usize,
-) -> Result<(
-    Ptr,
-    [Option<Ptr>; 16],
-    Option<Ptr>,
-    [Option<Ptr>; 16],
-    Option<Ptr>,
-    Option<Ptr>,
-    WeaponSoundNames,
-    Option<Ptr>,
-    Option<Ptr>,
-)> {
+) -> LoadWeaponDefOutput {
     let p = s.alloc_load(4, s.layout(sz::WEAPON_DEF, 2192))?;
 
     follow_name(s, p, 0)?;
@@ -947,10 +999,10 @@ fn load_weapon_def(
     }
 
     let world0 = follow_xmodel_array(s, links, p, s.layout(472, 736))?;
-    asset_ptr_at(s, links, AssetType::XModel, p.at(s.layout(476, 744)))?;
+    let clip0 = follow_xmodel_ptr(s, links, p.at(s.layout(476, 744)))?;
     let rocket0 = follow_xmodel_ptr(s, links, p.at(s.layout(480, 752)))?;
-    asset_ptr_at(s, links, AssetType::XModel, p.at(s.layout(484, 760)))?;
-    asset_ptr_at(s, links, AssetType::XModel, p.at(s.layout(488, 768)))?;
+    let knife0 = follow_xmodel_ptr(s, links, p.at(s.layout(484, 760)))?;
+    let world_knife0 = follow_xmodel_ptr(s, links, p.at(s.layout(488, 768)))?;
     asset_ptr_at(s, links, AssetType::Material, p.at(s.layout(492, 776)))?;
     asset_ptr_at(s, links, AssetType::Material, p.at(s.layout(500, 792)))?;
     asset_ptr_at(s, links, AssetType::Material, p.at(s.layout(508, 808)))?;
@@ -1013,6 +1065,9 @@ fn load_weapon_def(
         world0,
         projectile0,
         rocket0,
+        clip0,
+        knife0,
+        world_knife0,
         sound_names,
         sz_xanims_right,
         sz_xanims_left,
@@ -1155,10 +1210,8 @@ fn follow_xmodel_ptr(
     slot: Ptr,
 ) -> Result<Option<Ptr>> {
     let loaded = load_asset_at_observed(s, AssetType::XModel, slot, links)?;
-    if loaded {
-        if let Some(name) = s.xmodel().and_then(|g| g.name) {
-            return Ok(Some(name));
-        }
+    if loaded && let Some(name) = s.xmodel().and_then(|g| g.name) {
+        return Ok(Some(name));
     }
     Ok(links
         .xmodel_name_ptr(slot)

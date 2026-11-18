@@ -1,4 +1,4 @@
-use asset_core::{AssetNamespace, AssetRef, MaterialIndex};
+use asset_core::{AssetRef, FamilyId, MaterialIndex};
 
 use crate::{RuntimeArgumentBinding, RuntimeShaderStage, RuntimeVertexDecl, TechType};
 
@@ -260,7 +260,7 @@ pub fn sort_pass_args(pass: &mut RuntimePass) {
         return;
     }
     let sort_tier = |slice: &mut [RuntimeArgumentBinding]| {
-        slice.sort_by(|a, b| a.runtime_sort_key().cmp(&b.runtime_sort_key()));
+        slice.sort_by_key(|a| a.runtime_sort_key());
     };
     sort_tier(&mut pass.arguments[..prim]);
     sort_tier(&mut pass.arguments[prim..prim + obj]);
@@ -287,18 +287,6 @@ pub struct RuntimePass {
     pub depth_to_colour: bool,
 }
 
-impl RuntimePass {
-    pub fn same_compile_identity(&self, other: &Self) -> bool {
-        self.shader_pair == other.shader_pair
-            && self.custom_sampler_flags == other.custom_sampler_flags
-            && self.t5_custom_sampler_flags == other.t5_custom_sampler_flags
-            && self.arguments == other.arguments
-            && self.color_space == other.color_space
-            && self.hardware_shadow_compare == other.hardware_shadow_compare
-            && self.depth_to_colour == other.depth_to_colour
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeTechnique {
     pub source_selection: Option<SourceTechniqueSelection>,
@@ -318,7 +306,7 @@ pub enum TechniqueSelectionPolicy {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SourceTechniqueSelection {
-    pub namespace: AssetNamespace,
+    pub namespace: FamilyId,
     pub slot: u8,
     pub policy: TechniqueSelectionPolicy,
 }
@@ -329,7 +317,7 @@ pub struct RuntimeTechniqueSet {
 
     pub world_vert_format: u8,
 
-    pub namespace: AssetNamespace,
+    pub namespace: FamilyId,
 
     pub name: String,
 }
@@ -345,7 +333,7 @@ impl RuntimeTechniqueSet {
         Ok(Self {
             slots,
             world_vert_format: 0,
-            namespace: AssetNamespace::Iw4,
+            namespace: FamilyId::IW4,
             name: String::new(),
         })
     }
@@ -361,7 +349,7 @@ impl RuntimeTechniqueSet {
     pub fn with_identity(
         mut self,
         world_vert_format: u8,
-        namespace: AssetNamespace,
+        namespace: FamilyId,
         name: impl Into<String>,
     ) -> Self {
         self.world_vert_format = world_vert_format;
@@ -385,7 +373,7 @@ pub struct RuntimeMaterial {
 
     pub name: String,
 
-    pub namespace: AssetNamespace,
+    pub namespace: FamilyId,
 
     pub technique_set: String,
     pub baked_draw_surf: Option<u64>,
@@ -458,8 +446,9 @@ impl RuntimeMaterial {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub enum RuntimeSortedMaterialTable {
+    #[default]
     Missing,
     BuildFailed(CatalogBuildError),
     Ready {
@@ -507,10 +496,11 @@ impl RuntimeSortedMaterialTable {
     }
 }
 
-impl Default for RuntimeSortedMaterialTable {
-    fn default() -> Self {
-        Self::Missing
-    }
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NativeMaterialDiagnostics {
+    pub selector_census: Option<String>,
+    pub fallback_count: u32,
+    pub argument_gaps: std::collections::BTreeMap<String, u32>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -526,63 +516,13 @@ pub struct RuntimeMaterialBuild {
     pub vertex_decls: Vec<(u32, RuntimeVertexDecl)>,
     pub sorted_materials: RuntimeSortedMaterialTable,
 
-    pub iw5_remap: Option<String>,
-
-    pub t5_remap: Option<String>,
-
-    pub iw5_fallback_n: u32,
-
-    pub t5_fallback_n: u32,
+    pub native_diagnostics: std::collections::BTreeMap<FamilyId, NativeMaterialDiagnostics>,
 
     pub sorted_first_skip: Option<String>,
 
     pub skip_tech: Option<String>,
 
     pub skip_cause: Option<String>,
-
-    pub leftover_iw5_arg_n: u32,
-
-    pub leftover_iw5_arg: Option<String>,
-
-    pub leftover_iw5_arg2: Option<String>,
-
-    pub leftover_t5_arg_n: u32,
-
-    pub leftover_t5_arg: Option<String>,
-
-    pub leftover_t5_arg2: Option<String>,
-
-    pub leftover_t5_arg3: Option<String>,
-
-    pub leftover_t5_arg4: Option<String>,
-
-    pub leftover_t5_arg5: Option<String>,
-
-    pub leftover_t5_dest6: Option<String>,
-
-    pub leftover_t5_dest7: Option<String>,
-
-    pub leftover_t5_dest17: Option<String>,
-
-    pub leftover_t5_dest18: Option<String>,
-
-    pub leftover_t5_dest19: Option<String>,
-
-    pub leftover_t5_dest9: Option<String>,
-
-    pub leftover_t5_dest10: Option<String>,
-
-    pub leftover_t5_dest11: Option<String>,
-
-    pub leftover_t5_dest20: Option<String>,
-
-    pub leftover_t5_dest24: Option<String>,
-
-    pub leftover_t5_dest25: Option<String>,
-
-    pub leftover_t5_dest26: Option<String>,
-
-    pub leftover_t5_dest27: Option<String>,
 
     pub leftover_unknown_n: u32,
 }
@@ -719,8 +659,8 @@ pub enum CatalogBuildError {
     },
     TechniqueSetNamespaceMismatch {
         material: MaterialAssetId,
-        want: AssetNamespace,
-        got: AssetNamespace,
+        want: FamilyId,
+        got: FamilyId,
     },
     TechniqueGraphMissing {
         material: MaterialAssetId,

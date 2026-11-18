@@ -19,18 +19,20 @@ use render_material::PortId;
 struct ModuleKey {
     port: PortId,
     cached_lighting: bool,
+    exit_clip: Option<d3d9_sm3::ExitClipMode>,
 }
 
 #[derive(Clone)]
 pub(super) enum ExactModuleSource {
     Port(Arc<ValidatedPassWgsl>),
     CachedLighting(Arc<str>),
+    Clipped(Arc<ValidatedPassWgsl>),
 }
 
 impl ExactModuleSource {
     fn wgsl(&self) -> &str {
         match self {
-            Self::Port(module) => &module.source,
+            Self::Port(module) | Self::Clipped(module) => &module.source,
             Self::CachedLighting(source) => source,
         }
     }
@@ -46,6 +48,7 @@ pub(super) struct ExactPipelinePlan {
     pub(super) multisample: MultisampleState,
     pub(super) constants_layout: BindGroupLayout,
     pub(super) textures_layout: BindGroupLayout,
+    pub(super) exit_clip_layout: Option<BindGroupLayout>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
@@ -64,7 +67,6 @@ struct PortBuild {
 
 #[derive(Resource, Default)]
 pub(super) struct ExactPipelineRegistry {
-    world: frame::WorldStamp,
     slots: Vec<SlotState>,
     by_key: HashMap<super::colour_submit::ExactColourPipelineKey, ExactPipelineSlot>,
     modules: HashMap<ModuleKey, Arc<ShaderModule>>,
@@ -81,20 +83,18 @@ pub(super) struct ExactPipelineRegistry {
     layouts: Mutex<HashMap<BindGroupLayoutDescriptor, BindGroupLayout>>,
 
     discovered: Mutex<Vec<super::colour_submit::ExactColourPipelineKey>>,
+
+    portal_masks: Mutex<
+        HashMap<
+            (bevy::render::render_resource::TextureFormat, u32),
+            Arc<super::colour_submit::portal_scene::PortalMaskPipelines>,
+        >,
+    >,
+    pub(super) portal_fallback: Mutex<super::colour_submit::portal_scene::PortalFallbackGpu>,
+    pub(super) portal_queries: Mutex<super::colour_submit::portal_scene::PortalQueryGpu>,
 }
 
 impl ExactPipelineRegistry {
-    pub(super) fn set_world(&mut self, world: frame::WorldStamp) -> bool {
-        if self.world == world {
-            return false;
-        }
-        *self = Self {
-            world,
-            ..Self::default()
-        };
-        true
-    }
-
     pub(super) fn bind_group_layout(
         &self,
         device: &RenderDevice,
@@ -106,6 +106,26 @@ impl ExactPipelineRegistry {
             .entry(descriptor.clone())
             .or_insert_with_key(|descriptor| {
                 device.create_bind_group_layout(descriptor.label.as_ref(), &descriptor.entries)
+            })
+            .clone()
+    }
+
+    pub(super) fn portal_masks(
+        &self,
+        device: &RenderDevice,
+        format: bevy::render::render_resource::TextureFormat,
+        samples: u32,
+    ) -> Arc<super::colour_submit::portal_scene::PortalMaskPipelines> {
+        self.portal_masks
+            .lock()
+            .expect("portal mask cache")
+            .entry((format, samples))
+            .or_insert_with(|| {
+                Arc::new(
+                    super::colour_submit::portal_scene::PortalMaskPipelines::new(
+                        device, format, samples,
+                    ),
+                )
             })
             .clone()
     }
@@ -161,7 +181,8 @@ impl ExactPipelineRegistry {
 
         let module = ModuleKey {
             port: key.port,
-            cached_lighting: matches!(source, ExactModuleSource::CachedLighting(_)),
+            cached_lighting: key.cached_lighting,
+            exit_clip: key.exit_clip,
         };
         self.queued
             .entry(module)
@@ -234,12 +255,13 @@ fn build_port(
     let (shader, created) = match existing {
         Some(shader) => (shader, None),
         None => {
-            let shader = Arc::new(unsafe {
-                device.create_shader_module(ShaderModuleDescriptor {
+            let wgsl = source.wgsl();
+            let shader = Arc::new(device.create_and_validate_shader_module(
+                ShaderModuleDescriptor {
                     label: Some(&label),
-                    source: ShaderSource::Wgsl(std::borrow::Cow::Borrowed(source.wgsl())),
-                })
-            });
+                    source: ShaderSource::Wgsl(std::borrow::Cow::Borrowed(wgsl)),
+                },
+            ));
             (shader.clone(), Some(shader))
         }
     };
@@ -259,9 +281,13 @@ fn build_pipeline(
     shader: &ShaderModule,
     plan: &ExactPipelinePlan,
 ) -> RenderPipeline {
+    let mut layouts = vec![Some(&*plan.constants_layout), Some(&*plan.textures_layout)];
+    if let Some(exit) = plan.exit_clip_layout.as_ref() {
+        layouts.push(Some(&**exit));
+    }
     let layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
         label: Some(&plan.label),
-        bind_group_layouts: &[Some(&plan.constants_layout), Some(&plan.textures_layout)],
+        bind_group_layouts: &layouts,
         immediate_size: 0,
     });
     let buffers: Vec<Option<RawVertexBufferLayout>> = plan

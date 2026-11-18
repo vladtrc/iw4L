@@ -107,7 +107,7 @@ thread_local! {
     };
 }
 
-fn pose_material<'a>(host: &'a FxSystemHost, against: MarkFragmentsAgainst) -> Option<&'a str> {
+fn pose_material(host: &FxSystemHost, against: MarkFragmentsAgainst) -> Option<&str> {
     impact_mark_material(
         [
             host.last_decal_mat0.as_deref(),
@@ -150,7 +150,6 @@ fn mark_material_surface_bits(scene: &WorldScene, name: &str) -> Option<u32> {
 
 pub(crate) fn receiver_allow_inputs(
     scene: &WorldScene,
-    _surf: usize,
     mat_slot: Option<assets::MaterialIndex>,
 ) -> (Option<u8>, Option<u32>) {
     let Some(material) = mat_slot.and_then(|id| scene.runtime_material_catalog.derived(id)) else {
@@ -275,7 +274,7 @@ fn fill_world_filter(scene: &WorldScene, pose: &WorldMarkPose<'_>) -> Option<Wor
                 }
                 allow.sphere_hit = allow.sphere_hit.saturating_add(1);
                 let mat_slot = cull.surface_materials.get(surf).copied().flatten();
-                let (flags, recv_bits) = receiver_allow_inputs(scene, surf, mat_slot);
+                let (flags, recv_bits) = receiver_allow_inputs(scene, mat_slot);
                 let decision = marks_iw4::mark_allow(flags, recv_bits, mark_bits);
                 match decision {
                     marks_iw4::FxMarkAllow::Keep => allow.keep = allow.keep.saturating_add(1),
@@ -676,8 +675,8 @@ fn complete_glass_marks(host: &mut FxSystemHost, scene: &WorldScene) {
         };
         let normal = pane_axis[2].map(|v| if side < 0.0 { -v } else { v });
         for vertex in &mut vertices[..n] {
-            for k in 0..3 {
-                vertex.xyz[k] += normal[k] * thickness;
+            for (k, normal_entry) in normal[..3].iter().enumerate() {
+                vertex.xyz[k] += (*normal_entry) * thickness;
             }
         }
         let mut used_tri = 0;
@@ -698,22 +697,27 @@ fn complete_glass_marks(host: &mut FxSystemHost, scene: &WorldScene) {
             if count < 3 {
                 continue;
             }
-            match marks_iw4::mark_emit_brush_fragment(
-                used_tri,
-                used_point,
-                marks_iw4::R_MARK_FRAGMENTS_MAX_TRIS,
-                marks_iw4::R_MARK_FRAGMENTS_MAX_POINTS,
-                &fragment[..count as usize],
-                [0.0; 2],
-                [0.0; 2],
-                [0.0; 2],
-                normal,
-                normal,
-                normal,
-                context,
-                &mut tris,
-                &mut points,
-            ) {
+            let fragment_result = {
+                let mut staging_output = marks_iw4::MarkStagingBuffer {
+                    used_tri,
+                    used_point,
+                    max_tris: marks_iw4::R_MARK_FRAGMENTS_MAX_TRIS,
+                    max_points: marks_iw4::R_MARK_FRAGMENTS_MAX_POINTS,
+                    tris: &mut tris,
+                    points: &mut points,
+                };
+                staging_output
+                    .emit_fragment(
+                        &fragment[..count as usize],
+                        marks_iw4::MarkTriangleAttributes {
+                            lightmap_uvs: [[0.0; 2], [0.0; 2], [0.0; 2]],
+                            normals: [normal, normal, normal],
+                        },
+                        context,
+                    )
+                    .map(|()| (staging_output.used_tri, staging_output.used_point))
+            };
+            match fragment_result {
                 Ok((t, p)) => {
                     used_tri = t;
                     used_point = p;
@@ -783,24 +787,36 @@ fn stage_clip_retained(
             points,
             ..
         } = &mut *clip;
-        Some(marks_iw4::mark_stage_world_surfaces(
-            origin,
-            radius,
-            axis,
-            mids,
-            halves,
-            &scene.retained_positions,
-            &scene.retained_lightmap_uvs,
-            &scene.retained_normals,
-            packed,
-            ranges,
-            contexts,
-            marks_iw4::R_MARK_FRAGMENTS_MAX_TRIS,
-            marks_iw4::R_MARK_FRAGMENTS_MAX_POINTS,
-            tris,
-            points,
-            false,
-        ))
+        Some(
+            marks_iw4::MarkProjection {
+                origin,
+                radius,
+                axis,
+            }
+            .stage_world_surfaces(
+                marks_iw4::MarkReceiverGeometry {
+                    mids,
+                    halves,
+                    positions: &scene.retained_positions,
+                    packed_indices: packed,
+                    surface_index_ranges: ranges,
+                },
+                marks_iw4::MarkReceiverAttributes {
+                    lightmap_uvs: &scene.retained_lightmap_uvs,
+                    normals: &scene.retained_normals,
+                    contexts,
+                },
+                &mut marks_iw4::MarkStagingBuffer {
+                    used_tri: 0,
+                    used_point: 0,
+                    max_tris: marks_iw4::R_MARK_FRAGMENTS_MAX_TRIS,
+                    max_points: marks_iw4::R_MARK_FRAGMENTS_MAX_POINTS,
+                    tris,
+                    points,
+                },
+                false,
+            ),
+        )
     })
 }
 
@@ -835,16 +851,15 @@ fn complete_models_generate(host: &mut FxSystemHost, scene: &WorldScene, def_ind
     let mark_bits = material
         .as_deref()
         .and_then(|name| mark_material_surface_bits(scene, name));
-    let pose = WorldMarkPose {
+    let projection = marks_iw4::MarkProjection {
         origin,
         radius,
-        axis: Some(axis),
-        material: material.as_deref(),
+        axis,
     };
-    let Some(cull) = scene.cull.as_ref() else {
+    if scene.cull.is_none() {
         host.note_models_go_skip(def_index);
         return;
-    };
+    }
     let cpu = scene.smodel_mark_cpu.as_ref();
     let mut walked = 0u32;
     let mut clip_kept = 0u32;
@@ -882,9 +897,18 @@ fn complete_models_generate(host: &mut FxSystemHost, scene: &WorldScene, def_ind
                 no_mesh = no_mesh.saturating_add(1);
                 continue;
             };
-            let bounds = cull.dpvs.smodel_bounds.get(bit).copied();
             let Some(staging) = stage_one_smodel(
-                scene, cpu, mesh_surfs, &pose, axis, instance, bounds, bit as u16, mark_bits,
+                scene,
+                SmodelMarkMesh {
+                    positions: &cpu.positions,
+                    normals: &cpu.normals,
+                    indices: &cpu.indices,
+                    surfaces: mesh_surfs,
+                },
+                projection,
+                instance,
+                bit as u16,
+                mark_bits,
                 &mut clip,
             ) else {
                 continue;
@@ -903,8 +927,8 @@ fn complete_models_generate(host: &mut FxSystemHost, scene: &WorldScene, def_ind
                 any_marks: true,
                 tri_count: staging.0.used_tri,
                 point_count: staging.0.used_point,
-                origin: pose.origin,
-                radius: pose.radius,
+                origin: projection.origin,
+                radius: projection.radius,
                 tex_coord_axis: axis[1],
                 native_color,
                 material: 0,
@@ -936,29 +960,34 @@ fn complete_models_generate(host: &mut FxSystemHost, scene: &WorldScene, def_ind
     }
 }
 
+struct SmodelMarkMesh<'a> {
+    positions: &'a [[f32; 3]],
+    normals: &'a [[f32; 3]],
+    indices: &'a [u32],
+    surfaces: &'a [crate::prepare::scene::world::SmodelMarkSurface],
+}
+
 fn stage_one_smodel(
     scene: &WorldScene,
-    cpu: &crate::prepare::scene::world::SmodelMarkCpu,
-    mesh_surfs: &[crate::prepare::scene::world::SmodelMarkSurface],
-    pose: &WorldMarkPose<'_>,
-    axis: [[f32; 3]; 3],
+    mesh: SmodelMarkMesh<'_>,
+    projection: marks_iw4::MarkProjection,
     instance: &crate::prepare::scene::world::WorldStaticModelInstance,
-    _bounds: Option<dpvs_iw4::Bounds>,
     smodel_index: u16,
     mark_bits: Option<u32>,
     clip: &mut MarkClipScratch,
 ) -> Option<(marks_iw4::MarkWorldStaging, u32)> {
     use bevy::prelude::Vec3;
+    let axis = projection.axis;
 
     let (mins, maxs) = marks_iw4::mark_model_local_box(
-        pose.origin,
-        pose.radius,
+        projection.origin,
+        projection.radius,
         instance.origin,
         instance.axis,
         instance.scale,
     )?;
     clip.ensure_stage_bufs();
-    let planes = marks_iw4::mark_fragment_clip_planes(pose.origin, axis, pose.radius);
+    let planes = marks_iw4::mark_fragment_clip_planes(projection.origin, axis, projection.radius);
     let mark_dir = axis[0];
     let mut fragment = [marks_iw4::FxWorldMarkPoint {
         xyz: [0.0; 3],
@@ -969,18 +998,18 @@ fn stage_one_smodel(
     let tf = instance.transform;
     let zero_uv = [0.0f32, 0.0];
     let MarkClipScratch { tris, points, .. } = clip;
-    for (surf_i, surface) in mesh_surfs.iter().enumerate() {
+    for (surf_i, surface) in mesh.surfaces.iter().enumerate() {
         if surf_i > 63 {
             break;
         }
-        let (flags, recv_bits) = receiver_allow_inputs(scene, 0, surface.material);
+        let (flags, recv_bits) = receiver_allow_inputs(scene, surface.material);
         let decision = marks_iw4::mark_allow(flags, recv_bits, mark_bits);
         if !marks_iw4::mark_include_in_world_clip(decision) {
             continue;
         }
         let start_i = surface.index_start as usize;
         let end_i = start_i.saturating_add(surface.index_count as usize);
-        if surface.index_count < 3 || end_i > cpu.indices.len() {
+        if surface.index_count < 3 || end_i > mesh.indices.len() {
             continue;
         }
         let asset_world::XSurfaceCollisionPayload::Iw4(lists) = &surface.collision else {
@@ -1006,16 +1035,16 @@ fn stage_one_smodel(
             if t + 2 >= end_i {
                 return true;
             }
-            let i0 = cpu.indices[t] as usize;
-            let i1 = cpu.indices[t + 1] as usize;
-            let i2 = cpu.indices[t + 2] as usize;
-            let Some(&l0) = cpu.positions.get(i0) else {
+            let i0 = mesh.indices[t] as usize;
+            let i1 = mesh.indices[t + 1] as usize;
+            let i2 = mesh.indices[t + 2] as usize;
+            let Some(&l0) = mesh.positions.get(i0) else {
                 return true;
             };
-            let Some(&l1) = cpu.positions.get(i1) else {
+            let Some(&l1) = mesh.positions.get(i1) else {
                 return true;
             };
-            let Some(&l2) = cpu.positions.get(i2) else {
+            let Some(&l2) = mesh.positions.get(i2) else {
                 return true;
             };
             staging.census.tri_seen = staging.census.tri_seen.saturating_add(1);
@@ -1033,25 +1062,30 @@ fn stage_one_smodel(
                 return true;
             }
             staging.census.clip_kept = staging.census.clip_kept.saturating_add(pts - 2);
-            let n0 = xform_normal(tf, cpu.normals.get(i0).copied());
-            let n1 = xform_normal(tf, cpu.normals.get(i1).copied());
-            let n2 = xform_normal(tf, cpu.normals.get(i2).copied());
-            match marks_iw4::mark_emit_brush_fragment(
-                staging.used_tri,
-                staging.used_point,
-                marks_iw4::R_MARK_FRAGMENTS_MAX_TRIS,
-                marks_iw4::R_MARK_FRAGMENTS_MAX_POINTS,
-                &fragment[..pts as usize],
-                zero_uv,
-                zero_uv,
-                zero_uv,
-                n0,
-                n1,
-                n2,
-                context,
-                tris,
-                points,
-            ) {
+            let n0 = xform_normal(tf, mesh.normals.get(i0).copied());
+            let n1 = xform_normal(tf, mesh.normals.get(i1).copied());
+            let n2 = xform_normal(tf, mesh.normals.get(i2).copied());
+            let fragment_result = {
+                let mut staging_output = marks_iw4::MarkStagingBuffer {
+                    used_tri: staging.used_tri,
+                    used_point: staging.used_point,
+                    max_tris: marks_iw4::R_MARK_FRAGMENTS_MAX_TRIS,
+                    max_points: marks_iw4::R_MARK_FRAGMENTS_MAX_POINTS,
+                    tris,
+                    points,
+                };
+                staging_output
+                    .emit_fragment(
+                        &fragment[..pts as usize],
+                        marks_iw4::MarkTriangleAttributes {
+                            lightmap_uvs: [zero_uv, zero_uv, zero_uv],
+                            normals: [n0, n1, n2],
+                        },
+                        context,
+                    )
+                    .map(|()| (staging_output.used_tri, staging_output.used_point))
+            };
+            match fragment_result {
                 Ok((used_tri, used_point)) => {
                     staging.used_tri = used_tri;
                     staging.used_point = used_point;
@@ -1089,7 +1123,7 @@ fn stage_one_smodel(
                 }
             }
         }
-        drop(visit_triangle);
+
         if !walk_ok {
             return None;
         }

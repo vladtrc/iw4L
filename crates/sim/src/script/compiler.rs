@@ -163,6 +163,22 @@ impl Parser {
             };
             match op {
                 Op::Constant(value) => values.push(value),
+                Op::Vector => {
+                    let mut vector = [0.0; 3];
+                    for component in vector.iter_mut().rev() {
+                        let value = pop(&mut values)?;
+                        *component = super::runtime::scalar(&value).ok_or_else(|| {
+                            Fault::at(
+                                &location,
+                                format!(
+                                    "vector component cannot be {}",
+                                    super::runtime::type_name(&value)
+                                ),
+                            )
+                        })?;
+                    }
+                    values.push(Value::Vector(vector));
+                }
                 Op::Unary(op) => {
                     let value = pop(&mut values)?;
                     values.push(
@@ -175,16 +191,6 @@ impl Parser {
                     values.push(
                         super::runtime::binary(op, a, b).map_err(|e| Fault::at(&location, e))?,
                     );
-                }
-                Op::Vector => {
-                    let mut v = [0.0; 3];
-                    for component in v.iter_mut().rev() {
-                        *component =
-                            super::runtime::scalar(&pop(&mut values)?).ok_or_else(|| {
-                                Fault::at(&location, "vector component must be a number")
-                            })?;
-                    }
-                    values.push(Value::Vector(v));
                 }
                 _ => {
                     return Err(Fault::at(
@@ -372,6 +378,22 @@ fn parse(
     })
 }
 
+fn developer_statement_ranges(
+    function: &Function,
+    tables: &Tables,
+    resolved: &[Result<Link, String>],
+) -> Vec<std::ops::Range<usize>> {
+    let mut elided = Vec::new();
+    for (pc, (_, op)) in function.code.iter().enumerate() {
+        if let Op::Call(Callee::Unlinked(id), ..) = op
+            && let Ok(Link::Elide) = resolved[*id as usize]
+        {
+            elided.push(tables.pending[*id as usize].statement.unwrap()..pc + 2);
+        }
+    }
+    elided
+}
+
 pub(super) fn compile(
     resolver: &impl SourceResolver,
     roots: &[&str],
@@ -403,14 +425,7 @@ pub(super) fn compile(
         }));
     }
     for function in &mut functions {
-        let mut elided = Vec::new();
-        for (pc, (_, op)) in function.code.iter().enumerate() {
-            if let Op::Call(Callee::Unlinked(id), ..) = op
-                && let Ok(Link::Elide) = resolved[*id as usize]
-            {
-                elided.push(tables.pending[*id as usize].statement.unwrap()..pc + 2);
-            }
-        }
+        let elided = developer_statement_ranges(function, &tables, &resolved);
         if !elided.is_empty() {
             let mut keep = vec![true; function.code.len()];
             for range in elided {
@@ -434,7 +449,7 @@ pub(super) fn compile(
         for (location, op) in &mut function.code {
             let (id, argc) = match op {
                 Op::Call(Callee::Unlinked(id), argc, _)
-                | Op::Spawn(Callee::Unlinked(id), argc, _) => (*id, *argc),
+                | Op::Spawn(Callee::Unlinked(id), argc, _, _) => (*id, *argc),
                 Op::FunctionRef(id) => (*id, 0),
                 _ => continue,
             };

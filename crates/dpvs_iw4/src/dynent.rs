@@ -91,79 +91,9 @@ pub fn filter_dyn_ent_into_cells(
     if planes.nodes.is_empty() || planes.cell_count == 0 || word_count == 0 {
         return;
     }
-    filter_dyn_ent_into_cells_r(
-        planes,
-        0,
-        bounds,
-        bits,
-        word_count,
-        dyn_ent_id,
-        0,
-        planes.nodes.len(),
-    );
-}
-
-fn filter_dyn_ent_into_cells_r(
-    planes: &DpvsPlanes<'_>,
-    mut i: usize,
-    bounds: Bounds,
-    bits: &mut [u32],
-    word_count: usize,
-    dyn_ent_id: u32,
-    depth: usize,
-    max_depth: usize,
-) {
-    if depth > max_depth {
-        return;
-    }
-    let cell_count_plus = planes.cell_count as i32 + 1;
-    for _ in 0..planes.nodes.len() {
-        let Some(&cell_index_u) = planes.nodes.get(i) else {
-            return;
-        };
-        let cell_index = i32::from(cell_index_u);
-        if cell_index - cell_count_plus < 0 {
-            if cell_index > 0 {
-                let cell = (cell_index - 1) as usize;
-                if cell < planes.cell_count as usize {
-                    add_dyn_ent_to_cell(bits, word_count, cell, dyn_ent_id);
-                }
-            }
-            return;
-        }
-        let plane_index = (cell_index - cell_count_plus) as usize;
-        let Some(plane) = planes.planes.get(plane_index) else {
-            return;
-        };
-        let (mid, half) = (bounds.mid(), bounds.half());
-        let d = mid[0] * plane.normal[0] + mid[1] * plane.normal[1] + mid[2] * plane.normal[2]
-            - plane.dist;
-        let r = half[0] * abs(plane.normal[0])
-            + half[1] * abs(plane.normal[1])
-            + half[2] * abs(plane.normal[2]);
-        let Some(&offset) = planes.nodes.get(i + 1) else {
-            return;
-        };
-        let front = i + 2;
-        let back = i + usize::from(offset);
-        if d >= r {
-            i = front;
-        } else if d <= -r {
-            i = back;
-        } else {
-            filter_dyn_ent_into_cells_r(
-                planes,
-                front,
-                bounds,
-                bits,
-                word_count,
-                dyn_ent_id,
-                depth + 1,
-                max_depth,
-            );
-            i = back;
-        }
-    }
+    crate::scene_ent::scene_ent_cells(planes, bounds, &mut |cell| {
+        add_dyn_ent_to_cell(bits, word_count, cell as usize, dyn_ent_id);
+    });
 }
 
 #[must_use]
@@ -246,9 +176,4 @@ pub fn unlink_dyn_ent_from_primary_lights(
         }
         light += 1;
     }
-}
-
-#[inline]
-fn abs(v: f32) -> f32 {
-    if v < 0.0 { -v } else { v }
 }

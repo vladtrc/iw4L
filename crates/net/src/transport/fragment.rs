@@ -34,6 +34,17 @@ fn err(message: impl Into<String>) -> FragmentError {
     FragmentError(message.into())
 }
 
+fn payload_limit(datagram_bytes: usize, max_packet_bytes: usize) -> Result<usize, FragmentError> {
+    let payload = datagram_bytes
+        .checked_sub(FRAGMENT_HEADER_BYTES)
+        .filter(|bytes| *bytes != 0)
+        .ok_or_else(|| err("datagram budget must exceed the fragment header"))?;
+    if max_packet_bytes == 0 || u32::try_from(max_packet_bytes).is_err() {
+        return Err(err("packet limit must be a nonzero u32 wire length"));
+    }
+    Ok(payload)
+}
+
 #[derive(Debug)]
 pub struct Fragmenter {
     payload_bytes: usize,
@@ -42,12 +53,12 @@ pub struct Fragmenter {
 }
 
 impl Fragmenter {
-    pub fn new(datagram_bytes: usize, max_packet_bytes: usize) -> Self {
-        Self {
-            payload_bytes: datagram_bytes.saturating_sub(FRAGMENT_HEADER_BYTES).max(1),
+    pub fn new(datagram_bytes: usize, max_packet_bytes: usize) -> Result<Self, FragmentError> {
+        Ok(Self {
+            payload_bytes: payload_limit(datagram_bytes, max_packet_bytes)?,
             max_packet_bytes,
             next_id: 0,
-        }
+        })
     }
 
     pub fn split(&mut self, bytes: &[u8]) -> Result<Vec<Vec<u8>>, FragmentError> {
@@ -110,12 +121,12 @@ impl core::fmt::Debug for PartialPacket {
 }
 
 impl Reassembler {
-    pub fn new(datagram_bytes: usize, max_packet_bytes: usize) -> Self {
-        Self {
-            payload_bytes: datagram_bytes.saturating_sub(FRAGMENT_HEADER_BYTES).max(1),
+    pub fn new(datagram_bytes: usize, max_packet_bytes: usize) -> Result<Self, FragmentError> {
+        Ok(Self {
+            payload_bytes: payload_limit(datagram_bytes, max_packet_bytes)?,
             max_packet_bytes,
             pending: HashMap::new(),
-        }
+        })
     }
 
     pub fn is_empty(&self) -> bool {

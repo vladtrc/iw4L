@@ -589,6 +589,7 @@ pub(crate) fn publish_sun_shadow_frame(
     shadows: bevy::prelude::Res<render_scene::SmEnableDvar>,
     sun_shadows: bevy::prelude::Res<render_scene::SmSunEnableDvar>,
     mut published: bevy::prelude::ResMut<render_scene::PreparedSunShadowFrame>,
+    mut previous_world: bevy::prelude::Local<Option<usize>>,
 ) {
     let enabled = prepared.ready
         && shadows.enabled.unwrap_or(lighting_iw4::SM_ENABLE_DEFAULT)
@@ -596,19 +597,45 @@ pub(crate) fn publish_sun_shadow_frame(
             .enabled
             .unwrap_or(lighting_iw4::SM_SUN_ENABLE_DEFAULT);
     let next = if enabled {
-        dir_light
-            .as_deref()
-            .zip(scene.as_deref())
-            .and_then(|(light, scene)| {
-                scene.world_bounds.map(|bounds| {
-                    sun_shadow_frame_for_view(
-                        light.direction,
-                        &prepared,
-                        bounds,
-                        scene.sun_sample_size_near,
-                    )
-                })
-            })
+        scene.as_deref().and_then(|scene| {
+            let world = prepared
+                .physical_world
+                .min(scene.portal_worlds.saturating_sub(1));
+            let bounds = scene
+                .world_bounds_by_world
+                .get(world)
+                .copied()
+                .flatten()
+                .or_else(|| (world == 0).then_some(scene.world_bounds).flatten())?;
+            let direction = if world == 0 {
+                dir_light.as_deref().map(|light| light.direction)
+            } else {
+                scene
+                    .cull
+                    .as_ref()
+                    .and_then(|cull| {
+                        cull.atlas_layers
+                            .iter()
+                            .position(|layer| layer.world == world)
+                    })
+                    .and_then(|index| scene.material_layers.get(index))
+                    .and_then(|layer| layer.sun)
+                    .map(|sun| sun.direction)
+            }?;
+            if *previous_world != Some(world) {
+                diag::info!(
+                    World,
+                    "sun shadow camera world={world} direction={direction:?} bounds={bounds:?}"
+                );
+                *previous_world = Some(world);
+            }
+            Some(sun_shadow_frame_for_view(
+                direction,
+                &prepared,
+                bounds,
+                scene.sun_sample_size_near,
+            ))
+        })
     } else {
         None
     };

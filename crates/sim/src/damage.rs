@@ -31,13 +31,90 @@ pub struct DamageAttempt {
     pub hitloc: u8,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DamageRefusal {
-    FriendlyFire,
-    NonPositive,
-    MissingTarget,
-    TargetNotAlive,
-    StaleLife,
+pub(crate) struct OwnedDamage {
+    pub attacker: crate::ProjectileOwner,
+    pub source: DamageSource,
+    pub weapon: u32,
+    pub amount: i32,
+    pub origin: [f32; 3],
+    pub splash: bool,
+    pub hitloc: u8,
+    pub killcam_entity_start_time: i32,
+}
+
+pub(crate) fn apply_owned_player_damage(
+    world: &mut FrameWorld,
+    tick: Tick,
+    target: ClientId,
+    damage: &OwnedDamage,
+) {
+    let Some(meta) = world.client_meta(target) else {
+        return;
+    };
+    if meta.lifecycle != ClientLifecycle::Alive || damage.amount <= 0 {
+        return;
+    }
+    let life = meta.life_sequence;
+    if let Some((attacker, attacker_life)) = damage.attacker.player() {
+        let _ = apply_damage_attempt(
+            world,
+            tick,
+            &DamageAttempt {
+                splash: damage.splash,
+                source: damage.source,
+                pellet: PelletId(0),
+                attacker,
+                attacker_life,
+                target,
+                target_life: life,
+                weapon: damage.weapon,
+                amount: damage.amount,
+                killcam_entity_start_time: damage.killcam_entity_start_time,
+                inflictor_origin: Some(damage.origin),
+                hitloc: damage.hitloc,
+            },
+        );
+        return;
+    }
+    let Some(origin) = world.player(target).map(|ps| ps.origin) else {
+        return;
+    };
+    let dir = glam::Vec3::from_array(std::array::from_fn(|i| origin[i] - damage.origin[i]))
+        .normalize_or_zero()
+        .to_array();
+    let means = crate::script_player::means(
+        world,
+        damage.source,
+        damage.weapon,
+        damage.hitloc,
+        damage.splash,
+    );
+    let hit = crate::script_player::Hit {
+        victim: target,
+        attacker: None,
+        attacker_entity: damage.attacker.entity(),
+        amount: damage.amount,
+        flags: if damage.splash {
+            crate::script_player::IDFLAGS_RADIUS
+        } else {
+            0
+        },
+        means,
+        weapon: damage.weapon,
+        point: damage.origin,
+        dir,
+        direction_present: true,
+        hitloc: damage.hitloc,
+        inflictor: match damage.source {
+            DamageSource::Projectile(id) => {
+                Some(crate::script_player::HitInflictor::Projectile(id))
+            }
+            DamageSource::Radius(id) => Some(crate::script_player::HitInflictor::ScriptModel(id)),
+            _ => None,
+        },
+        commit: None,
+    };
+    crate::script::player_damage(world.ecs(), tick, &hit);
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -57,7 +134,7 @@ pub struct DeathCommit {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum DamageOutcome {
-    Refused(DamageRefusal),
+    Refused(&'static str),
     Nonlethal { health_after: i32 },
     Died(DeathCommit),
 }
@@ -71,8 +148,7 @@ pub(crate) struct ExplosionBlast {
     pub outer_damage: f32,
     pub weapon: u32,
     pub source: DamageSource,
-    pub attacker: ClientId,
-    pub attacker_life: LifeSequence,
+    pub attacker: crate::ProjectileOwner,
     pub killcam_entity_start_time: i32,
 }
 
@@ -95,25 +171,36 @@ struct GlassBlastHit {
 }
 
 pub(crate) fn apply_explosion_blast(world: &mut FrameWorld, tick: Tick, blast: &ExplosionBlast) {
-    if !world.publishes_snapshot() {
-        return;
-    }
     let attempts = radius_player_attempts(world, blast);
     let glass = radius_glass_hits(world, blast);
-    for attempt in &attempts {
-        let _ = apply_damage_attempt(world, tick, attempt);
+    for (target, amount) in attempts {
+        apply_owned_player_damage(
+            world,
+            tick,
+            target,
+            &OwnedDamage {
+                splash: true,
+                source: blast.source,
+                attacker: blast.attacker,
+                weapon: blast.weapon,
+                amount,
+                origin: blast.origin,
+                hitloc: 0,
+                killcam_entity_start_time: blast.killcam_entity_start_time,
+            },
+        );
     }
     apply_glass_blast_hits(world, tick, glass);
     apply_entity_blast(world, blast);
-    crate::t5_destructible::apply_radius(
+    crate::model_behaviors::apply_radius(
         world,
         tick,
-        &crate::t5_destructible::RadiusDamage {
+        &crate::model_behaviors::RadiusDamage {
             origin: blast.origin,
             radius: blast.radius,
             inner: blast.inner_damage,
             outer: blast.outer_damage,
-            attacker: Some(blast.attacker),
+            attacker: blast.attacker.client(),
             exclude: None,
             cone: blast.cone,
         },
@@ -138,7 +225,7 @@ pub(crate) fn apply_explosion_blast(world: &mut FrameWorld, tick: Tick, blast: &
             radius: blast.radius,
             max: blast.inner_damage,
             min: blast.outer_damage,
-            client: Some(blast.attacker),
+            client: blast.attacker.client(),
             missile: match blast.source {
                 DamageSource::Projectile(id) => Some(id),
                 _ => None,
@@ -176,12 +263,14 @@ fn apply_entity_blast(world: &mut FrameWorld, blast: &ExplosionBlast) {
             &crate::script::EntityHit {
                 target,
                 amount,
-                attacker: Some(blast.attacker),
+                attacker: blast.attacker.client(),
+                attacker_entity: blast.attacker.entity(),
                 means,
                 weapon: blast.weapon,
                 point: mid,
                 dir: std::array::from_fn(|i| mid[i] - blast.origin[i]),
                 bone: None,
+                hitloc: 0,
                 flags: IDFLAGS_RADIUS,
             },
         );
@@ -198,22 +287,21 @@ pub(crate) fn apply_script_blast(
     if blast.radius <= 0.0 {
         return;
     }
-    if world.publishes_snapshot() {
-        crate::script::host::triggers::damage_blast(
-            world.ecs(),
-            &crate::script::host::triggers::TriggerBlast {
-                origin: blast.origin,
-                radius: blast.radius,
-                max: blast.max,
-                min: blast.min,
-                client: blast.attacker,
-                missile: None,
-                means: blast.means,
-                ignore_model: blast.inflictor,
-                cone: None,
-            },
-        );
-    }
+    crate::script::host::triggers::damage_blast(
+        world.ecs(),
+        &crate::script::host::triggers::TriggerBlast {
+            origin: blast.origin,
+            radius: blast.radius,
+            max: blast.max,
+            min: blast.min,
+            client: blast.attacker,
+            missile: None,
+            means: blast.means,
+            ignore_model: blast.inflictor,
+            cone: None,
+        },
+    );
+
     for target in radius_player_candidates(world, blast.origin, blast.radius) {
         let Some(meta) = world.client_meta(target) else {
             continue;
@@ -259,8 +347,10 @@ pub(crate) fn apply_script_blast(
             })
         });
         let hit = crate::script_player::Hit {
+            direction_present: true,
             victim: target,
             attacker: blast.attacker,
+            attacker_entity: None,
             amount,
             flags: IDFLAGS_RADIUS,
             means: blast.means,
@@ -279,10 +369,10 @@ pub(crate) fn apply_script_blast(
         };
         crate::script::player_damage(world.ecs(), tick, &hit);
     }
-    crate::t5_destructible::apply_radius(
+    crate::model_behaviors::apply_radius(
         world,
         tick,
-        &crate::t5_destructible::RadiusDamage {
+        &crate::model_behaviors::RadiusDamage {
             origin: blast.origin,
             radius: blast.radius,
             inner: blast.max,
@@ -342,9 +432,11 @@ pub(crate) fn apply_script_hit(world: &mut FrameWorld, tick: Tick, hit: &crate::
     let player_hit = crate::script_player::Hit {
         victim: target,
         attacker: hit.attacker,
+        attacker_entity: hit.attacker_entity,
         amount: hit.amount,
         flags: hit.flags,
         means: hit.means,
+        direction_present: true,
         weapon: hit.weapon,
         point: hit.origin,
         dir: if len > 0.0 {
@@ -361,13 +453,13 @@ pub(crate) fn apply_script_hit(world: &mut FrameWorld, tick: Tick, hit: &crate::
     crate::script::player_damage(world.ecs(), tick, &player_hit);
 }
 
-fn radius_player_attempts(world: &FrameWorld, blast: &ExplosionBlast) -> Vec<DamageAttempt> {
+fn radius_player_attempts(world: &FrameWorld, blast: &ExplosionBlast) -> Vec<(ClientId, i32)> {
     let mut intents = Vec::new();
     if blast.radius <= 0.0 {
         return intents;
     }
     for target in radius_player_candidates(world, blast.origin, blast.radius) {
-        let Some(meta) = world.client_meta(target) else {
+        let Some(_) = world.client_meta(target) else {
             continue;
         };
         let Some(bounds) = world.player_area_bounds(target) else {
@@ -388,20 +480,7 @@ fn radius_player_attempts(world: &FrameWorld, blast: &ExplosionBlast) -> Vec<Dam
         if amount <= 0 {
             continue;
         }
-        intents.push(DamageAttempt {
-            splash: true,
-            source: blast.source,
-            pellet: PelletId(0),
-            attacker: blast.attacker,
-            attacker_life: blast.attacker_life,
-            target,
-            target_life: meta.life_sequence,
-            weapon: blast.weapon,
-            amount,
-            killcam_entity_start_time: blast.killcam_entity_start_time,
-            inflictor_origin: Some(blast.origin),
-            hitloc: 0,
-        });
+        intents.push((target, amount));
     }
     intents
 }
@@ -453,8 +532,10 @@ fn apply_glass_blast_hits(world: &mut FrameWorld, tick: Tick, hits: Vec<GlassBla
             hit.id,
             hit.amount,
             at_time_ms,
-            hit.hit,
-            hit.dir,
+            crate::world_objects::GlassHit {
+                position: hit.hit,
+                direction: hit.dir,
+            },
             &mut || crate::item::random_unit(&mut holdrand),
         );
     }
@@ -531,8 +612,10 @@ pub(crate) fn apply_shared_glass_blast(
     let mut holdrand = *world.stuck_holdrand_mut();
     world.world_objects_mut().apply_glass_blast(
         origin,
-        inner_damage,
-        outer_damage,
+        crate::world_objects::GlassBlastFalloff {
+            inner_damage,
+            outer_damage,
+        },
         radius,
         time,
         &mut || crate::item::random_unit(&mut holdrand),
@@ -571,7 +654,7 @@ pub(crate) fn apply_flashbang_blast(
     origin: [f32; 3],
     radius_max: f32,
     radius_min: f32,
-    attacker: ClientId,
+    attacker: crate::ProjectileOwner,
 ) {
     let min_r = radius_min.max(1.0);
     let max_r = if radius_max < min_r {
@@ -657,19 +740,33 @@ pub(crate) fn apply_damage_attempt(
     intent: &DamageAttempt,
 ) -> DamageOutcome {
     if intent.amount <= 0 {
-        return DamageOutcome::Refused(DamageRefusal::NonPositive);
+        diag::warn_once!(Sim, "non-positive damage: client {}", intent.target.0);
+        return DamageOutcome::Refused("non-positive damage");
     }
     let Some(meta) = world.client_meta(intent.target) else {
-        return DamageOutcome::Refused(DamageRefusal::MissingTarget);
+        diag::warn_once!(Sim, "missing damage target: client {}", intent.target.0);
+        return DamageOutcome::Refused("missing damage target");
     };
     if meta.lifecycle != ClientLifecycle::Alive {
-        return DamageOutcome::Refused(DamageRefusal::TargetNotAlive);
+        diag::warn_once!(
+            Sim,
+            "damage target is not alive: client {}",
+            intent.target.0
+        );
+        return DamageOutcome::Refused("damage target is not alive");
     }
     if meta.life_sequence != intent.target_life {
-        return DamageOutcome::Refused(DamageRefusal::StaleLife);
+        diag::warn_once!(
+            Sim,
+            "damage targets a previous life: client {}",
+            intent.target.0
+        );
+        return DamageOutcome::Refused("damage targets a previous life");
     }
     let mut amount = intent.amount;
-    if intent.hitloc != crate::shield::HITLOC
+    if world.ecs().resource::<crate::script::RoundScript>().profile
+        != asset_core::RuntimeProfile::Campaign
+        && intent.hitloc != crate::shield::HITLOC
         && !matches!(intent.source, crate::DamageSource::Melee)
     {
         let scale = world
@@ -679,7 +776,8 @@ pub(crate) fn apply_damage_attempt(
         amount = (amount as f32 * scale) as i32;
     }
     if amount <= 0 {
-        return DamageOutcome::Refused(DamageRefusal::NonPositive);
+        diag::warn_once!(Sim, "non-positive damage: client {}", intent.target.0);
+        return DamageOutcome::Refused("non-positive damage");
     }
     crate::script_player::damage(world, tick, intent, amount)
 }

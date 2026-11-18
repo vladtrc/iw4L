@@ -51,11 +51,12 @@ pub(crate) fn route_fx_mark_commands(
         match cmd.args.as_slice() {
             [] => {
                 let mut msg = format_mark_value(cmd.name.as_str(), *slot);
-                if cmd.name == "fx_mark_profile" && *slot {
-                    if let Some(host) = host.as_ref() {
-                        msg.push(' ');
-                        msg.push_str(&host.0.mark_profile_line());
-                    }
+                if cmd.name == "fx_mark_profile"
+                    && *slot
+                    && let Some(host) = host.as_ref()
+                {
+                    msg.push(' ');
+                    msg.push_str(&host.0.mark_profile_line());
                 }
                 echo(msg, &mut console, &mut line);
             }

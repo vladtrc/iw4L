@@ -23,7 +23,7 @@ fn body_state(runtime: &RoundScript, object: u64) -> Option<&BTreeMap<ArrayKey, 
     let Value::Array(values) = field(runtime, *body, "v")? else {
         return None;
     };
-    runtime.arrays.get(values)
+    runtime.arrays.get(values).map(|values| &**values)
 }
 
 fn integer(values: &BTreeMap<ArrayKey, Value>, key: &str) -> Option<i64> {
@@ -54,6 +54,91 @@ pub(crate) fn entities(runtime: &RoundScript, models: &[EntityCollisionCapabilit
                     .filter(|node| node.state.weight > 0.0)
                     .find_map(|node| node.clip.as_deref())
             });
-        perf::truck(id.to_wire(), state, integer(body, "health"), clip, None);
+        perf::instant!("truck", "iw4l.sim", |ctx| {
+            let (script_model_id, health, death_clip): (u32, Option<i64>, Option<&str>) =
+                (id.to_wire(), integer(body, "health"), clip);
+            ctx.arg("script_model_id", i64::from(script_model_id));
+            ctx.arg("state", state);
+            ctx.arg("health", health);
+            ctx.arg("death_clip", death_clip);
+        });
     }
+}
+
+pub(crate) fn sight(
+    world: &mut bevy_ecs::prelude::World,
+    start: [f32; 3],
+    end: [f32; 3],
+    mask: u32,
+    ignored: &[u64],
+) -> trace_iw4::Trace {
+    capsule(
+        world,
+        movement_iw4::GroundTraceInput {
+            start,
+            end,
+            mins: [0.; 3],
+            maxs: [0.; 3],
+            tracemask: mask,
+        },
+        ignored,
+    )
+}
+
+pub(crate) fn capsule(
+    world: &mut bevy_ecs::prelude::World,
+    input: movement_iw4::GroundTraceInput,
+    ignored: &[u64],
+) -> trace_iw4::Trace {
+    super::presence::settle_collision(world);
+    capsule_settled(world, input, ignored)
+}
+
+/// A query in a read-only batch whose caller has already settled collision.
+/// No script, animation or entity writes may occur between settling and this call.
+pub(crate) fn capsule_settled(
+    world: &mut bevy_ecs::prelude::World,
+    input: movement_iw4::GroundTraceInput,
+    ignored: &[u64],
+) -> trace_iw4::Trace {
+    let (owners, clients) = {
+        let runtime = world.resource::<RoundScript>();
+        (
+            ignored
+                .iter()
+                .filter_map(|id| runtime.entities.get(id)?.presence)
+                .map(crate::AuthorityModelOwner::ScriptModel)
+                .collect::<Vec<_>>(),
+            ignored
+                .iter()
+                .filter_map(|id| runtime.player_client(*id))
+                .collect::<Vec<_>>(),
+        )
+    };
+    let frame = crate::frame::FrameWorld::from_world(world);
+    let mut hit = frame.trace_hull_between(input, &owners);
+    let content = frame.content();
+    frame.visit_players(|client, player| {
+        if clients.contains(&client.0) || player.pm_type >= 2 {
+            return;
+        }
+        let height = if player.pm_flags & 1 != 0 {
+            30.
+        } else if player.pm_flags & 2 != 0 {
+            50.
+        } else {
+            70.
+        };
+        let body = crate::entity_body::EntityBodyPose {
+            bounds: crate::EntityBodyBounds {
+                midpoint: [0., 0., height * 0.5],
+                half_size: [15., 15., height * 0.5],
+                contents: 0x02000000,
+            },
+            origin: player.origin,
+            number: client.0 as u16,
+        };
+        hit = body.clip(&content, hit, input);
+    });
+    hit
 }

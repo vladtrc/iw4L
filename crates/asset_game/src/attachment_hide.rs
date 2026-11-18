@@ -4,18 +4,13 @@ use crate::weapon_catalog::WeaponRegistry;
 
 pub fn effective_hide_tags(registry: &WeaponRegistry, weapon_id: u32) -> Vec<String> {
     let mut tags = registry.hide_tags_of(weapon_id).to_vec();
-    if registry.identity_namespace_of(weapon_id) == Some(crate::AssetNamespace::Iw5) {
-        let scoped = registry
-            .iw5_configuration_of(weapon_id)
-            .is_some_and(|(_, selection)| selection.scope != 0);
-        tags.push(
-            if scoped {
-                "tag_sight_on"
-            } else {
-                "tag_sight_off"
-            }
-            .to_owned(),
-        );
+    if let Some((capture, callback)) = registry.native_capture_of(weapon_id).zip(
+        registry
+            .identity_namespace_of(weapon_id)
+            .and_then(crate::weapon_policy)
+            .and_then(|policy| policy.attachment_hide_tags),
+    ) {
+        tags.extend(callback(capture));
     }
     tags
 }

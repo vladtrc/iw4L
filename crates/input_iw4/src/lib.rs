@@ -257,6 +257,7 @@ pub struct ClientInput {
 
     pub weapon_cycles: Vec<bool>,
     pub action_slots: Vec<usize>,
+    pub command_notifications: Vec<u32>,
 
     pub offhand_hold_cancel: bool,
 
@@ -274,6 +275,7 @@ impl Default for ClientInput {
             stance_latch: 0,
             weapon_cycles: Vec::new(),
             action_slots: Vec::new(),
+            command_notifications: Vec::new(),
             offhand_hold_cancel: false,
             stance_held: None,
             center_view: false,
@@ -299,6 +301,9 @@ fn apply_pair(btn: &mut Kbutton, cmd_id: u32, key: i32, now_msec: i32, frame_mse
 }
 
 pub fn input_cmd(client: &mut ClientInput, cmd_id: u32, key: i32, now_msec: i32, frame_msec: u32) {
+    if command_name(cmd_id).is_some_and(|name| !name.is_empty()) {
+        client.command_notifications.push(cmd_id);
+    }
     match cmd_id {
         1 | 2 => apply_pair(&mut client.kb.attack, cmd_id, key, now_msec, frame_msec),
         3 | 4 => apply_pair(&mut client.kb.melee, cmd_id, key, now_msec, frame_msec),

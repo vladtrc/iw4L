@@ -1,4 +1,4 @@
-use bevy::prelude::Resource;
+use bevy_ecs::prelude::Resource;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MapScriptSoundFacts {

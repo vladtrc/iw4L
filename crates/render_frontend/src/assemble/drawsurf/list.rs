@@ -25,10 +25,10 @@ pub struct DrawSurfList {
 impl DrawSurfList {
     pub fn ingest_from_cull(&mut self, cull: &WorldCull) {
         self.items.clear();
-        self.items.reserve(cull.draw_items.len());
+        self.items.reserve(cull.draws.items.len());
         let mut prev_mat: Option<u16> = None;
         let mut rebinds = 0u32;
-        for item in &cull.draw_items {
+        for item in &cull.draws.items {
             let mat = ((item.key >> 30) & 0xfff) as u16;
             if prev_mat != Some(mat) {
                 rebinds = rebinds.saturating_add(1);
@@ -44,7 +44,7 @@ impl DrawSurfList {
         }
         self.keys = self.items.len() as u32;
         self.rebinds = rebinds;
-        self.draw_items_id = cull.draw_items_id;
+        self.draw_items_id = cull.draws.content_id;
     }
 }
 

@@ -1,4 +1,3 @@
-use super::entities::Link;
 use crate::script::runtime::raise;
 use crate::script::{BTreeMap, Resource, RoundScript, Value};
 use bevy_ecs::prelude::World;
@@ -34,6 +33,10 @@ const EXPLOSION_UPBIAS: f32 = 0.5;
 const EXPLOSION_MIN_FORCE: f32 = 40.0;
 
 impl Mechanics {
+    pub(crate) fn has_physics_body(&self, object: u64) -> bool {
+        self.bodies.contains_key(&object)
+    }
+
     pub(crate) fn start(&mut self, object: u64, motion: Motion) {
         if motion.field == "origin" {
             self.bodies.remove(&object);
@@ -162,10 +165,8 @@ impl Mechanics {
 }
 
 pub(crate) fn advance_mechanics(world: &mut World) {
+    let _span = perf::span_handle!("script_mechanics", "iw4l.sim").enter();
     let request = world.resource::<crate::step::StepRequest>();
-    if !request.reason.advances_authority_world() {
-        return;
-    }
     let now = i64::from(request.tick.0) * i64::from(crate::MATCH_TICK_MS);
     let runtime = world.resource::<RoundScript>();
     if runtime.fault.is_some() || runtime.program.is_none() {
@@ -174,7 +175,7 @@ pub(crate) fn advance_mechanics(world: &mut World) {
     advance_motions(world, now);
     advance_bodies(world);
     advance_slides(world);
-    apply_entity_links(world);
+    super::entity_links::advance(world);
     super::players::apply_player_links(world);
     super::presence::settle_collision(world);
 }
@@ -571,38 +572,6 @@ fn clip_slide(velocity: [f32; 3], normal: [f32; 3]) -> [f32; 3] {
     let dot = slide_dot(velocity, normal);
     let backoff = -(dot - dot.abs() * (1.001 - 1.0));
     std::array::from_fn(|i| velocity[i] + backoff * normal[i])
-}
-
-fn apply_entity_links(world: &mut World) {
-    let mut runtime = world.resource_mut::<RoundScript>();
-    let linked: Vec<(u64, Link)> = runtime
-        .entities
-        .iter()
-        .filter_map(|(id, e)| Some((*id, e.linked_to.clone()?)))
-        .collect();
-    for (id, link) in linked {
-        if !runtime.live(&link.parent) {
-            runtime.entities.get_mut(&id).unwrap().linked_to = None;
-            continue;
-        }
-        let field = |runtime: &mut RoundScript, name| match runtime.object_field(link.parent, name)
-        {
-            Value::Vector(v) => v,
-            _ => [0.0; 3],
-        };
-        let (base, base_angles) = (field(&mut runtime, "origin"), field(&mut runtime, "angles"));
-        let axis = math_iw4::angles_to_axis(base_angles);
-        let offset = link.tag_offset.unwrap_or([0.0; 3]);
-        let local = std::array::from_fn(|i| offset[i] + link.origin[i]);
-        let (child_axis, origin) =
-            math_iw4::matrix_multiply43(math_iw4::angles_to_axis(link.angles), local, axis, base);
-        runtime.set_object_field(id, "origin", Value::Vector(origin));
-        runtime.set_object_field(
-            id,
-            "angles",
-            Value::Vector(math_iw4::axis_to_angles(child_axis)),
-        );
-    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

@@ -1,3 +1,4 @@
+use asset_core::RuntimeProfile;
 use weapon_iw4::{PenetrationDepthTable, split_pen_key};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -16,10 +17,7 @@ pub fn parse_pen_table_info_string(text: &str) -> Result<PenetrationDepthTable, 
         .ok_or(PenTableError::MissingMagic)?;
     let mut table = PenetrationDepthTable::empty();
     let mut parts = rest.split('\\').filter(|p| !p.is_empty());
-    loop {
-        let Some(key) = parts.next() else {
-            break;
-        };
+    while let Some(key) = parts.next() {
         let Some(value) = parts.next() else {
             return Err(PenTableError::OddPair);
         };
@@ -35,12 +33,20 @@ pub fn parse_pen_table_rawfile(data: &[u8]) -> Result<PenetrationDepthTable, Pen
     parse_pen_table_info_string(text)
 }
 
+pub const fn penetration_table_name(profile: RuntimeProfile) -> &'static str {
+    match profile {
+        RuntimeProfile::Campaign => "info/bullet_penetration_sp",
+        RuntimeProfile::Multiplayer => "info/bullet_penetration_mp",
+    }
+}
+
 pub fn capture_pen_table(
+    profile: RuntimeProfile,
     name: &str,
     data: &[u8],
     zlib_compressed: bool,
 ) -> Option<PenetrationDepthTable> {
-    if name != "info/bullet_penetration_mp" {
+    if name != penetration_table_name(profile) {
         return None;
     }
     let mut bytes = if zlib_compressed {

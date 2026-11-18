@@ -139,7 +139,7 @@ fn assert_stack_reserve(exe: &Path) -> Res<()> {
     };
     if reserve < WANT_STACK_RESERVE {
         return Err(format!(
-            "{}: main-thread stack reserve {reserve} < {WANT_STACK_RESERVE}; the /STACK link arg from crates/launcher/build.rs is gone",
+            "{}: main-thread stack reserve {reserve} < {WANT_STACK_RESERVE}; the /STACK link arg from apps/launcher/build.rs is gone",
             exe.display()
         ));
     }

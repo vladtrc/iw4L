@@ -152,7 +152,29 @@ pub fn sample_killcam_seat(
 
     let mut remapped = archived;
     rebase_archived_timers(&mut remapped, rebase_ms);
-    let player_state = apply_killcam_seat(&viewer_ps, &remapped, session.focus);
+    // The scripted seat names the eventual missile even in the preroll.
+    // Keep focus after impact so the camera can hold its last projectile pose.
+    let mut focus = session.focus;
+    if focus.kill_cam_entity != playerstate_iw4::ENTITYNUM_NONE
+        && !session.entity_focus.is_some_and(|entity| {
+            entity.entity_number == focus.kill_cam_entity
+                && entity.birthtime.is_some_and(|time| time <= frame_base_ms)
+        })
+        && !frame
+            .snapshot
+            .meta
+            .entities
+            .iter()
+            .any(|e| e.number == focus.kill_cam_entity)
+        && !frame
+            .snapshot
+            .projectiles
+            .iter()
+            .any(|p| p.entnum == focus.kill_cam_entity)
+    {
+        focus.kill_cam_entity = playerstate_iw4::ENTITYNUM_NONE;
+    }
+    let player_state = apply_killcam_seat(&viewer_ps, &remapped, focus);
 
     Some(SeatSample {
         player_state,
@@ -197,7 +219,7 @@ pub fn snapshot_override_for_viewer(
     let hidden_movers = live.meta.script_movers.iter().any(|mover| {
         mover.shown_to != 0 && mover.state.e_flags & entity_iw4::CG_SCRIPT_MOVER_NODRAW != 0
     });
-    (hidden_movers || seat_applies(seats, live, viewer))
+    (hidden_movers || !live.meta.entity_hidden_from.is_empty() || seat_applies(seats, live, viewer))
         .then(|| snapshot_for_viewer(archive, seats, live, viewer, now_ms))
 }
 
@@ -220,6 +242,7 @@ pub fn snapshot_and_sample_for_viewer(
 ) -> (Snapshot, Option<SeatSample>) {
     let (mut out, sample) = seat_snapshot(archive, seats, live, viewer, now_ms);
     reveal_shown_movers(&mut out, viewer);
+    hide_for_viewer(&mut out, viewer);
     (out, sample)
 }
 
@@ -233,14 +256,47 @@ fn reveal_shown_movers(out: &mut Snapshot, viewer: ClientId) {
             continue;
         }
         if mover.shown_to & bit == 0 {
-            meta.entity_dobjs
-                .retain(|(owner, _)| owner.script_model() != Some(mover.id));
             continue;
         }
-        let hidden = mover.state.clone();
+        let hidden = mover.state;
         mover.state.e_flags &= !entity_iw4::CG_SCRIPT_MOVER_NODRAW;
         for es in meta.entities.iter_mut().filter(|es| **es == hidden) {
-            *es = mover.state.clone();
+            *es = mover.state;
+        }
+    }
+}
+
+// This is a viewer's presentation copy. Keep every physical payload and DObj
+// description, and express visibility through the established draw flag.
+fn hide_for_viewer(out: &mut Snapshot, viewer: ClientId) {
+    let Some(bit) = 1u64.checked_shl(viewer.0) else {
+        return;
+    };
+    let hidden: std::collections::BTreeSet<_> = out
+        .meta
+        .entity_hidden_from
+        .iter()
+        .filter(|(_, mask)| mask & bit != 0)
+        .map(|(number, _)| i32::from(*number))
+        .collect();
+    for (client, player) in &mut out.players {
+        if hidden.contains(&(client.0 as i32)) {
+            player.e_flags |= playerstate_iw4::eflags::NODRAW;
+        }
+    }
+    for entity in &mut out.meta.entities {
+        if hidden.contains(&entity.number) {
+            entity.e_flags |= playerstate_iw4::eflags::NODRAW;
+        }
+    }
+    for mover in &mut out.meta.script_movers {
+        if hidden.contains(&mover.state.number) {
+            mover.state.e_flags |= playerstate_iw4::eflags::NODRAW;
+        }
+    }
+    for corpse in &mut out.meta.corpses.slots {
+        if corpse.occupied && hidden.contains(&corpse.entnum) {
+            corpse.e_flags |= playerstate_iw4::eflags::NODRAW;
         }
     }
 }
@@ -314,6 +370,11 @@ fn overlay_archived_world(
     out.meta.sound_aliases = live.meta.sound_aliases.clone();
     out.meta.hud_strings = live.meta.hud_strings.clone();
     out.meta.hud_materials = live.meta.hud_materials.clone();
+    // Server info is a configstring: a killcam replays the world, not it.
+    out.meta.objectives.server_info = live.meta.objectives.server_info.clone();
+    // Playback pacing follows the live authority even when its archived view
+    // predates the slow-motion transition.
+    out.meta.objectives.slow_motion = live.meta.objectives.slow_motion;
 
     let archived_viewer = archived
         .players
@@ -437,7 +498,7 @@ fn overlay_killcam_hud(
         .meta
         .for_client(viewer)
         .map(|m| m.hud_current.clone())
-        .unwrap_or_default();
+        .unwrap_or(Vec::new());
     let wipe = session.focus.kill_cam_entity != playerstate_iw4::HITSCAN_KILL_CAM_ENTITY;
     let mut archival = if wipe {
         Vec::new()
@@ -445,7 +506,7 @@ fn overlay_killcam_hud(
         archived
             .and_then(|snap| snap.meta.for_client(session.focus_client))
             .map(|m| m.hud_archival.clone())
-            .unwrap_or_default()
+            .unwrap_or(Vec::new())
     };
     sim::rebase_hud_archival(&mut archival, rebase_ms);
     if let Some((_, meta)) = out.meta.clients.iter_mut().find(|(id, _)| *id == viewer) {

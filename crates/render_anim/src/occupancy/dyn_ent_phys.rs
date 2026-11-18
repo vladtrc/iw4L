@@ -28,6 +28,18 @@ const SLEEP_MS: i32 = 200;
 #[derive(Resource, Clone, Default)]
 pub struct DynEntPhysClip(pub Option<Arc<ClipCollision>>);
 
+fn clip_for_world<'a>(
+    base: &'a DynEntPhysClip,
+    atlas: Option<&'a super::killcam::AtlasClips>,
+    world: usize,
+) -> Option<&'a ClipCollision> {
+    if world == 0 {
+        base.0.as_deref()
+    } else {
+        atlas?.clips.get(world)?.as_deref()
+    }
+}
+
 #[derive(Resource, Default)]
 pub struct DynEntPhysWorld {
     last_time: Option<i32>,
@@ -58,6 +70,8 @@ pub struct DynEntPhysImpulse {
 
 #[derive(Clone, Copy, Debug)]
 struct DynEntPhysBody {
+    world: usize,
+    frame: asset_core::world_frame::WorldFrame,
     origin: Vec3,
     vel: Vec3,
     mins: [f32; 3],
@@ -78,6 +92,7 @@ pub(crate) fn register_dyn_ent_phys(app: &mut App) {
 pub fn step_phys_world0(
     mut world: ResMut<DynEntPhysWorld>,
     clip: Res<DynEntPhysClip>,
+    atlas: Option<Res<super::killcam::AtlasClips>>,
     clock: Option<Res<FrameClock>>,
     catalog: Option<Res<asset_world::MapXModelSceneCatalog>>,
     mut impulses: MessageReader<DynEntPhysImpulse>,
@@ -107,26 +122,46 @@ pub fn step_phys_world0(
             continue;
         }
         let (mins, maxs) = xmodel_phys_hull(catalog, &inst.current_model);
-        let add_vel = impulse.impulse / preset.mass;
-        let phys_clip = clip.0.as_deref();
+        let physical_world = inst.world.index();
+        let phys_clip = clip_for_world(&clip, atlas.as_deref(), physical_world);
         if let Some(body) = world.bodies.get_mut(&entity) {
-            body.vel += add_vel;
+            body.vel += Vec3::from_array(body.frame.vector_to_local(impulse.impulse.to_array()))
+                / preset.mass;
             body.asleep_ms = 0;
             continue;
         }
         let Some(clip) = phys_clip else {
             continue;
         };
-        let RecoveryOutcome::Recovered(origin) =
-            clear_wake_pose(clip, transform.translation, mins, maxs, COLLISION_MASK)
-        else {
+        let frame = if physical_world == 0 {
+            asset_core::world_frame::WorldFrame::IDENTITY
+        } else {
+            let Some(frame) = atlas
+                .as_ref()
+                .and_then(|atlas| atlas.flight.as_ref())
+                .and_then(|(atlas, _, _)| atlas.space.frame(inst.world).ok())
+            else {
+                continue;
+            };
+            frame
+        };
+        let RecoveryOutcome::Recovered(origin) = clear_wake_pose(
+            clip,
+            Vec3::from_array(frame.point_to_local(transform.translation.to_array())),
+            mins,
+            maxs,
+            COLLISION_MASK,
+        ) else {
             continue;
         };
         world.bodies.insert(
             entity,
             DynEntPhysBody {
+                world: physical_world,
+                frame,
                 origin,
-                vel: add_vel,
+                vel: Vec3::from_array(frame.vector_to_local(impulse.impulse.to_array()))
+                    / preset.mass,
                 mins,
                 maxs,
                 bounce: preset.bounce,
@@ -148,7 +183,6 @@ pub fn step_phys_world0(
             None => world.last_time = Some(now),
             Some(last) if now <= last => {}
             Some(last) => {
-                let clip = clip.0.as_deref();
                 let mut remain = now.saturating_sub(last);
                 let mut left = MAX_ITERS;
                 let mut advanced = 0i32;
@@ -160,14 +194,8 @@ pub fn step_phys_world0(
                     }
                     .clamp(1, remain);
                     let dt = step as f32 / 1000.0;
-                    if let Some(clip) = clip {
-                        for body in world.bodies.values_mut() {
-                            integrate_body(body, clip, dt);
-                        }
-                    } else {
-                        for body in world.bodies.values_mut() {
-                            integrate_free(body, dt);
-                        }
+                    for body in world.bodies.values_mut() {
+                        integrate_in_world(body, &clip, atlas.as_deref(), dt);
                     }
                     remain -= step;
                     left -= 1;
@@ -195,9 +223,10 @@ pub fn step_phys_world0(
         let Some(body) = world.bodies.get(&entity) else {
             continue;
         };
-        transform.translation = body.origin;
-        inst.lighting_origin = body.origin.to_array();
-        inst.transform.translation = body.origin;
+        let origin = Vec3::from_array(body.frame.point_to_scene(body.origin.to_array()));
+        transform.translation = origin;
+        inst.lighting_origin = origin.to_array();
+        inst.transform.translation = origin;
     }
 
     for entity in sleep {
@@ -230,6 +259,21 @@ fn clear_wake_pose(
         }
     }
     RecoveryOutcome::Blocked
+}
+
+fn integrate_in_world(
+    body: &mut DynEntPhysBody,
+    base: &DynEntPhysClip,
+    atlas: Option<&super::killcam::AtlasClips>,
+    dt: f32,
+) {
+    if let Some(local_clip) = clip_for_world(base, atlas, body.world) {
+        integrate_body(body, local_clip, dt);
+    } else if body.world == 0 {
+        integrate_free(body, dt);
+    } else {
+        body.vel = Vec3::ZERO;
+    }
 }
 
 fn integrate_free(body: &mut DynEntPhysBody, dt: f32) {

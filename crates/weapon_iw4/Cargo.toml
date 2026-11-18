@@ -6,6 +6,8 @@ license.workspace = true
 description = "Retail IW4 weapon definitions and state machine: spread, recoil, transitions."
 
 [dependencies]
+anim_iw4.workspace = true
+entity_iw4.workspace = true
 playerstate_iw4.workspace = true
 asset_iw4.workspace = true
 math_iw4.workspace = true

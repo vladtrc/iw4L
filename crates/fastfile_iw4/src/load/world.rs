@@ -247,7 +247,6 @@ fn load_path_data(s: &mut ZoneStream<'_>, path: Ptr) -> Result<()> {
     let node_stride = s.layout(sz::PATH_NODE, 168);
 
     let nodes = s.follow_array(path, s.layout(4, 8), 4, node_stride, node_count)?;
-    s.record_path_data(crate::PathDataGeometry { nodes, node_count });
     if let Some(nodes) = nodes {
         let link_field = s.layout(60, 64);
         for i in 0..node_count {
@@ -262,7 +261,13 @@ fn load_path_data(s: &mut ZoneStream<'_>, path: Ptr) -> Result<()> {
 
     s.plain_array(path, s.layout(16, 32), 2, 2, node_count)?;
     s.plain_array(path, s.layout(20, 40), 2, 2, node_count)?;
-    s.plain_array(path, s.layout(28, 56), 1, 1, vis_bytes)?;
+    let visibility = s.plain_array(path, s.layout(28, 56), 1, 1, vis_bytes)?;
+    s.record_path_data(crate::PathDataGeometry {
+        nodes,
+        node_count,
+        visibility,
+        visibility_bytes: vis_bytes,
+    });
 
     if let Some(tree) = s.follow_array(
         path,

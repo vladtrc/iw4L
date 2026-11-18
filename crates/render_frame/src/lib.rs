@@ -6,18 +6,20 @@ pub mod geometry;
 pub mod gpu_contract;
 pub mod packet;
 pub mod packing;
+pub mod portal;
+pub mod portal_plan;
+pub mod portal_stencil;
 pub mod products;
 pub mod retained;
 pub mod skinning;
 pub mod sun_effects;
 pub mod sun_shadow;
 pub mod texture_bind;
+pub mod water_sheeting;
 
 pub use code_mesh::{
-    CODE_MESH_ARGS_CAP, CODE_MESH_ARGS_STRIDE, CODE_MESH_INDEX_CAP, CODE_MESH_VERT_CAP,
-    CODE_MESH_VERT_STRIDE, CODE_MESH_WARN_ARGS, CODE_MESH_WARN_INDS, CODE_MESH_WARN_VERTS,
-    GfxMeshData, get_code_mesh_args, get_code_mesh_verts, reserve_code_mesh,
-    reserve_code_mesh_indices, reserve_code_mesh_verts, shrink_code_mesh_verts,
+    CODE_MESH_ARGS_CAP, CODE_MESH_INDEX_CAP, CODE_MESH_VERT_CAP, CODE_MESH_VERT_STRIDE,
+    GfxMeshData, reserve_code_mesh, reserve_code_mesh_indices, reserve_code_mesh_verts,
 };
 pub use entries::{
     GfxSmodelRigidEntry, GfxTrianglesListEntry, GfxXModelRigidEntry, SMODEL_RIGID_ENTRY_STRIDE,
@@ -25,7 +27,7 @@ pub use entries::{
     smodel_rigid_index_run_continues, triangles_list_run_continues,
     xmodel_rigid_index_run_continues,
 };
-pub use exec::{MaterialExecFrame, OutdoorLookup, SpotShadowReceiver};
+pub use exec::{MaterialExecFrame, OutdoorLookup, SpotShadowReceiver, WorldCamera};
 pub use geometry::{
     DYNAMIC_INDEX_BUFFER_CAPACITY, PackedVertexRefusal, SmodelVertex, SurfaceLightmapId,
     SurfaceReflectionProbeId, SurfaceSamplerInputs, WorldVertex, WorldVertexRefusal,
@@ -44,6 +46,9 @@ pub use packet::{
     SRC_SMODEL_SKINNED_PTR, SRC_WORLD_COUNT, SRC_WORLD_PTR, SRC_XMODEL_RIGID_COUNT,
     SRC_XMODEL_RIGID_PTR,
 };
+pub use portal::{
+    PortalAtlas, PortalCamera, PortalDoor, PortalOpening, PortalPair, PortalSurfaces, PortalView,
+};
 pub use products::{
     FrameMaterialRefusal, FrameProduct, FrameProductKind, FrameProductStatus,
     FrameProductsSnapshot, MissingProductCause, ProductTarget, RenderFocusFrame, SourceRevisions,
@@ -60,4 +65,8 @@ pub use sun_shadow::{
     SunShadowForcedFrame, SunShadowPartition, SunShadowPartitionLists, SunShadowReceiverConstants,
     SunShadowViewport,
 };
+pub mod portal_budget;
+mod portal_entity;
+pub mod portal_occlusion;
+pub use portal_entity::{PortalEntityAperture, PortalEntityInstance};
 pub use texture_bind::TextureBindIdentity;

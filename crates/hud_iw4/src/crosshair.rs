@@ -257,18 +257,16 @@ pub const CROSSHAIR_POS_X_SCALE: f32 = -320.0;
 pub const CROSSHAIR_POS_Y_SCALE: f32 = -240.0;
 
 #[must_use]
-#[expect(clippy::too_many_arguments, reason = "scalar and view-axis inputs")]
 pub fn calc_crosshair_position(
     gun_pitch: f32,
     gun_yaw: f32,
-    view_roll: f32,
     view_forward: [f32; 3],
     view_right: [f32; 3],
     view_up: [f32; 3],
     tan_half_fov_x: f32,
     tan_half_fov_y: f32,
 ) -> [f32; 2] {
-    let (gun_dir, _, _) = math_iw4::angle_vectors([gun_pitch, gun_yaw, view_roll]);
+    let (gun_dir, _, _) = math_iw4::angle_vectors([gun_pitch, gun_yaw, 0.0]);
     let dot =
         view_forward[0] * gun_dir[0] + view_forward[1] * gun_dir[1] + view_forward[2] * gun_dir[2];
     if 0.0 < dot && 0.0 < tan_half_fov_x {

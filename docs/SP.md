@@ -42,8 +42,11 @@ format facts to stay compatible with, not code.
   (`asset_world::path_nodes`) for SP AI; vehicle tracks are not consumed yet.
 - `asset_transport::list_sp_maps`: non-MP IW4 zones with a
   `video/<stem>_load.bik` (SP has no `_load` zones and no `localized_common`).
-  Resolve stems with `find_zone_file_version`, not `find_zone_file` (it aliases
-  `boneyard` to `mp_boneyard`). Special Ops levels layer over a base level zone.
+  Campaign menu, next-level and reload requests carry an explicit runtime
+  profile. All map requests resolve exact stems with `find_zone_file`;
+  `boneyard` and `mp_boneyard` are distinct maps. An explicit campaign
+  request refuses a conflicting content profile.
+  Special Ops levels layer over a base level zone.
 - `Catalog::iw4_sp()`: the generated MP list plus the hand-kept
   `profile/iw4_sp_catalog.rs` (every name `maps/trainer` reaches).
 - `iw4l check-scripts <zone>... [<root module>...]`: links the named roots
@@ -51,21 +54,25 @@ format facts to stay compatible with, not code.
   wins) as its own root, against `Catalog::iw4_sp()`, prints parse
   faults and unresolved names, exits 1 if any. Retail ships unloaded scripts
   that do not parse (`animscripts/traverse/stairs_*`).
-- Compiler: `childthread` (ends with its spawning thread), vector constants.
-- Video: `CinematicInGame[Sync|Loop]`, `StopCinematicInGame` and
-  `IsCinematicPlaying` set `EngineState::cinematic`, timed by `.bik` header
-  lengths read at install (`LevelData::videos`, only when scripts use them);
-  `console::cinematic` plays it on the local client, not yet on remote ones.
-  `video/<map>_load.bik`, if any, plays over a map load and holds advancement
-  and admission (`frame::LoadCinematicPlaying`); skippable once the map is
-  ready. In-world screens (`CinematicInGameLoopResident`) are refused.
+- Compiler: `childthread` snapshots existing `endon` handlers from its caller
+  and enclosing calls; it survives the caller’s return. Vector constants are supported.
+- Video: script cinematic calls create one identified playback request for the
+  local campaign client. `IsCinematicPlaying` stays true until that request is
+  stopped or the client reports playback completion/failure through the reliable
+  action queue. Checkpoint reload starts it again with a fresh request ID.
+  This path does not publish cinematics to remote clients. LoopResident currently
+  uses ordinary decoder looping; resident caching and world-surface output are
+  not implemented. `video/<map>_load.bik`, if any, plays over a map load and holds
+  advancement and admission (`frame::LoadCinematicPlaying`); keyboard skipping
+  is available once ready. Console `skipvideo` ends the current briefing or
+  script cinematic through the normal playback-completion path.
 
-## Where MP is hardwired
+## Mode selection boundaries
 
 | what | where |
 |---|---|
-| common zone is `common_mp` | `assets::match_load::approve_map_load`, `session_load/common_cache.rs`, `common_walks.rs` |
-| MP zone alias on bare stems | `asset_transport::discover::find_zone_stem` |
+| common/startup defaults | selected by loaded `RuntimeProfile`; `CommonKey` separates profiles and paths |
+| exact map names for all requests | `asset_transport::discover::find_zone_file` |
 | spawns are `mp_dm_spawn*` | `gamemode_iw4::ffa`, `asset_world::map_entities` |
 | Special Ops tile says NOT AVAILABLE | `crates/ui/menus/frontend.json` |
 
@@ -100,11 +107,9 @@ format facts to stay compatible with, not code.
    another level drops it.
    The bootstrap kind is `GameModeKind::Campaign` (no teams, no team spawns;
    the player is placed by `MatchBootstrap::campaign`).
-3. Frontend — done. `iw4l_select` tints its tiles (Special Ops blue,
-   Campaign green, Multiplayer yellow) and displays each mode's soldier art
-   (`mw2_main_{co,sp,mp}_image`) properly framed and contained within each
-   tile, highlighting the focused mode (`ui_iw4l_focus`). The
-   Campaign tile opens `iw4l_campaign`, the retail-style SP main menu: the
+3. Frontend — the game opens at `iw4l_main`. Singleplayer (WIP) contains
+   the mode browser and an MW2 Campaign button opening `iw4l_campaign`,
+   the retail-style SP main menu: the
    last campaign level started (`campaign.txt` beside `settings.cfg`, written
    on start and on `missionsuccess`/`changelevel`) as its title, Resume Game,
    New Game (first level in story order), Mission Select

@@ -78,7 +78,7 @@ pub fn spark_fountain_slot_for_handle(handle: u16) -> Option<usize> {
         return None;
     }
     let off = handle as usize;
-    if off % FX_SPARK_FOUNTAIN_CLUSTER_STRIDE != 0 {
+    if !off.is_multiple_of(FX_SPARK_FOUNTAIN_CLUSTER_STRIDE) {
         return None;
     }
     let slot = off / FX_SPARK_FOUNTAIN_CLUSTER_STRIDE;
@@ -352,7 +352,7 @@ pub fn spark_fountain_trace_until_miss_or_hit(
 }
 
 pub fn spark_fountain_boost(boost_time: f32, boost_factor: f32, age: f32) -> (f32, f32) {
-    if !(boost_time > 0.0) {
+    if boost_time <= 0.0 || boost_time.is_nan() {
         return (age, 1.0);
     }
     let k = FX_SPARK_FOUNTAIN_BOOST_HALF_PI / boost_time;
@@ -370,7 +370,7 @@ pub fn spark_fountain_boost(boost_time: f32, boost_factor: f32, age: f32) -> (f3
 }
 
 pub fn spark_fountain_wrap_loop_time(t: f32, loop_time: f32) -> f32 {
-    if !(loop_time > 0.0) {
+    if loop_time <= 0.0 || loop_time.is_nan() {
         return t;
     }
     let mut out = t;
@@ -568,14 +568,19 @@ pub fn spark_fountain_spark_n_clamped(spark_count: i32) -> u8 {
 }
 
 #[inline]
-pub fn spark_fountain_atlas_uv(col_bits: u8, row_bits: u8, cell: u32) -> [f32; 4] {
+pub fn spark_fountain_atlas_uv(col_bits: u8, row_bits: u8, cell: u32) -> crate::FxAtlasUvRect {
     let cols = 1u32 << (col_bits & 0x1f);
     let rows = 1u32 << (row_bits & 0x1f);
     let u_span = 1.0 / cols as f32;
     let v_span = 1.0 / rows as f32;
     let u0 = (cell % cols) as f32 * u_span;
     let v0 = ((cell / cols) % rows) as f32 * v_span;
-    [u0, u_span, v0, v_span]
+    crate::FxAtlasUvRect {
+        u0,
+        u_span,
+        v0,
+        v_span,
+    }
 }
 
 #[inline]
@@ -628,10 +633,7 @@ pub fn spark_fountain_cell_verts(
     ribbon: [[f32; 3]; 4],
     camera: [f32; 3],
     size0: f32,
-    uv_u0: f32,
-    uv_u_span: f32,
-    uv_v0: f32,
-    uv_v_span: f32,
+    uv: crate::FxAtlasUvRect,
     uv_v_lerp: [f32; 4],
 ) -> [GfxPosTexVertex; 8] {
     let half = size0 * FX_SPARK_FOUNTAIN_HALF;
@@ -659,12 +661,12 @@ pub fn spark_fountain_cell_verts(
         nrm[i] = [n[0] * half, n[1] * half, n[2] * half];
         i += 1;
     }
-    let u1 = uv_u0 + uv_u_span;
+    let u1 = uv.u0 + uv.u_span;
     let v = [
-        uv_v0 + uv_v_span * uv_v_lerp[0],
-        uv_v0 + uv_v_span * uv_v_lerp[1],
-        uv_v0 + uv_v_span * uv_v_lerp[2],
-        uv_v0 + uv_v_span * uv_v_lerp[3],
+        uv.v0 + uv.v_span * uv_v_lerp[0],
+        uv.v0 + uv.v_span * uv_v_lerp[1],
+        uv.v0 + uv.v_span * uv_v_lerp[2],
+        uv.v0 + uv.v_span * uv_v_lerp[3],
     ];
     let p = ribbon;
     let s0 = side[0];
@@ -699,12 +701,12 @@ pub fn spark_fountain_cell_verts(
         ],
     ];
     let uv = [
-        [uv_u0, v[0]],
-        [uv_u0, v[1]],
+        [uv.u0, v[0]],
+        [uv.u0, v[1]],
         [u1, v[0]],
         [u1, v[1]],
-        [uv_u0, v[2]],
-        [uv_u0, v[3]],
+        [uv.u0, v[2]],
+        [uv.u0, v[3]],
         [u1, v[2]],
         [u1, v[3]],
     ];

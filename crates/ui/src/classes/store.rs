@@ -126,12 +126,12 @@ impl SessionClassStore {
     }
 
     pub fn server_families(&self) -> Option<frame::AssetFamilies> {
-        self.server_families
+        self.server_families.clone()
     }
 
     pub fn lock_reason(&self, index: usize) -> Option<String> {
         let slot = self.slots.get(index)?;
-        if let Some(families) = self.server_families {
+        if let Some(families) = &self.server_families {
             for reference in [&slot.primary, &slot.secondary, &slot.lethal, &slot.tactical] {
                 if let Some(key) = asset_game::FamilyKey::parse(reference)
                     && !families.enabled(key.namespace.as_str())
@@ -274,9 +274,9 @@ fn decode_slots(text: &str) -> Option<Vec<ClassSlotState>> {
         slots.push(ClassSlotState {
             name: (*name).to_owned(),
             primary: (*primary).to_owned(),
-            primary_attachments: attachments(*primary_attachments),
+            primary_attachments: attachments(primary_attachments),
             secondary: (*secondary).to_owned(),
-            secondary_attachments: attachments(*secondary_attachments),
+            secondary_attachments: attachments(secondary_attachments),
             lethal: (*lethal).to_owned(),
             tactical: (*tactical).to_owned(),
             perk1: (*perk1).to_owned(),
@@ -294,7 +294,7 @@ pub(crate) fn load_class_store(
     identity: Option<Res<frame::LaunchIdentity>>,
     mut file: ResMut<ClassStoreFile>,
     mut store: ResMut<SessionClassStore>,
-    catalog: Option<Res<crate::ClassLoadoutCatalog>>,
+    catalog: Res<crate::ClassLoadoutCatalog>,
 ) {
     if file.loaded {
         return;
@@ -305,9 +305,6 @@ pub(crate) fn load_class_store(
     if identity.artifacts.as_os_str().is_empty() {
         return;
     }
-    let Some(catalog) = catalog else {
-        return;
-    };
     let Some(registry) = catalog.resolver.0.as_deref() else {
         return;
     };
@@ -388,7 +385,7 @@ fn write_class_file(path: &std::path::Path, contents: &str) -> std::io::Result<(
 
 pub(crate) fn save_class_store(
     store: Res<SessionClassStore>,
-    catalog: Option<Res<crate::ClassLoadoutCatalog>>,
+    catalog: Res<crate::ClassLoadoutCatalog>,
     mut file: ResMut<ClassStoreFile>,
 ) {
     if !file.loaded
@@ -399,9 +396,6 @@ pub(crate) fn save_class_store(
     {
         return;
     }
-    let Some(catalog) = catalog else {
-        return;
-    };
     if !store.is_changed() && file.retry_at.is_none() && file.written.is_some() {
         return;
     }

@@ -172,19 +172,23 @@ pub(crate) fn spray_spark_fountain(
     handle: u16,
     origin: [f32; 3],
     cone_axis: [f32; 3],
-    flags: i32,
-    spark_count: i32,
-    vel_min: f32,
-    vel_max: f32,
-    vel_cone_frac: f32,
-    gravity: f32,
-    spark_length: f32,
-    loop_time: f32,
-    boost_time: f32,
-    boost_factor: f32,
-    bounce_frac: f32,
-    bounce_rand: f32,
+    def: &crate::def::FxElemDefInfo,
 ) -> FountainSpray {
+    let &crate::def::FxElemDefInfo {
+        flags,
+        spark_count,
+        spark_vel_min: vel_min,
+        spark_vel_max: vel_max,
+        spark_vel_cone_frac: vel_cone_frac,
+        spark_gravity: gravity,
+        spark_length,
+        spark_loop_time: loop_time,
+        spark_boost_time: boost_time,
+        spark_boost_factor: boost_factor,
+        spark_bounce_frac: bounce_frac,
+        spark_bounce_rand: bounce_rand,
+        ..
+    } = def;
     let Some(dense) = spark_fountain_slot_for_handle(handle) else {
         return FountainSpray::MeshFull;
     };
@@ -320,7 +324,7 @@ pub(crate) fn emit_spark_fountain_custom_cells(
                     };
                     let uv = spark_fountain_atlas_uv(0, 0, cell);
                     out.push(spark_fountain_cell_verts(
-                        ribbon, camera, size0, uv[0], uv[1], uv[2], uv[3], uv_v_lerp,
+                        ribbon, camera, size0, uv, uv_v_lerp,
                     ));
                     cell = cell.saturating_add(1);
                 }

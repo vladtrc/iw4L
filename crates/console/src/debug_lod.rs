@@ -46,26 +46,22 @@ pub(crate) fn route_lod_ramp_commands(
     };
     let show_rigid = |ramp: &LodRampDvar| {
         format!(
-            "r_lodScaleRigid = {}  r_lodBiasRigid = {}  scale_last = {}  world_unit = {}  t5 scale/bias/applied = {}/{}/{}",
+            "r_lodScaleRigid = {}  r_lodBiasRigid = {}  scale_last = {}  world_unit = {}; {}",
             opt_f32(ramp.scale_mid),
             opt_f32(ramp.bias_mid),
             opt_f32(ramp.scale_last),
             opt_f32(ramp.world_unit),
-            ramp.t5_scale,
-            ramp.t5_bias,
-            ramp.t5.applied_inv_scale
+            ramp.profiles.summary()
         )
     };
     let show_skinned = |ramp: &LodRampSkinnedDvar| {
         format!(
-            "r_lodScaleSkinned = {}  r_lodBiasSkinned = {}  scale_last = {}  world_unit = {}  t5 scale/bias/applied = {}/{}/{}",
+            "r_lodScaleSkinned = {}  r_lodBiasSkinned = {}  scale_last = {}  world_unit = {}; {}",
             opt_f32(ramp.scale_mid),
             opt_f32(ramp.bias_mid),
             opt_f32(ramp.scale_last),
             opt_f32(ramp.world_unit),
-            ramp.t5_scale,
-            ramp.t5_bias,
-            ramp.t5.applied_inv_scale
+            ramp.profiles.summary()
         )
     };
 
@@ -76,7 +72,7 @@ pub(crate) fn route_lod_ramp_commands(
                 [arg] => match arg.parse::<f32>() {
                     Ok(v) if v.is_finite() => {
                         ramp.scale_mid = Some(v);
-                        ramp.t5_scale = v;
+                        ramp.profiles.set_scale(v);
                         echo(show_rigid(ramp), &mut console, &mut line);
                     }
                     _ => echo(
@@ -96,7 +92,7 @@ pub(crate) fn route_lod_ramp_commands(
                 [arg] => match arg.parse::<f32>() {
                     Ok(v) if v.is_finite() => {
                         ramp.bias_mid = Some(v);
-                        ramp.t5_bias = v;
+                        ramp.profiles.set_bias(v);
                         echo(show_rigid(ramp), &mut console, &mut line);
                     }
                     _ => echo(
@@ -116,7 +112,7 @@ pub(crate) fn route_lod_ramp_commands(
                 [arg] => match arg.parse::<f32>() {
                     Ok(v) if v.is_finite() => {
                         skinned.scale_mid = Some(v);
-                        skinned.t5_scale = v;
+                        skinned.profiles.set_scale(v);
                         echo(show_skinned(skinned), &mut console, &mut line);
                     }
                     _ => echo(
@@ -136,7 +132,7 @@ pub(crate) fn route_lod_ramp_commands(
                 [arg] => match arg.parse::<f32>() {
                     Ok(v) if v.is_finite() => {
                         skinned.bias_mid = Some(v);
-                        skinned.t5_bias = v;
+                        skinned.profiles.set_bias(v);
                         echo(show_skinned(skinned), &mut console, &mut line);
                     }
                     _ => echo(

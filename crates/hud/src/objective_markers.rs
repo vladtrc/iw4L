@@ -22,10 +22,11 @@ pub(crate) fn marker_cmds<'a>(
     camera: (&Camera, &GlobalTransform),
     catalog: Option<&'a MenuCatalog>,
     strings: Option<&PreparedLocalizedStrings>,
+    time_ms: i32,
     fonts: &mut HashMap<String, &'a asset_game::FontDef>,
 ) -> Vec<Draw2dCmd> {
     let objectives = &snapshot.meta.objectives;
-    if objectives.list.is_empty() {
+    if !objectives.campaign_mode {
         return Vec::new();
     }
     let (camera, transform) = camera;
@@ -35,12 +36,15 @@ pub(crate) fn marker_cmds<'a>(
     let (w, h) = (surface.width(), surface.height());
     let font = catalog.and_then(|c| c.font(crate::font_overlay::HUD_SMALL_FONT));
     let mut cmds = Vec::new();
-    for objective in objectives
-        .compass
+    for (objective, origin) in objectives
+        .campaign
         .iter()
         .filter(|o| o.state == sim::ObjectiveState::Current)
+        .flat_map(|objective| {
+            positions(snapshot, objective, time_ms).map(move |origin| (objective, origin))
+        })
     {
-        let world = Vec3::from_array(objective.origin);
+        let world = Vec3::from_array(origin);
         let depth = (world - eye).dot(forward);
         let mirrored = if depth <= 0.0 {
             world - forward * (2.0 * depth - 1.0)
@@ -56,7 +60,10 @@ pub(crate) fn marker_cmds<'a>(
         } else {
             let center = Vec2::new(w, h) * 0.5;
             let half = (center - Vec2::splat(EDGE_PAD * scale)).max(Vec2::ONE);
-            let dir = pos - center;
+            let mut dir = pos - center;
+            if dir.length_squared() <= f32::EPSILON {
+                dir = Vec2::Y;
+            }
             let reach = (half.x / dir.x.abs().max(f32::EPSILON))
                 .min(half.y / dir.y.abs().max(f32::EPSILON));
             center + dir * reach
@@ -121,19 +128,22 @@ pub(crate) fn marker_cmds<'a>(
 }
 
 fn label(
-    objective: &sim::CompassObjective,
+    objective: &sim::CampaignObjective,
     distance: f32,
     strings: Option<&PreparedLocalizedStrings>,
 ) -> String {
-    let localize = |key: &str| {
-        strings
-            .and_then(|strings| crate::hudelem::resolve_hud_text(strings, key))
-            .unwrap_or_default()
+    let localize = |raw: &str| {
+        asset_game::resolve_script_message(raw, |key| {
+            strings
+                .and_then(|strings| strings.0.text(key))
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(String::new)
     };
-    if !objective.label.is_empty() {
-        return localize(&objective.label);
+    if !objective.pointer_text.is_empty() {
+        return localize(&objective.pointer_text);
     }
-    if objective.follows {
+    if objective.entity.is_some() {
         return localize("CGAME_OBJECTIVE_FOLLOWTEXT_DEFAULT");
     }
     let metres = distance * METRES_PER_UNIT;
@@ -142,4 +152,44 @@ fn label(
     } else {
         format!("{}m", metres.round() as i32)
     }
+}
+
+fn positions<'a>(
+    snapshot: &sim::Snapshot,
+    objective: &'a sim::CampaignObjective,
+    time_ms: i32,
+) -> impl Iterator<Item = [f32; 3]> + 'a {
+    let first = match objective.entity {
+        Some(number) => {
+            let origin = snapshot
+                .players
+                .iter()
+                .find(|(id, _)| id.0 == u32::from(number))
+                .map(|(_, player)| player.origin)
+                .or_else(|| {
+                    snapshot
+                        .meta
+                        .entities
+                        .iter()
+                        .find(|entity| entity.number == i32::from(number))
+                        .map(|entity| {
+                            entity_iw4::evaluate_trajectory(
+                                &entity_iw4::Trajectory {
+                                    tr_type: entity.tr_type,
+                                    tr_time: entity.tr_time,
+                                    tr_duration: entity.tr_duration,
+                                    tr_base: entity.tr_base,
+                                    tr_delta: entity.tr_delta,
+                                },
+                                time_ms,
+                            )
+                        })
+                });
+            origin.map(|origin| std::array::from_fn(|axis| origin[axis] + objective.offset[axis]))
+        }
+        None => objective.positions[0],
+    };
+    std::iter::once(first)
+        .chain(objective.positions[1..].iter().copied())
+        .flatten()
 }

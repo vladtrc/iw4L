@@ -35,7 +35,6 @@ pub struct ColourWorkingSet {
 
 #[derive(Resource, Debug, Default, Clone, Copy)]
 pub struct WorldPipelineWarmup {
-    pub generation: frame::WorldStamp,
     pub initialized: bool,
     pub total: u32,
     pub ready: u32,
@@ -43,8 +42,6 @@ pub struct WorldPipelineWarmup {
 
 #[derive(Resource, Clone, Debug, Default)]
 pub struct GpuSubmitReady {
-    pub world_generation: frame::WorldStamp,
-
     pub warm_pipelines: bool,
 
     pub overlay_gpu_wait: bool,
@@ -333,7 +330,8 @@ pub(crate) fn prepare_uploaded_image_registry(
                 .added
                 .iter()
                 .copied()
-                .chain(extracted.modified.iter().copied()),
+                .chain(extracted.modified.iter().copied())
+                .chain(extracted.removed.iter().copied()),
             &registry.pending,
             &registry.slot_index,
         ),
@@ -934,12 +932,12 @@ pub struct SamplerTable {
 const RETAIL_MIP_FILTERS: [u32; 12] = [0, 1, 2, 0, 2, 2, 0, 1, 1, 0, 0, 0];
 
 impl SamplerTable {
-    pub fn produce(inputs: SamplerRendererInputs) -> Result<Self, SamplerTableBuildRefusal> {
+    pub fn produce(inputs: SamplerRendererInputs) -> Result<Self, Box<SamplerTableBuildRefusal>> {
         let mip_mode = usize::from(inputs.mip_mode);
         if mip_mode >= 4 {
-            return Err(SamplerTableBuildRefusal::MipModeOutOfRange {
+            return Err(Box::new(SamplerTableBuildRefusal::MipModeOutOfRange {
                 mip_mode: inputs.mip_mode,
-            });
+            }));
         }
 
         let mut max_anisotropy = inputs.max_anisotropy.min(inputs.device_max_anisotropy);
@@ -1013,13 +1011,13 @@ impl SamplerTable {
         Ok(Self { words })
     }
 
-    pub fn captured_2026_08_11() -> Result<Self, SamplerTableBuildRefusal> {
+    pub fn captured_2026_08_11() -> Result<Self, Box<SamplerTableBuildRefusal>> {
         let table = Self::produce(RETAIL_SAMPLER_PROFILE_2026_08_11)?;
         if table.words != RETAIL_SAMPLER_WORDS_2026_08_11 {
-            return Err(SamplerTableBuildRefusal::CapturedWordsMismatch {
+            return Err(Box::new(SamplerTableBuildRefusal::CapturedWordsMismatch {
                 expected: RETAIL_SAMPLER_WORDS_2026_08_11,
                 produced: table.words,
-            });
+            }));
         }
         Ok(table)
     }
@@ -1175,54 +1173,67 @@ pub struct UploadedTextureBind {
     pub sampler: DecodedSampler,
 }
 
-pub(crate) trait RuntimeProgramPortGpuExt {
-    fn resolve_uploaded_texture_binds(
-        &self,
-        pass: ExecutablePassView<'_>,
-        surface: SurfaceSamplerInputs,
-        images: &RuntimeImageHandles,
-        expected: MaterialGenerationId,
-        uploaded: &RuntimeUploadedImageRegistry,
-        samplers: &SamplerTable,
-        spot_shadow_select: Option<u8>,
-    ) -> Result<Vec<UploadedTextureBind>, TextureBindRefusal>;
+pub(crate) struct TextureImageTables<'a> {
+    images: &'a RuntimeImageHandles,
+    uploaded: &'a RuntimeUploadedImageRegistry,
 }
 
-impl RuntimeProgramPortGpuExt for AdmittedExactPort {
-    fn resolve_uploaded_texture_binds(
+impl<'a> TextureImageTables<'a> {
+    pub(crate) fn new(
+        images: &'a RuntimeImageHandles,
+        expected: MaterialGenerationId,
+        uploaded: &'a RuntimeUploadedImageRegistry,
+    ) -> Result<Self, TextureBindRefusal> {
+        require_image_generation(expected, images.generation_id)?;
+        require_image_generation(expected, uploaded.generation_id)?;
+        Ok(Self { images, uploaded })
+    }
+
+    pub(crate) fn resolve_material_texture(
         &self,
         pass: ExecutablePassView<'_>,
+        register: u16,
+        name_hash: u32,
+        dimension: SamplerTextureDimension,
+        samplers: &SamplerTable,
+    ) -> Result<UploadedTextureBind, TextureBindRefusal> {
+        let texture = packed_material_texture(pass, register, name_hash)?;
+        let _ = material_image(self.images, texture.image, register)?;
+        Ok(UploadedTextureBind {
+            register,
+            dimension,
+            identity: UploadedTextureIdentity::Material(texture.image),
+            view: take_uploaded_material(self.uploaded, texture.image, register, dimension)?,
+            sampler: samplers.decode(texture.sampler_state)?,
+        })
+    }
+
+    pub(crate) fn resolve(
+        &self,
+        port: &AdmittedExactPort,
+        pass: ExecutablePassView<'_>,
         surface: SurfaceSamplerInputs,
-        images: &RuntimeImageHandles,
-        expected: MaterialGenerationId,
-        uploaded: &RuntimeUploadedImageRegistry,
         samplers: &SamplerTable,
         spot_shadow_select: Option<u8>,
     ) -> Result<Vec<UploadedTextureBind>, TextureBindRefusal> {
-        require_image_generation(expected, images.generation_id)?;
-        require_image_generation(expected, uploaded.generation_id)?;
-        if !self.accepts_pass(pass) {
+        let images = self.images;
+        let uploaded = self.uploaded;
+        if !port.accepts_pass(pass) {
             return Err(TextureBindRefusal::ExecutablePairMismatch);
         }
-        self.abi()
+        port.abi()
             .samplers
             .iter()
             .map(|binding| {
                 let (view, sampler_state, identity) = match binding.source {
                     SamplerSource::MaterialTexture { name_hash } => {
-                        let texture = packed_material_texture(pass, binding.register, name_hash)?;
-
-                        let _ = material_image(images, texture.image, binding.register)?;
-                        (
-                            take_uploaded_material(
-                                uploaded,
-                                texture.image,
-                                binding.register,
-                                binding.dimension,
-                            )?,
-                            texture.sampler_state,
-                            UploadedTextureIdentity::Material(texture.image),
-                        )
+                        return self.resolve_material_texture(
+                            pass,
+                            binding.register,
+                            name_hash,
+                            binding.dimension,
+                            samplers,
+                        );
                     }
                     SamplerSource::CodeTexture { index } => {
                         let lane = packed_code_texture(pass, binding.register, index)?;

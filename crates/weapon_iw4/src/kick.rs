@@ -3,8 +3,8 @@ use crate::response::RecoilAxis;
 pub const CAMERA_PEAK_SECONDS: f64 = 0.080;
 pub const MODEL_PEAK_SECONDS: f64 = 0.060;
 pub const CAMERA_LIMIT_DEGREES: f64 = 8.0;
-pub const CAMERA_ASSET_AMPLITUDE: f32 = 0.020;
-pub const MODEL_ASSET_AMPLITUDE: f32 = 0.015;
+pub const CAMERA_ASSET_AMPLITUDE: f32 = 0.040;
+pub const MODEL_ASSET_AMPLITUDE: f32 = 0.030;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ViewKickRange {

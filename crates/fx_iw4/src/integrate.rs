@@ -91,13 +91,7 @@ pub fn sample_vel_graph_at_age_sampled(
 }
 
 fn clamp01(x: f32) -> f32 {
-    if x < 0.0 {
-        0.0
-    } else if x > 1.0 {
-        1.0
-    } else {
-        x
-    }
+    x.clamp(0.0, 1.0)
 }
 
 fn sample_lerp(samples: &[FxElemVec3Range], age01: f32, random: [f32; 3]) -> [f32; 3] {

@@ -25,6 +25,8 @@ pub enum RetainedDrawKind {
         setup_key_changed: bool,
 
         world_from_local: Mat4,
+        /// Placed brush owner; independent of its vertex transform.
+        brush_model: Option<u16>,
     },
     Smodel {
         surface: u32,
@@ -35,6 +37,10 @@ pub enum RetainedDrawKind {
         packed_lighting: Option<[u8; 4]>,
 
         placement: u32,
+        /// Native DPVS/lighting slot; GPU placements are dense and can omit holes.
+        visibility_slot: u32,
+        /// Authored owner pose, even when cached vertices are already in world space.
+        owner_world_from_local: Mat4,
 
         stream: Option<lighting_iw4::SmodelSurfPath>,
 
@@ -44,6 +50,9 @@ pub enum RetainedDrawKind {
     },
 
     XModel {
+        /// Physical positive half-space for a portal presentation instance.
+        portal_slice: Option<[f64; 4]>,
+        portal_aperture: Option<crate::PortalEntityAperture>,
         surface: u32,
         material: u32,
 
@@ -102,6 +111,20 @@ impl RetainedDrawKind {
             bsp_run_first: None,
             setup_key_changed: false,
             world_from_local,
+            brush_model: None,
+        }
+    }
+
+    pub const fn brush_world(surf: u16, model: u16, world_from_local: Mat4) -> Self {
+        Self::World {
+            surf,
+            run: 1,
+            run_off: 0,
+            bsp_kind: None,
+            bsp_run_first: None,
+            setup_key_changed: false,
+            world_from_local,
+            brush_model: Some(model),
         }
     }
 
@@ -120,6 +143,7 @@ impl RetainedDrawKind {
             bsp_run_first: Some(bsp_run_first),
             setup_key_changed,
             world_from_local: Mat4::IDENTITY,
+            brush_model: None,
         }
     }
 }

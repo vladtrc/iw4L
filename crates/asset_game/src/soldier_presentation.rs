@@ -16,6 +16,7 @@ pub struct SoldierBodyAnimation {
     script: Arc<ParsedPlayerAnimScript>,
     catalog: Arc<XAnimCatalog>,
     rig: DObj,
+    performance: Option<Arc<xmodel_runtime::NativePerformance>>,
     runtime: Result<Arc<xmodel_runtime::XAnimTreeDefinition>, String>,
 }
 
@@ -25,12 +26,13 @@ impl SoldierBodyAnimation {
         kit: &SoldierKit,
         sources: &PlayerAnimSources,
         catalog: &Arc<XAnimCatalog>,
+        performance: Option<Arc<xmodel_runtime::NativePerformance>>,
     ) -> Result<Arc<Self>, String> {
         if !sources.decode_errors().is_empty() {
             return Err("character animation source decode failed".into());
         }
         let body = bodies.get(&kit.body).ok_or("character body missing")?;
-        if sources.family() != Some(body.namespace) {
+        if performance.is_none() && sources.family() != Some(body.namespace) {
             return Err(format!(
                 "{} character requires its own animation tree and script; supplied family {:?}",
                 body.namespace.as_str(),
@@ -60,7 +62,12 @@ impl SoldierBodyAnimation {
             }
         }
         let runtime = tree
-            .to_runtime_definition(|_, name| catalog.clip(body.namespace, name))
+            .to_runtime_definition(|_, name| {
+                performance
+                    .as_ref()
+                    .map(|p| Arc::clone(&p.idle))
+                    .or_else(|| catalog.clip(body.namespace, name))
+            })
             .map_err(|error| error.to_string());
         Ok(Arc::new(Self {
             runtime,
@@ -70,6 +77,7 @@ impl SoldierBodyAnimation {
             script: Arc::clone(script),
             catalog: Arc::clone(catalog),
             rig,
+            performance,
         }))
     }
 
@@ -77,6 +85,10 @@ impl SoldierBodyAnimation {
         self.bodies
             .get(&self.body_name)
             .expect("bound character body")
+    }
+
+    pub fn performance(&self) -> Option<&Arc<xmodel_runtime::NativePerformance>> {
+        self.performance.as_ref()
     }
 
     pub fn tree(&self) -> &Arc<CompiledAnimTreeDefinition> {
@@ -98,8 +110,10 @@ impl SoldierBodyAnimation {
             .filter(|node| node.child_count == 0)
             .ok_or_else(|| format!("packed index {index} is not a character animation leaf"))?;
         let clip = self
-            .catalog
-            .clip(self.body().namespace, &leaf.name)
+            .performance
+            .as_ref()
+            .map(|p| Arc::clone(&p.idle))
+            .or_else(|| self.catalog.clip(self.body().namespace, &leaf.name))
             .ok_or_else(|| format!("decode failed for character clip `{}`", leaf.name))?;
         if !self.rig.tracks_for(&clip).iter().any(Option::is_some) {
             return Err(format!(
@@ -218,31 +232,34 @@ impl SoldierPresentation {
         sources: &PlayerAnimSources,
         catalog: &Arc<XAnimCatalog>,
     ) -> Result<Arc<Self>, String> {
+        let kit = bodies.kits().kit(axis).ok_or("no map soldier kit")?.clone();
+        Self::prepare_kit(kit, bodies, meshes, mounts, sources, catalog, None)
+    }
+
+    fn prepare_kit(
+        kit: SoldierKit,
+        bodies: &Arc<BodyMeshCatalog>,
+        meshes: &Arc<FpvMeshCatalog>,
+        mounts: &Arc<[HandMounts]>,
+        sources: &PlayerAnimSources,
+        catalog: &Arc<XAnimCatalog>,
+        performance: Option<Arc<xmodel_runtime::NativePerformance>>,
+    ) -> Result<Arc<Self>, String> {
         if meshes.identity() == 0 {
             return Err("soldier meshes are not published".into());
         }
-        let family = meshes.map_namespace.ok_or("soldier map family missing")?;
-        let kit = bodies.kits().kit(axis).ok_or("no map soldier kit")?.clone();
+        let map_family = meshes.map_namespace.ok_or("soldier map family missing")?;
         let body = bodies.get(&kit.body).ok_or("soldier body missing")?;
-        if body.namespace != family {
+        let family = body.namespace;
+        if performance.is_none() && family != map_family {
             return Err("soldier body differs from map family".into());
         }
-        let choice = if family == FamilyId::T6 {
-            kit.arms
-                .as_ref()
-                .map(|name| FpvHands::FromKit {
-                    namespace: family,
-                    name: name.clone(),
-                })
-                .map(Some)
-                .ok_or_else(|| "T6 soldier kit hands missing".to_owned())
-        } else {
-            let choice = FpvHands::resolve(meshes, family, Some(&kit), None, family);
-            Ok(choice.key().is_some().then_some(choice))
-        };
+        let choice = (asset_model::model_family(family)
+            .ok_or("soldier model family missing")?
+            .soldier_hands)(meshes, family, &kit);
         let mut presentation = Self {
             head: SoldierHead::prepare(bodies, &kit, family),
-            animation: SoldierBodyAnimation::prepare(bodies, &kit, sources, catalog),
+            animation: SoldierBodyAnimation::prepare(bodies, &kit, sources, catalog, performance),
             kit,
             family,
             bodies: Arc::clone(bodies),
@@ -316,20 +333,11 @@ impl SoldierPresentation {
         self: &Arc<Self>,
         hands: Option<(FamilyId, &str)>,
         secondary: bool,
-        level_hands: Option<&str>,
-    ) -> Result<SoldierFpvPresentation, String> {
-        let level = level_hands.and_then(|name| {
-            self.bind_hands(FpvHands::FromWeaponDef {
-                namespace: self.family,
-                name: name.to_owned(),
-            })
-            .ok()
-        });
-        let hands = match (&self.kit_hands, level) {
-            (Err(error), _) => return Err(error.clone()),
-            (_, Some(hands)) => hands,
-            (Ok(Some(hands)), None) => hands.clone(),
-            (Ok(None), None) => {
+    ) -> Result<FpvHandsPresentation, String> {
+        let hands = match &self.kit_hands {
+            Err(error) => return Err(error.clone()),
+            Ok(Some(hands)) => hands.clone(),
+            Ok(None) => {
                 let (family, name) = hands.ok_or("soldier weapon hands missing")?;
                 self.bind_hands(FpvHands::FromWeaponDef {
                     namespace: family,
@@ -340,22 +348,63 @@ impl SoldierPresentation {
         if secondary && !hands.mounts.secondary {
             return Err("soldier hands require tag_weapon1 for a secondary gun".into());
         }
-        Ok(SoldierFpvPresentation {
-            soldier: Arc::clone(self),
+        Ok(FpvHandsPresentation {
+            meshes: Arc::clone(&self.meshes),
             hands,
         })
     }
 }
 
 #[derive(Clone, Debug)]
-pub struct SoldierFpvPresentation {
-    soldier: Arc<SoldierPresentation>,
+pub struct FpvHandsPresentation {
+    meshes: Arc<FpvMeshCatalog>,
     hands: SoldierHands,
 }
 
-impl SoldierFpvPresentation {
-    pub fn soldier(&self) -> &Arc<SoldierPresentation> {
-        &self.soldier
+impl FpvHandsPresentation {
+    pub fn from_viewmodel(
+        meshes: &Arc<FpvMeshCatalog>,
+        family: FamilyId,
+        name: &str,
+    ) -> Result<Self, String> {
+        if meshes.identity() == 0 {
+            return Err("viewmodel meshes are not published".into());
+        }
+        let index = meshes
+            .index_by_name(family, name)
+            .ok_or_else(|| format!("viewmodel `{name}` missing"))?;
+        let entry = meshes.get_at(index).ok_or("viewmodel mesh missing")?;
+        let mounts = HandMounts {
+            posed: entry.skel.pose.is_some(),
+            weapon: entry
+                .skel
+                .bone_names
+                .iter()
+                .any(|bone| bone == "tag_weapon"),
+            secondary: entry
+                .skel
+                .bone_names
+                .iter()
+                .any(|bone| bone == "tag_weapon1"),
+        };
+        if !mounts.posed || !mounts.weapon {
+            return Err(format!("viewmodel `{name}` requires a pose and tag_weapon"));
+        }
+        Ok(Self {
+            meshes: Arc::clone(meshes),
+            hands: SoldierHands {
+                choice: FpvHands::FromScript {
+                    namespace: family,
+                    name: name.to_owned(),
+                },
+                model: FpvMeshIndex::from_order(index),
+                mounts,
+            },
+        })
+    }
+
+    pub fn supports_secondary(&self) -> bool {
+        self.hands.mounts.secondary
     }
 
     pub fn hands(&self) -> &SoldierHands {
@@ -363,13 +412,14 @@ impl SoldierFpvPresentation {
     }
 
     pub fn mesh_identity(&self) -> u64 {
-        self.soldier.meshes.identity()
+        self.meshes.identity()
     }
 }
 
 #[derive(Clone, Debug, Resource)]
 pub struct SoldierPresentations {
     sides: [Result<Arc<SoldierPresentation>, String>; 2],
+    characters: std::collections::BTreeMap<(u32, Option<usize>), Arc<SoldierPresentation>>,
     bodies: Arc<BodyMeshCatalog>,
     meshes: Arc<FpvMeshCatalog>,
     catalog: Arc<XAnimCatalog>,
@@ -409,6 +459,7 @@ impl SoldierPresentations {
         };
         Self {
             sides: [allies, axis],
+            characters: Default::default(),
             bodies: Arc::clone(bodies),
             meshes: Arc::clone(meshes),
             catalog: Arc::clone(catalog),
@@ -453,6 +504,57 @@ impl SoldierPresentations {
                 (None, None) => true,
                 _ => false,
             }
+    }
+
+    pub fn add_character(
+        &mut self,
+        client: u32,
+        world: Option<usize>,
+        kit: SoldierKit,
+        sources: &PlayerAnimSources,
+        performance: Option<Arc<xmodel_runtime::NativePerformance>>,
+    ) -> Result<(), String> {
+        let mounts = self
+            .sides
+            .iter()
+            .find_map(|side| side.as_ref().ok())
+            .ok_or("no prepared faction soldier")?
+            .mounts
+            .clone();
+        let soldier = SoldierPresentation::prepare_kit(
+            kit,
+            &self.bodies,
+            &self.meshes,
+            &mounts,
+            sources,
+            &self.catalog,
+            performance,
+        )?;
+        soldier.animation()?.runtime().map_err(str::to_owned)?;
+        soldier.head()?;
+        self.characters.insert((client, world), soldier);
+        Ok(())
+    }
+
+    pub fn characters(
+        &self,
+    ) -> impl Iterator<Item = ((u32, Option<usize>), &Arc<SoldierPresentation>)> {
+        self.characters
+            .iter()
+            .map(|(&client, soldier)| (client, soldier))
+    }
+
+    pub fn for_client(
+        &self,
+        client: u32,
+        axis: bool,
+        world: usize,
+    ) -> Result<&Arc<SoldierPresentation>, &str> {
+        self.characters
+            .get(&(client, Some(world)))
+            .or_else(|| self.characters.get(&(client, None)))
+            .map(Ok)
+            .unwrap_or_else(|| self.side(axis))
     }
 
     pub fn mesh_identity(&self) -> u64 {

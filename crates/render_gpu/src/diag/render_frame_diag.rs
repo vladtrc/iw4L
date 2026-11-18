@@ -14,10 +14,7 @@ const RENDER_FRAME_LOG_EVERY: u32 = 64;
 
 #[derive(Clone, Default)]
 pub(crate) struct RenderFrameSample {
-    /// The frame that was open when this render frame's extract began — the
-    /// frame whose wall the render work ran inside. The main world reads the
-    /// finished sample a frame or more later, so without this the stage
-    /// timings land on whichever row happened to be open when they arrived.
+    /// Extraction origin; pipelined work can finish in a later wall frame.
     origin_frame: u64,
     /// When this render frame's extract began: the moment the state it
     /// presents was taken out of the main world, with the main world stalled
@@ -40,6 +37,7 @@ pub(crate) struct RenderFrameSample {
     sequence: u64,
     extract_ms: Option<f32>,
     thread_closed: bool,
+    thread_ms: Option<f32>,
     extract_commands_ms: Option<f32>,
     prepare_assets_ms: Option<f32>,
     prepare_meshes_ms: Option<f32>,
@@ -190,6 +188,9 @@ pub(crate) struct RenderFrameSample {
     pub(crate) xmodel_reuse_n: Option<u32>,
     pub(crate) xmodel_material_runs: Option<u32>,
     pub(crate) smodel_index_gaps: Option<u32>,
+    pub(crate) smodel_index_owner: Option<u64>,
+    pub(crate) smodel_index_revision: Option<u64>,
+    pub(crate) smodel_index_words: Option<usize>,
     pub(crate) smodel_material_runs: Option<u32>,
     pub(crate) smodel_material_runs_seq: Option<u32>,
     pub(crate) smodel_material_run_max: Option<u32>,
@@ -270,6 +271,29 @@ impl SharedRenderStages {
     }
 
     fn publish_render_frame(&mut self) {
+        let sample = &self.working;
+        perf::instant!("render_frame_stages", "iw4l.render", |ctx| {
+            ctx.arg("sequence", sample.sequence);
+            ctx.arg("origin_frame", sample.origin_frame);
+            ctx.arg("publication_frame", perf::frames::open_index());
+            ctx.arg("extract_ms", sample.extract_ms);
+            ctx.arg("thread_ms", sample.thread_ms);
+            ctx.arg("extract_commands_ms", sample.extract_commands_ms);
+            ctx.arg("prepare_assets_ms", sample.prepare_assets_ms);
+            ctx.arg("prepare_meshes_ms", sample.prepare_meshes_ms);
+            ctx.arg("create_views_ms", sample.create_views_ms);
+            ctx.arg("specialize_ms", sample.specialize_ms);
+            ctx.arg("prepare_views_ms", sample.prepare_views_ms);
+            ctx.arg("queue_ms", sample.queue_ms);
+            ctx.arg("phase_sort_ms", sample.phase_sort_ms);
+            ctx.arg("prepare_ms", sample.prepare_ms);
+            ctx.arg("render_ms", sample.render_ms);
+            ctx.arg("graph_render_ms", sample.graph_render_ms);
+            ctx.arg("graph_submit_ms", sample.graph_submit_ms);
+            ctx.arg("graph_present_ms", sample.graph_present_ms);
+            ctx.arg("state_age_ms", sample.presented_state_age_ms);
+            ctx.arg("frames_behind", sample.presented_frames_behind);
+        });
         self.completed = Some(self.working.clone());
     }
 }
@@ -297,27 +321,29 @@ impl Default for SharedRenderStagesSlot {
     }
 }
 
+#[derive(Debug)]
+pub struct ExtractColourStats {
+    pub ports_ms: f32,
+    pub tess_ms: f32,
+    pub world_skip: u32,
+    pub world_clone_bytes: u64,
+    pub xmodel_clone_bytes: u64,
+    pub xmodel_arc: u32,
+    pub fx_arc: u32,
+    pub fx_clone_bytes: u64,
+}
+
 impl SharedRenderStagesSlot {
-    pub fn stamp_extract_colour(
-        &self,
-        ports_ms: f32,
-        tess_ms: f32,
-        world_skip: u32,
-        world_clone_bytes: u64,
-        xmodel_clone_bytes: u64,
-        xmodel_arc: u32,
-        fx_arc: u32,
-        fx_clone_bytes: u64,
-    ) {
+    pub fn stamp_extract_colour(&self, stats: ExtractColourStats) {
         if let Ok(mut guard) = self.0.lock() {
-            guard.extract_ports_ms = Some(ports_ms);
-            guard.extract_tess_ms = Some(tess_ms);
-            guard.extract_world_skip = Some(world_skip);
-            guard.extract_world_clone_bytes = Some(world_clone_bytes);
-            guard.extract_xmodel_clone_bytes = Some(xmodel_clone_bytes);
-            guard.extract_xmodel_arc = Some(xmodel_arc);
-            guard.extract_fx_arc = Some(fx_arc);
-            guard.extract_fx_clone_bytes = Some(fx_clone_bytes);
+            guard.extract_ports_ms = Some(stats.ports_ms);
+            guard.extract_tess_ms = Some(stats.tess_ms);
+            guard.extract_world_skip = Some(stats.world_skip);
+            guard.extract_world_clone_bytes = Some(stats.world_clone_bytes);
+            guard.extract_xmodel_clone_bytes = Some(stats.xmodel_clone_bytes);
+            guard.extract_xmodel_arc = Some(stats.xmodel_arc);
+            guard.extract_fx_arc = Some(stats.fx_arc);
+            guard.extract_fx_clone_bytes = Some(stats.fx_clone_bytes);
         }
     }
 
@@ -341,6 +367,14 @@ impl SharedRenderStagesSlot {
             guard.extract_diag_ms = Some(ms);
         }
     }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PortalViewTiming {
+    pub view: usize,
+    pub phase: String,
+    pub cpu_ms: Option<f32>,
+    pub gpu_ms: Option<f32>,
 }
 
 #[derive(Resource, Debug, Clone, Default)]
@@ -593,6 +627,9 @@ pub struct RenderFrameDiag {
     pub xmodel_material_runs: Option<u32>,
 
     pub smodel_index_gaps: Option<u32>,
+    pub smodel_index_owner: Option<u64>,
+    pub smodel_index_revision: Option<u64>,
+    pub smodel_index_words: Option<usize>,
 
     pub smodel_material_runs: Option<u32>,
 
@@ -680,6 +717,9 @@ pub struct RenderFrameDiag {
 
     pub gpu_frame_ms: Option<f32>,
 
+    /// Latest delivered diagnostic batch, not synchronous source-frame times.
+    pub portal_timings: Vec<PortalViewTiming>,
+
     pub gpu_opaque_ms: Option<f32>,
 
     pub cpu_graph_ms: Option<f32>,
@@ -716,13 +756,28 @@ macro_rules! stage_timer {
     };
 }
 
-fn thread_stage_start() {
-    perf::Span::RenderRenderThreadMs.begin();
+#[derive(Resource, Default)]
+struct ThreadStageTimer(Option<Instant>);
+
+fn thread_stage_start(mut timer: ResMut<ThreadStageTimer>, slot: Res<SharedRenderStagesSlot>) {
+    timer.0 = Some(Instant::now());
+    perf::span!("render_thread", "iw4l.render", begin);
+    if let Ok(guard) = slot.0.lock() {
+        perf::instant!("render_frame_begin", "iw4l.render", |ctx| {
+            ctx.arg("sequence", guard.sequence);
+            ctx.arg("origin_frame", guard.origin_frame);
+        });
+    }
 }
 
-fn thread_stage_end(slot: Res<SharedRenderStagesSlot>) {
-    perf::Span::RenderRenderThreadMs.end();
+fn thread_stage_end(mut timer: ResMut<ThreadStageTimer>, slot: Res<SharedRenderStagesSlot>) {
+    perf::span!("render_thread", "iw4l.render", end);
+    let ms = timer
+        .0
+        .take()
+        .map(|started| started.elapsed().as_secs_f32() * 1000.0);
     if let Ok(mut guard) = slot.0.lock() {
+        guard.thread_ms = ms;
         guard.thread_closed = true;
     }
 }
@@ -788,11 +843,22 @@ stage_timer!(
     prepare_stage_end,
     prepare_ms
 );
-fn render_stage_start() {
-    perf::Span::RenderRenderRenderMs.begin();
+#[derive(Resource, Default)]
+struct RenderStageTimer(Option<Instant>);
+
+fn render_stage_start(mut timer: ResMut<RenderStageTimer>) {
+    timer.0 = Some(Instant::now());
+    perf::span!("render_render", "iw4l.render", begin);
 }
-fn render_stage_end() {
-    perf::Span::RenderRenderRenderMs.end();
+fn render_stage_end(mut timer: ResMut<RenderStageTimer>, slot: Res<SharedRenderStagesSlot>) {
+    perf::span!("render_render", "iw4l.render", end);
+    let ms = timer
+        .0
+        .take()
+        .map(|started| started.elapsed().as_secs_f32() * 1000.0);
+    if let Ok(mut guard) = slot.0.lock() {
+        guard.render_ms = ms;
+    }
 }
 stage_timer!(
     GraphRenderStageTimer,
@@ -887,6 +953,8 @@ pub fn register_render_frame_diag(app: &mut App) {
     };
 
     render_app.insert_resource(slot.clone());
+    render_app.init_resource::<ThreadStageTimer>();
+    render_app.init_resource::<RenderStageTimer>();
     render_app.init_resource::<ExtractCommandsStageTimer>();
     render_app.init_resource::<PrepareAssetsStageTimer>();
     render_app.init_resource::<PrepareMeshesStageTimer>();
@@ -903,7 +971,7 @@ pub fn register_render_frame_diag(app: &mut App) {
     let mut default_extract = render_app.take_extract();
     let extract_slot = slot.clone();
     render_app.set_extract(move |main_world, render_world| {
-        let _body = perf::Span::RenderExtractBodyMs.enter();
+        let _body = perf::span!("extract_body", "iw4l.render");
         if let Ok(mut guard) = extract_slot.0.lock() {
             guard.begin_render_frame();
         }
@@ -1022,7 +1090,7 @@ fn instrument_pipelined_extract(app: &mut App) {
         main_world.resource_scope(|world, executor: Mut<MainThreadExecutor>| {
             world.resource_scope(|world, mut channels: Mut<RenderAppChannels>| {
                 let render_app = {
-                    let _receive = perf::Span::RenderReceiveWorldMs.enter();
+                    let _receive = perf::span!("receive_render_world", "iw4l.render");
                     ComputeTaskPool::get()
                         .scope_with_executor(true, Some(&*executor.0), |scope| {
                             scope.spawn(async { channels.recv().await });
@@ -1032,7 +1100,7 @@ fn instrument_pipelined_extract(app: &mut App) {
                 };
                 if let Some(mut render_app) = render_app {
                     render_app.extract(world);
-                    let _dispatch = perf::Span::RenderDispatchWorldMs.enter();
+                    let _dispatch = perf::span!("dispatch_render_world", "iw4l.render");
                     channels.send_blocking(render_app);
                 } else {
                     world.write_message(AppExit::error());
@@ -1073,6 +1141,7 @@ impl Iw4GpuSample {
 }
 
 struct GraphDiagSample {
+    portal_timings: Vec<PortalViewTiming>,
     gpu_frame: Option<f32>,
     gpu_opaque: Option<f32>,
     gpu_iw4: Iw4GpuSample,
@@ -1107,6 +1176,12 @@ fn sample_graph_from_store(store: &DiagnosticsStore) -> (GraphDiagSample, Option
         .filter_map(|diagnostic| diagnostic.measurement().map(|m| m.time))
         .max();
 
+    let newest_cpu_time = store
+        .iter()
+        .filter(|d| d.path().components().last() == Some("elapsed_cpu"))
+        .filter_map(|d| d.measurement().map(|m| m.time))
+        .max();
+    let mut portal_rows = std::collections::BTreeMap::<(usize, String), PortalViewTiming>::new();
     for diagnostic in store.iter() {
         let path = diagnostic.path();
         let components: Vec<_> = path.components().collect();
@@ -1116,6 +1191,38 @@ fn sample_graph_from_store(store: &DiagnosticsStore) -> (GraphDiagSample, Option
         let Some(m) = diagnostic.measurement() else {
             continue;
         };
+        if components.iter().any(|label| label.starts_with("portal_v")) {
+            // Only the span's own label identifies its duration. Descendant
+            // FloatZ/emissive measurements must not overwrite the parent row.
+            let label = components[components.len() - 2];
+            if label.starts_with("portal_v")
+                && let Some((view, phase)) = label.trim_start_matches("portal_v").split_once('_')
+                && let Ok(view) = view.parse::<usize>()
+            {
+                let row = portal_rows
+                    .entry((view, phase.to_string()))
+                    .or_insert_with(|| PortalViewTiming {
+                        view,
+                        phase: phase.to_string(),
+                        ..Default::default()
+                    });
+                match kind {
+                    "elapsed_gpu" if Some(m.time) == newest_gpu_time => {
+                        row.gpu_ms = Some(m.value as f32)
+                    }
+                    "elapsed_cpu" if Some(m.time) == newest_cpu_time => {
+                        row.cpu_ms = Some(m.value as f32)
+                    }
+                    _ => {}
+                }
+            }
+            if kind == "elapsed_gpu" && Some(m.time) == newest_gpu_time {
+                gpu_iw4.add(label, m.value);
+            }
+            // Per-view spans nest inside the colour total. Do not sum them
+            // again into GPU/frame or CPU graph totals.
+            continue;
+        }
         match kind {
             "elapsed_gpu" => {
                 if Some(m.time) != newest_gpu_time {
@@ -1158,6 +1265,10 @@ fn sample_graph_from_store(store: &DiagnosticsStore) -> (GraphDiagSample, Option
 
     (
         GraphDiagSample {
+            portal_timings: portal_rows
+                .into_values()
+                .filter(|row| row.cpu_ms.is_some() || row.gpu_ms.is_some())
+                .collect(),
             gpu_frame: gpu_any.then_some(gpu_sum as f32),
             gpu_opaque,
             gpu_iw4,
@@ -1180,10 +1291,6 @@ pub fn sample_render_frame_diag(
     mut last_gpu_batch: Local<Option<Instant>>,
 ) {
     if let Ok(mut guard) = slot.0.lock() {
-        // The published sample is read every main frame; its counters belong
-        // to the render frame that produced it, once, and to the frame row
-        // that render frame ran inside. The HUD fields below are the last
-        // known value either way.
         let fresh = guard
             .completed
             .as_ref()
@@ -1226,32 +1333,41 @@ pub fn sample_render_frame_diag(
 
             if fresh {
                 for (counter, value) in [
-                    (perf::Counter::RenderGraphRenderMs, sample.graph_render_ms),
                     (
-                        perf::Counter::RenderGraphSubmitIntervalMs,
+                        perf::counter!("graph_render", "iw4l.render", handle),
+                        sample.graph_render_ms,
+                    ),
+                    (
+                        perf::counter!("graph_submit_schedule_interval", "iw4l.render", handle),
                         sample.graph_submit_ms,
                     ),
-                    (perf::Counter::RenderGraphPresentMs, sample.graph_present_ms),
                     (
-                        perf::Counter::RenderPresentedStateAgeMs,
+                        perf::counter!("graph_present", "iw4l.render", handle),
+                        sample.graph_present_ms,
+                    ),
+                    (
+                        perf::counter!("presented_state_age", "iw4l.render", handle),
                         sample.presented_state_age_ms,
                     ),
                     // The `PrepareViews` set as it ran: a set interval, not a
                     // body. Whatever the executor scheduled inside the set is
                     // in it, so it is not addable to anything and not
                     // exclusive CPU work.
-                    (perf::Counter::RenderPrepareViewsMs, sample.prepare_views_ms),
+                    (
+                        perf::counter!("prepare_views", "iw4l.render", handle),
+                        sample.prepare_views_ms,
+                    ),
                 ] {
                     if let Some(value) = value {
                         counter.emit_at(f64::from(value), sample.origin_frame);
                     }
                 }
                 if let Some(pending) = sample.graph_submit_pending_n {
-                    perf::Counter::RenderGraphSubmitPendingN
+                    perf::counter!("graph_submit_pending", "iw4l.render", handle)
                         .emit_at(f64::from(pending), sample.origin_frame);
                 }
                 if let Some(behind) = sample.presented_frames_behind {
-                    perf::Counter::RenderPresentedFramesBehind
+                    perf::counter!("presented_frames_behind", "iw4l.render", handle)
                         .emit_at(f64::from(behind), sample.origin_frame);
                 }
             }
@@ -1314,12 +1430,18 @@ pub fn sample_render_frame_diag(
             diag.spot_shadow_slot_n = sample.spot_shadow_slot_n;
             if fresh {
                 for (counter, value) in [
-                    (perf::Counter::SpotShadowGpu, sample.spot_shadow_gpu),
                     (
-                        perf::Counter::SpotShadowGpuMiss,
+                        perf::counter!("spot_shadow_gpu", "iw4l.render", handle),
+                        sample.spot_shadow_gpu,
+                    ),
+                    (
+                        perf::counter!("spot_shadow_gpu_miss", "iw4l.render", handle),
                         sample.spot_shadow_gpu_miss,
                     ),
-                    (perf::Counter::SpotShadowSlotN, sample.spot_shadow_slot_n),
+                    (
+                        perf::counter!("spot_shadow_slot_n", "iw4l.render", handle),
+                        sample.spot_shadow_slot_n,
+                    ),
                 ] {
                     if let Some(value) = value {
                         counter.emit_at(f64::from(value), sample.origin_frame);
@@ -1369,6 +1491,9 @@ pub fn sample_render_frame_diag(
             diag.xmodel_reuse_n = sample.xmodel_reuse_n;
             diag.xmodel_material_runs = sample.xmodel_material_runs;
             diag.smodel_index_gaps = sample.smodel_index_gaps;
+            diag.smodel_index_owner = sample.smodel_index_owner;
+            diag.smodel_index_revision = sample.smodel_index_revision;
+            diag.smodel_index_words = sample.smodel_index_words;
             diag.smodel_material_runs = sample.smodel_material_runs;
             diag.smodel_material_runs_seq = sample.smodel_material_runs_seq;
             diag.smodel_material_run_max = sample.smodel_material_run_max;
@@ -1425,20 +1550,36 @@ pub fn sample_render_frame_diag(
         if fresh_batch {
             *last_gpu_batch = batch;
             if let Some(ms) = sample.gpu_frame {
-                perf::Counter::RenderGpuFrameMs.emit(f64::from(ms));
+                perf::counter!("gpu_frame", "iw4l.render", f64::from(ms));
             }
             for (counter, value) in [
-                (perf::Counter::RenderGpuColourMs, sample.gpu_iw4.colour),
-                (perf::Counter::RenderGpuSunMs, sample.gpu_iw4.sun),
-                (perf::Counter::RenderGpuSpotMs, sample.gpu_iw4.spot),
-                (perf::Counter::RenderGpuFloatzMs, sample.gpu_iw4.floatz),
-                (perf::Counter::RenderGpuPostfxMs, sample.gpu_iw4.postfx),
+                (
+                    perf::counter!("gpu_colour", "iw4l.render", handle),
+                    sample.gpu_iw4.colour,
+                ),
+                (
+                    perf::counter!("gpu_sun", "iw4l.render", handle),
+                    sample.gpu_iw4.sun,
+                ),
+                (
+                    perf::counter!("gpu_spot", "iw4l.render", handle),
+                    sample.gpu_iw4.spot,
+                ),
+                (
+                    perf::counter!("gpu_floatz", "iw4l.render", handle),
+                    sample.gpu_iw4.floatz,
+                ),
+                (
+                    perf::counter!("gpu_postfx", "iw4l.render", handle),
+                    sample.gpu_iw4.postfx,
+                ),
             ] {
                 if let Some(ms) = value {
                     counter.emit(f64::from(ms));
                 }
             }
         }
+        diag.portal_timings = sample.portal_timings;
         diag.gpu_opaque_ms = sample.gpu_opaque;
         diag.cpu_graph_ms = sample.cpu_graph;
         diag.cpu_opaque_ms = sample.cpu_opaque;
@@ -1467,7 +1608,14 @@ pub fn sample_render_frame_diag(
 
     static FRAMES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let n = FRAMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if n % RENDER_FRAME_LOG_EVERY == 0 {
+    if n.is_multiple_of(RENDER_FRAME_LOG_EVERY) {
+        if !diag.portal_timings.is_empty() {
+            diag::info!(
+                World,
+                "portal view timings (latest delivered batch): {:?}",
+                diag.portal_timings
+            );
+        }
         diag::info!(
             World,
             "render frame diag: extract_ms={} extract_commands_ms={} prepare_assets_ms={} prepare_meshes_ms={} create_views_ms={} specialize_ms={} prepare_views_ms={} queue_ms={} phase_sort_ms={} prepare_ms={} render_ms={} present_mode={} submit_prepare_ms={} \

@@ -146,7 +146,7 @@ pub struct FrameMaterialRefusal {
 
 #[derive(Clone, Debug)]
 pub struct FrameProduct {
-    pub kind: FrameProductKind,
+    kind: FrameProductKind,
     pub generation_id: MaterialGenerationId,
     pub status: FrameProductStatus,
     pub ordered_draws: Vec<RetainedDrawItem>,
@@ -171,6 +171,10 @@ pub struct FrameProduct {
 }
 
 impl FrameProduct {
+    pub fn kind(&self) -> FrameProductKind {
+        self.kind
+    }
+
     pub fn begin_fill(&mut self, cause: MissingProductCause) {
         self.status = FrameProductStatus::Missing(cause);
         self.ordered_draws.clear();
@@ -226,7 +230,7 @@ impl RenderFocusFrame {
 pub struct FrameProductsSnapshot {
     pub frame_id: u64,
     pub focus: Option<RenderFocusFrame>,
-    pub products: Vec<FrameProduct>,
+    products: [FrameProduct; 9],
 
     pub world_run_surfs: Vec<u16>,
 
@@ -238,17 +242,22 @@ impl FrameProductsSnapshot {
         Self {
             frame_id: 0,
             focus: None,
-            products: missing_products(),
+            products: FrameProductKind::ALL.map(FrameProduct::missing),
             world_run_surfs: Vec::new(),
             world_run_revision: 0,
         }
     }
 
     pub fn product(&self, kind: FrameProductKind) -> &FrameProduct {
-        self.products
-            .iter()
-            .find(|product| product.kind == kind)
-            .expect("RenderFrameProducts must contain every declared product")
+        &self.products[kind as usize]
+    }
+
+    pub fn products(&self) -> &[FrameProduct] {
+        &self.products
+    }
+
+    pub fn swap_product(&mut self, product: &mut FrameProduct) {
+        std::mem::swap(&mut self.products[product.kind as usize], product);
     }
 
     pub fn focus(&self) -> Option<&RenderFocusFrame> {
@@ -256,32 +265,29 @@ impl FrameProductsSnapshot {
     }
 }
 
-fn missing_products() -> Vec<FrameProduct> {
-    FrameProductKind::ALL
-        .into_iter()
-        .map(|kind| {
-            let cause = match kind {
-                FrameProductKind::Colour => MissingProductCause::MissingFrontendEmitter,
-                FrameProductKind::SunShadow => MissingProductCause::MissingSunShadowProducer,
-                FrameProductKind::SpotShadow => MissingProductCause::MissingSpotShadowProducer,
-                FrameProductKind::TwoD => MissingProductCause::HostOwnedTwoD,
-                _ => MissingProductCause::MissingFrontendEmitter,
-            };
-            FrameProduct {
-                kind,
-                generation_id: MaterialGenerationId::default(),
-                status: FrameProductStatus::Missing(cause),
-                ordered_draws: Vec::new(),
-                sun_near_n: 0,
-                sun_packed: None,
-                spot_slots: Vec::new(),
-                list_digest: 0,
-                world_pretess_id: 0,
-                draw_tech: Vec::new(),
-                code_sampler_mask: 0,
-                material_refusals: Vec::new(),
-                has_codemesh: false,
-            }
-        })
-        .collect()
+impl FrameProduct {
+    pub fn missing(kind: FrameProductKind) -> Self {
+        let cause = match kind {
+            FrameProductKind::Colour => MissingProductCause::MissingFrontendEmitter,
+            FrameProductKind::SunShadow => MissingProductCause::MissingSunShadowProducer,
+            FrameProductKind::SpotShadow => MissingProductCause::MissingSpotShadowProducer,
+            FrameProductKind::TwoD => MissingProductCause::HostOwnedTwoD,
+            _ => MissingProductCause::MissingFrontendEmitter,
+        };
+        FrameProduct {
+            kind,
+            generation_id: MaterialGenerationId::default(),
+            status: FrameProductStatus::Missing(cause),
+            ordered_draws: Vec::new(),
+            sun_near_n: 0,
+            sun_packed: None,
+            spot_slots: Vec::new(),
+            list_digest: 0,
+            world_pretess_id: 0,
+            draw_tech: Vec::new(),
+            code_sampler_mask: 0,
+            material_refusals: Vec::new(),
+            has_codemesh: false,
+        }
+    }
 }

@@ -12,7 +12,7 @@ pub struct OwnedFxImpactEntry {
 
 #[derive(Clone, Debug)]
 pub struct OwnedFxImpactTable {
-    pub namespace: crate::AssetNamespace,
+    pub namespace: crate::FamilyId,
     pub name: String,
     pub entries: Vec<OwnedFxImpactEntry>,
     pub capture_gaps: usize,
@@ -27,7 +27,7 @@ impl OwnedFxImpactTable {
         self.entries.len()
     }
 
-    pub fn namespace(&self) -> crate::AssetNamespace {
+    pub fn namespace(&self) -> crate::FamilyId {
         self.namespace
     }
 
@@ -101,7 +101,7 @@ impl ImpactFxCatalog {
         }
         self.capture_gaps += gaps;
         self.table = Some(OwnedFxImpactTable {
-            namespace: crate::AssetNamespace::Iw4,
+            namespace: crate::FamilyId::IW4,
             name,
             entries,
             capture_gaps: gaps,
@@ -124,73 +124,33 @@ fn name_at_cell(
     }
 }
 
-impl ImpactFxCatalog {
-    pub fn capture_t5(
-        &mut self,
-        s: &fastfile_t5::ZoneStream<'_>,
-        name: fastfile_t5::Ptr,
-        entries: fastfile_t5::Ptr,
-        fx: &crate::FxCatalog,
-    ) -> fastfile_t5::Result<()> {
-        let mut rows = Vec::with_capacity(fastfile_t5::size::FX_IMPACT_ENTRY_COUNT);
-        let mut gaps = 0;
-        for row in 0..fastfile_t5::size::FX_IMPACT_ENTRY_COUNT {
-            let mut result = OwnedFxImpactEntry::default();
-            {
-                for (column, cell) in result
-                    .nonflesh
-                    .iter_mut()
-                    .chain(result.flesh.iter_mut())
-                    .enumerate()
-                {
-                    let ptr = entries.at(row * fastfile_t5::size::FX_IMPACT_ENTRY + column * 4);
-                    if s.ptr_at(ptr, 0)? != fastfile_t5::ZonePtr::Null {
-                        if let Some(name) = fx.name_at_slot(fastfile_iw4::Ptr {
-                            block: ptr.block,
-                            offset: ptr.offset,
-                        }) {
-                            *cell = name.to_owned();
-                        } else {
-                            gaps += 1;
-                        }
-                    }
-                }
-            }
-            rows.push(result);
-        }
-        self.capture_gaps += gaps;
-        self.table = Some(OwnedFxImpactTable {
-            namespace: crate::AssetNamespace::T5,
-            name: s.cstr(name)?.to_owned(),
-            entries: rows,
-            capture_gaps: gaps,
-        });
-        Ok(())
+impl OwnedFxImpactTable {
+    pub fn impact_row(&self, impact_type: i32, exit: bool) -> Option<usize> {
+        impact_row_resolver(self.namespace).and_then(|resolve| resolve(impact_type, exit))
     }
 }
 
-impl OwnedFxImpactTable {
-    pub fn impact_row(&self, impact_type: i32, exit: bool) -> Option<usize> {
-        if self.namespace == crate::AssetNamespace::Iw4 {
-            return fx_iw4::impact_table_row(impact_type, exit);
-        }
-        let exit = usize::from(exit);
-        Some(match impact_type {
-            1 => exit,
-            2 => 3 + exit,
-            3 => 7 + exit,
-            4 => 9 + exit,
-            5 => 5 + exit,
-            6 => 11,
-            7 | 8 => 12,
-            9 => 13,
-            10 => 14,
-            11 => 15,
-            12 => 16,
-            13 => 17,
-            14 => 19,
-            15 => 20,
-            _ => return None,
-        })
+pub type ImpactRowResolver = fn(i32, bool) -> Option<usize>;
+pub const REFERENCE_IMPACT_ROW_RESOLVER: ImpactRowResolver = fx_iw4::impact_table_row;
+
+#[derive(Default)]
+pub struct ImpactFxFamilies(std::collections::BTreeMap<crate::FamilyId, ImpactRowResolver>);
+impl ImpactFxFamilies {
+    pub fn register(&mut self, family: crate::FamilyId, resolver: ImpactRowResolver) {
+        assert!(
+            self.0.insert(family, resolver).is_none(),
+            "duplicate impact family"
+        );
     }
+}
+static IMPACT_FAMILIES: std::sync::OnceLock<ImpactFxFamilies> = std::sync::OnceLock::new();
+pub fn install_impact_fx_families(
+    families: ImpactFxFamilies,
+) -> std::result::Result<(), &'static str> {
+    IMPACT_FAMILIES
+        .set(families)
+        .map_err(|_| "impact families already installed")
+}
+pub fn impact_row_resolver(family: crate::FamilyId) -> Option<ImpactRowResolver> {
+    IMPACT_FAMILIES.get()?.0.get(&family).copied()
 }

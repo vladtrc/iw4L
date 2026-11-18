@@ -2,6 +2,8 @@ use crate::chrome::{KillCamMode, third_person_in_killcam};
 use crate::other_flags;
 use math_iw4::{angle_vectors, vec_to_yaw};
 
+pub const PM_TYPE_NOCLIP: i32 = 2;
+
 pub const PM_TYPE_SPECTATOR: i32 = 5;
 
 pub const PM_TYPE_INTERMISSION: i32 = 6;

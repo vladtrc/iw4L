@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use bevy::prelude::Resource;
+use bevy::ecs::system::SystemParam;
+use bevy::prelude::{Res, Resource};
 use playerstate_iw4::PlayerState;
 use sim::{ClientId, ClientLifecycle, EntityEventRecord, EventRecord, SimEvent, Snapshot};
 
-use crate::client::presentation::projectiles::PresentedProjectile;
 use crate::client::proxy::PresentationSampleProvenance;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -50,14 +50,13 @@ pub struct PresentedSnapshot {
     inner: Option<Arc<Snapshot>>,
     previous_inner: Option<Arc<Snapshot>>,
     frame_interpolation: f32,
+    entity_pose_time_ms: Option<i32>,
     trajectory_time_ms: Option<i32>,
     trajectory_next: Option<Arc<Snapshot>>,
 
     pose: HashMap<ClientId, PlayerState>,
     view_offset: [f32; 3],
     remote_provenance: HashMap<ClientId, PresentationSampleProvenance>,
-
-    presented_projectiles: Vec<PresentedProjectile>,
 }
 
 impl PresentedSnapshot {
@@ -77,32 +76,27 @@ impl PresentedSnapshot {
         self.external_camera = external.then_some(true);
     }
 
-    pub fn weapon_epoch(&self) -> Option<u32> {
-        self.snapshot()
-            .map(|snapshot| snapshot.meta.world_objects.map_round_epoch)
-    }
-
     pub fn clear(&mut self) {
         self.external_camera = None;
         self.inner = None;
         self.previous_inner = None;
         self.frame_interpolation = 0.0;
+        self.entity_pose_time_ms = None;
         self.trajectory_time_ms = None;
         self.trajectory_next = None;
         self.pose.clear();
         self.view_offset = [0.0; 3];
         self.remote_provenance.clear();
-        self.presented_projectiles.clear();
     }
 
     pub fn publish_decoded(&mut self, snapshot: Snapshot) {
         self.trajectory_time_ms = None;
         self.trajectory_next = None;
-        self.presented_projectiles = authoritative_projectiles(&snapshot);
         self.pose.clear();
         self.inner = Some(Arc::new(snapshot));
         self.previous_inner = None;
         self.frame_interpolation = 0.0;
+        self.entity_pose_time_ms = None;
         self.remote_provenance.clear();
     }
 
@@ -172,13 +166,13 @@ impl PresentedSnapshot {
     ) {
         self.trajectory_time_ms = None;
         self.trajectory_next = None;
-        self.presented_projectiles = authoritative_projectiles(&snapshot);
         self.pose.clear();
         self.pose.insert(local, predicted_ps);
         self.pose.extend(remote_poses.drain());
         self.inner = Some(snapshot);
         self.previous_inner = None;
         self.frame_interpolation = 0.0;
+        self.entity_pose_time_ms = None;
         self.remote_provenance = remote_provenance;
     }
 
@@ -188,6 +182,10 @@ impl PresentedSnapshot {
             self.inner.as_deref()?,
             self.frame_interpolation,
         ))
+    }
+
+    pub fn entity_pose_time_ms(&self, render_time_ms: i32) -> i32 {
+        self.entity_pose_time_ms.unwrap_or(render_time_ms)
     }
 
     pub fn trajectory_time_ms(&self, render_time_ms: i32) -> i32 {
@@ -224,14 +222,19 @@ impl PresentedSnapshot {
         };
         let next_time = sim::level_time_ms(next.tick);
         let next_projectile = next.projectiles.iter().find(|p| {
-            p.id == projectile.id
-                && p.entnum == projectile.entnum
-                && p.owner_life == projectile.owner_life
+            p.id == projectile.id && p.entnum == projectile.entnum && p.owner == projectile.owner
         });
         if let Some(next_projectile) = next_projectile
             && next_time > current_time
             && next_projectile.pos != projectile.pos
         {
+            if sim::world_graph::world_at(projectile.origin)
+                != sim::world_graph::world_at(next_projectile.origin)
+            {
+                // Keep the old-world trajectory up to the authoritative portal
+                // transition. A straight lerp would traverse the atlas slabs.
+                return projectile.origin_at(time_ms.min(next_time));
+            }
             // A buffered impact/bounce ends the old trajectory; extrapolating it
             // through that transition sends the camera past the victim.
             let fraction = ((time_ms - current_time) as f32 / (next_time - current_time) as f32)
@@ -248,17 +251,18 @@ impl PresentedSnapshot {
         &mut self,
         previous: Option<Arc<Snapshot>>,
         frame_interpolation: f32,
+        entity_pose_time_ms: i32,
     ) {
+        self.entity_pose_time_ms = Some(entity_pose_time_ms);
         self.previous_inner = previous;
         self.frame_interpolation = frame_interpolation;
     }
 
-    pub fn set_presented_projectiles(&mut self, rows: Vec<PresentedProjectile>) {
-        self.presented_projectiles = rows;
-    }
-
-    pub fn presented_projectiles(&self) -> &[PresentedProjectile] {
-        &self.presented_projectiles
+    pub fn projectile(&self, number: u16) -> Option<&sim::ProjectileState> {
+        self.snapshot()?
+            .projectiles
+            .iter()
+            .find(|p| p.entnum == i32::from(number))
     }
 
     pub fn remote_sample_provenance(&self, id: ClientId) -> Option<PresentationSampleProvenance> {
@@ -370,11 +374,33 @@ impl PresentedSnapshot {
     }
 }
 
+/// The chord between two valid walking poses can cut through a step or jamb.
+/// Keep aim interpolation, but use the decoded position when that chord's
+/// current sample overlaps collision.
+pub(crate) fn keep_interpolated_player_clear(
+    mut interpolated: PlayerState,
+    next: &PlayerState,
+    clear: impl FnOnce(&PlayerState) -> bool,
+) -> PlayerState {
+    if interpolated.origin != next.origin && !clear(&interpolated) {
+        interpolated.origin = next.origin;
+    }
+    interpolated
+}
+
 pub(crate) fn interpolate_player_state(
     previous: &PlayerState,
     next: &PlayerState,
     frame_interpolation: f32,
+    has_atlas: bool,
 ) -> PlayerState {
+    if (previous.e_flags ^ next.e_flags) & playerstate_iw4::eflags::TELEPORT != 0
+        || (has_atlas
+            && sim::world_graph::world_at(previous.origin)
+                != sim::world_graph::world_at(next.origin))
+    {
+        return *next;
+    }
     let f = frame_interpolation.max(0.0);
     let lerp = |a: f32, b: f32| (b - a) * f + a;
     let mut out = *next;
@@ -399,13 +425,19 @@ pub(crate) fn interpolate_player_state(
     out
 }
 
-fn authoritative_projectiles(snapshot: &Snapshot) -> Vec<PresentedProjectile> {
-    snapshot
-        .projectiles
-        .iter()
-        .copied()
-        .map(PresentedProjectile::Authoritative)
-        .collect()
+pub(crate) fn linked_player_pose(
+    mut predicted: PlayerState,
+    next: &PlayerState,
+    interpolated: &PlayerState,
+) -> PlayerState {
+    predicted.origin = interpolated.origin;
+    predicted.view_height_current = interpolated.view_height_current;
+    for axis in 0..3 {
+        predicted.viewangles[axis] +=
+            math_iw4::angle_subtract(interpolated.delta_angles[axis], next.delta_angles[axis]);
+    }
+    predicted.delta_angles = interpolated.delta_angles;
+    predicted
 }
 
 fn fpv_cues_from_events(
@@ -423,12 +455,6 @@ fn fpv_cues_from_events(
             SimEvent::AttackReleased => cues.attack_released = true,
             SimEvent::Spawned { .. } => cues.spawned = true,
             SimEvent::Died { .. }
-            | SimEvent::ClassAccepted { .. }
-            | SimEvent::ClassRejected { .. }
-            | SimEvent::GiveAccepted { .. }
-            | SimEvent::GiveRejected { .. }
-            | SimEvent::ConfigurationChangeAccepted { .. }
-            | SimEvent::ConfigurationChangeRejected { .. }
             | SimEvent::ScoreChanged { .. }
             | SimEvent::MatchEnded { .. }
             | SimEvent::WeaponSwitchRequested { .. } => {}
@@ -463,6 +489,34 @@ pub struct ViewweaponAim {
     pub xhair_y: f32,
 
     pub from_composed_axis: bool,
+}
+
+#[derive(SystemParam)]
+pub struct LocalPresentation<'w> {
+    pub presented: Res<'w, PresentedSnapshot>,
+    pub local: Res<'w, LocalPresentClient>,
+}
+
+impl LocalPresentation<'_> {
+    pub fn client_id(&self) -> ClientId {
+        self.local.0
+    }
+
+    pub fn snapshot(&self) -> Option<&Snapshot> {
+        self.presented.snapshot()
+    }
+
+    pub fn player(&self) -> Option<&PlayerState> {
+        self.presented.player(self.local.0)
+    }
+
+    pub fn alive_player(&self) -> Option<&PlayerState> {
+        self.presented.alive_player(self.local.0)
+    }
+
+    pub fn shellshock(&self) -> Option<&hud_iw4::ShockParams> {
+        self.presented.shellshock(self.local.0)
+    }
 }
 
 #[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]

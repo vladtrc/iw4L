@@ -50,6 +50,16 @@ impl Plugin for NetPlugin {
             OnExit(frame::MatchScope::Live),
             crate::signon::release_match_protocol.in_set(frame::ScopeSet::Release),
         );
+        app.add_systems(
+            OnEnter(frame::MatchScope::Live),
+            |role: Res<RuntimeRole>, mut actions: ResMut<ClientActionInbox>| {
+                *actions = if *role == RuntimeRole::Client {
+                    ClientActionInbox::remote()
+                } else {
+                    ClientActionInbox::default()
+                };
+            },
+        );
         app.init_resource::<crate::AccountSaveReceipt>();
         app.insert_resource(self.role)
             .init_resource::<PresentedSnapshot>()
@@ -61,8 +71,6 @@ impl Plugin for NetPlugin {
             app.scoped::<AuthorityClock>(frame::MatchScope::Live)
                 .init_resource::<ClientCommandInbox>()
                 .init_resource::<ClientActionInbox>()
-                .init_resource::<crate::ClientActionLedger>()
-                .init_resource::<crate::ActionRequestIds>()
                 .init_resource::<crate::ReliableEventHub>()
                 .insert_resource(Time::<Fixed>::from_hz(
                     crate::authority::inbox::AUTHORITY_HZ,
@@ -102,7 +110,7 @@ impl Plugin for NetPlugin {
             crate::transport::master::register_master_bridge(app);
         } else {
             app.add_systems(
-                Update,
+                PreUpdate,
                 crate::signon::drive_match_boundary
                     .in_set(crate::ClientSet::Load)
                     .after(frame::SessionSwapApplied),

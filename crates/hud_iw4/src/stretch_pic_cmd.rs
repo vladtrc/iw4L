@@ -163,17 +163,22 @@ pub fn parse_gfx_cmd_stretch_pic(cmd: &[u8]) -> Option<GfxCmdStretchPic> {
     })
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TextureWindow {
+    pub min: [f32; 2],
+    pub max: [f32; 2],
+}
+
 #[must_use]
 pub fn draw_stretch_pic_corners(
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-    s0: f32,
-    t0: f32,
-    s1: f32,
-    t1: f32,
+    rect: crate::AppliedRect,
+    uv: TextureWindow,
 ) -> ([[f32; 2]; 4], [[f32; 2]; 4]) {
+    let crate::AppliedRect { x, y, w, h } = rect;
+    let TextureWindow {
+        min: [s0, t0],
+        max: [s1, t1],
+    } = uv;
     (
         [[x, y], [x + w, y], [x + w, y + h], [x, y + h]],
         [[s0, t0], [s1, t0], [s1, t1], [s0, t1]],
@@ -226,16 +231,15 @@ pub fn set_vertex_2d(x: f32, y: f32, s: f32, t: f32, color: u32) -> GfxTessVerte
 
 #[must_use]
 pub fn draw_stretch_pic_pack(
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-    s0: f32,
-    t0: f32,
-    s1: f32,
-    t1: f32,
+    rect: crate::AppliedRect,
+    uv: TextureWindow,
     color: u32,
 ) -> [GfxTessVertex2d; 4] {
+    let crate::AppliedRect { x, y, w, h } = rect;
+    let TextureWindow {
+        min: [s0, t0],
+        max: [s1, t1],
+    } = uv;
     [
         set_vertex_2d(x, y, s0, t0, color),
         set_vertex_2d(x + w, y, s1, t0, color),

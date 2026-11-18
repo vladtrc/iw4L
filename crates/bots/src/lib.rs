@@ -15,9 +15,9 @@ mod weapon;
 pub use controller::HostController;
 pub use intent::{BotIntent, MotorReport, MoveMode, PathOutcome};
 pub use nav::{
-    NAV_HULL, NAV_SCHEMA, NavEdge, NavGraph, PathError, RouteStats, RouteStep, RouteWork,
-    SupportProbe, TraversalKind, bake, bake_seeded, brush_bounds, find_path, find_route,
-    find_route_resumable, playable_bounds, roam_node, supported_walk,
+    NAV_HULL, NAV_SCHEMA, NavEdge, NavGraph, PathError, RouteStep, RouteWork, SupportProbe,
+    TraversalKind, bake, bake_seeded, brush_bounds, find_path, find_route, find_route_resumable,
+    playable_bounds, roam_node, supported_walk,
 };
 pub use observation::{
     BotEvent, BotObservation, Contact, DEFAULT_OBJECTIVE_RADIUS, KnowledgeSource, ModeObjective,
@@ -26,8 +26,8 @@ pub use observation::{
 };
 pub use plugin::BotsPlugin;
 pub use query::{
-    Budgeted, HullTrace, ObstacleKind, QueryCounters, QueryDenied, QueryResult, QuerySubsystem,
-    SightSample, TraceBudget, WalkSample, WorldQuery,
+    Budgeted, HullTrace, ObstacleKind, QueryDenied, QueryResult, SightSample, TraceBudget,
+    WalkSample, WorldQuery,
 };
 pub use roster::{
     BotAddQueue, BotAddRequest, BotFireQueue, BotHold, BotRoster, BotSide, BotTpQueue,

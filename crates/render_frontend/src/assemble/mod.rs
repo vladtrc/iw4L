@@ -7,8 +7,8 @@ pub mod pack;
 #[derive(bevy::ecs::schedule::ScheduleLabel, Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct StaticSunAndFx;
 
-fn prepare_static_sun_and_fx(world: &mut World) {
-    let _prepare = perf::Span::HostStaticSunFxMs.enter();
+pub(crate) fn prepare_static_sun_and_fx(world: &mut World) {
+    let _prepare = perf::span!("static_sun_fx", "iw4l.render");
     world.run_schedule(StaticSunAndFx);
 }
 
@@ -32,9 +32,9 @@ impl Plugin for RenderAssemblePlugin {
                 Update,
                 prepare_static_sun_and_fx
                     .in_set(frame::InMatch)
-                    .in_set(frame::WorkerCmdSet::FxVerts)
-                    .after(frame::WorkerCmdSet::FxRemaining)
-                    .after(frame::WorkerCmdSet::SmodelCache)
+                    .in_set(net::ClientSet::Present)
+                    .after(crate::adapters::fx::system::tick_fx_remaining_update)
+                    .after(crate::prepare::scene::smodel_geom_cache::skin_cached_static_model_cmd)
                     .after(drawsurf::update_command_context_code_sources)
                     .after(crate::prepare::scene::cull::apply_dpvs_cull)
                     .after(crate::prepare::scene::smodel_lighting::update_smodel_lighting),
@@ -53,7 +53,7 @@ impl Plugin for RenderAssemblePlugin {
             crate::assemble::drawsurf::tess::smodel::build_smodel_gpu_plan
                 .in_set(frame::InMatch)
                 .after(crate::prepare::scene::spawn::spawn_world_finish)
-                .before(frame::WorkerCmdSet::CellStatic)
+                .before(frame::WorkerCmdSet::WorldVisibility)
                 .in_set(net::ClientSet::Present),
         );
         app.add_systems(
@@ -69,12 +69,17 @@ impl Plugin for RenderAssemblePlugin {
             crate::assemble::drawsurf::tess::xmodel::apply_resolved_xmodel_lighting
                 .in_set(frame::InMatch)
                 .after(crate::prepare::scene::model_lighting_cache::update_dirty_model_lighting)
-                .in_set(frame::WorkerCmdSet::AddSceneEnt),
+                .in_set(net::ClientSet::Present),
         );
 
         app.add_systems(
             Update,
             crate::assemble::drawsurf::update_command_context_code_sources
+                .after(crate::prepare::scene::cull::apply_dpvs_cull)
+                // Brush membership extends the BSP masks. Publish the complete
+                // view to the GPU only after those owners have been admitted.
+                .after(crate::adapters::anim::dyn_ent_brush::exec_cell_dyn_brush_cmds)
+                .after(crate::adapters::anim::dyn_ent_brush::exec_cell_scene_ent_cmds)
                 .in_set(frame::InMatch)
                 .after(crate::prepare::scene::view_parms::stamp_prepared_scene_view)
                 .in_set(net::ClientSet::Present),
@@ -97,14 +102,16 @@ impl Plugin for RenderAssemblePlugin {
                 .after(frame::ScreenEffectsPublished)
                 .after(crate::adapters::anim::fpv_present::FpvPlacementSet)
                 .after(crate::adapters::anim::fpv_present::FpvGeometrySet)
-                .after(frame::WorkerCmdSet::AddSceneEnt)
+                .after(frame::ModelLightingSeated)
+                .after(render_anim::occupancy::remote_body::finish_body_draw_plan)
+                .after(crate::assemble::drawsurf::tess::xmodel::apply_resolved_xmodel_lighting)
                 .after(crate::assemble::drawsurf::tess::xmodel::apply_resolved_fx_model_lighting)
                 .after(crate::adapters::anim::script_model::ScriptModelDrawSet)
-                .after(frame::WorkerCmdSet::FxVerts)
+                .after(crate::assemble::prepare_static_sun_and_fx)
                 .after(crate::assemble::drawsurf::tess::glass::apply_glass_model_lighting)
                 .after(crate::prepare::scene::cull::apply_dpvs_cull)
                 .after(crate::prepare::scene::smodel_lighting::update_smodel_lighting)
-                .after(frame::WorkerCmdSet::SmodelCache)
+                .after(crate::prepare::scene::smodel_geom_cache::skin_cached_static_model_cmd)
                 .after(crate::assemble::drawsurf::ingest_drawsurf_list)
                 .after(crate::assemble::drawsurf::update_command_context_code_sources)
                 .in_set(net::ClientSet::Present),
@@ -115,14 +122,14 @@ impl Plugin for RenderAssemblePlugin {
             (
                 crate::assemble::drawsurf::open_frame_products
                     .in_set(frame::InMatch)
-                    .after(frame::WorkerCmdSet::FxVerts)
+                    .after(crate::assemble::prepare_static_sun_and_fx)
                     .after(crate::assemble::drawsurf::update_command_context_code_sources),
                 crate::assemble::drawsurf::bake_sun_shadow_casters
                     .in_set(frame::InMatch)
                     .after(prepare_static_sun_and_fx)
                     .after(crate::assemble::drawsurf::open_frame_products)
                     .after(rebuild_draw_lanes)
-                    .after(frame::WorkerCmdSet::SmodelCache)
+                    .after(crate::prepare::scene::smodel_geom_cache::skin_cached_static_model_cmd)
                     .after(crate::prepare::scene::cull::apply_dpvs_cull)
                     .after(crate::prepare::scene::smodel_lighting::update_smodel_lighting),
                 crate::assemble::drawsurf::bake_spot_shadow_casters

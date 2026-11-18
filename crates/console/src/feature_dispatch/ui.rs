@@ -1,11 +1,9 @@
 use ::ui::UiDraw;
 use bevy::prelude::*;
-use frame::LaunchIdentity;
-use net::{AuthorityClock, AuthorityWorld, PresentedSnapshot};
 
 use crate::{ConsoleCommand, ConsoleLine, ConsoleSettings, ConsoleState};
 
-use super::state_dump::write_current_state_dump;
+use super::state_dump::StateDumpWriter;
 
 pub(crate) fn route_ui_commands(
     mut events: MessageReader<ConsoleCommand>,
@@ -17,12 +15,7 @@ pub(crate) fn route_ui_commands(
     mut ui_draw: ResMut<UiDraw>,
     mut game_settings: ResMut<frame::GameSettings>,
     menus: hud::MenuState<'_>,
-    identity: Option<Res<LaunchIdentity>>,
-    (authority, authority_clock, presented): (
-        Option<Res<AuthorityWorld>>,
-        Option<Res<AuthorityClock>>,
-        Option<Res<PresentedSnapshot>>,
-    ),
+    dump: StateDumpWriter,
     mut menu_requests: MessageWriter<frame::UiMenuRequest>,
 ) {
     let (console, settings, line) = &mut output;
@@ -126,14 +119,7 @@ pub(crate) fn route_ui_commands(
                         line,
                     );
                 }
-                Ok(MenuVerb::Dump) => match write_current_state_dump(
-                    identity.as_deref(),
-                    "menu",
-                    authority_clock.as_deref(),
-                    authority.as_deref(),
-                    presented.as_deref(),
-                    None,
-                ) {
+                Ok(MenuVerb::Dump) => match dump.write("menu", None) {
                     Ok(path) => echo(
                         format!("menu dump: wrote {}", path.display()),
                         console,

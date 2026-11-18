@@ -57,251 +57,274 @@ pub fn player_prone_allowed<C: CollisionBackend>(
     if ps.ground_entity_num == ENTITYNUM_NONE && !prone_special_air_ok(ps) {
         return false;
     }
-    check_prone(
+    ProneBody {
+        origin: ps.origin,
+        radius: f_size,
+        height: PRONE_CHECK_HEIGHT,
+        yaw: ps.viewangles[1],
+        feet_distance: PRONE_FEET_DIST,
+    }
+    .check(
         collision,
-        ps.origin,
-        f_size,
-        PRONE_CHECK_HEIGHT,
-        ps.viewangles[1],
         false,
-        ps.ground_entity_num != ENTITYNUM_NONE,
-        true,
+        ProneGround {
+            on_ground: ps.ground_entity_num != ENTITYNUM_NONE,
+            walkable: true,
+        },
         stance_surface_type(ps) != StanceSurface::LastStand,
-        PRONE_FEET_DIST,
         None,
         None,
     )
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one call boundary for the prone check"
-)]
-#[must_use]
-pub fn check_prone<C: CollisionBackend>(
-    collision: &C,
-    origin: [f32; 3],
-    f_size: f32,
-    f_height: f32,
-    f_yaw: f32,
-    already_prone: bool,
-    on_ground: bool,
-    ground_walkable: bool,
-    not_last_stand: bool,
-    prone_feet_dist: f32,
-    mut torso_pitch: Option<&mut f32>,
-    mut waist_pitch: Option<&mut f32>,
-) -> bool {
-    if !already_prone {
-        let lifted = [origin[0], origin[1], origin[2] + PRONE_FIRST_LIFT];
-        let hull = collision.trace(GroundTraceInput {
-            start: origin,
-            end: lifted,
-            mins: [-f_size, -f_size, 0.0],
-            maxs: [f_size, f_size, f_height],
-            tracemask: PRONE_TRACE_MASK,
-        });
-        if hull.allsolid != 0 {
-            return false;
-        }
-    }
-    if on_ground && !ground_walkable {
-        return false;
-    }
+#[derive(Clone, Copy, Debug)]
+pub struct ProneBody {
+    pub origin: [f32; 3],
+    pub radius: f32,
+    pub height: f32,
+    pub yaw: f32,
+    pub feet_distance: f32,
+}
 
-    let yaw = if not_last_stand {
-        f_yaw - PRONE_YAW_FLIP
-    } else {
-        f_yaw
-    };
-    let (fwd_xy, _) = yaw_vectors_2d(yaw);
-    let mut forward = [fwd_xy[0], fwd_xy[1], 0.0];
-    let f_trace_height = f_height - PRONE_CAPSULE;
-    let mut start = [origin[0], origin[1], origin[2] + f_trace_height];
-    let along = prone_feet_dist - PRONE_CAPSULE;
-    let mut end = [
-        start[0] + along * forward[0],
-        start[1] + along * forward[1],
-        start[2] + along * forward[2],
-    ];
-    let cap_mins = [-PRONE_CAPSULE, -PRONE_CAPSULE, -PRONE_CAPSULE];
-    let cap_maxs = [PRONE_CAPSULE, PRONE_CAPSULE, PRONE_CAPSULE];
-    let mut trace = prone_trace(collision, start, end, cap_mins, cap_maxs);
-    let mut first_hit = false;
-    let first_dist = if trace.fraction >= 1.0 {
-        prone_feet_dist
-    } else {
-        if !on_ground {
-            return false;
-        }
-        first_hit = true;
-        let dist = along * trace.fraction + PRONE_CAPSULE;
-        if dist < f_size + PRONE_MIN_FIRST_PAD {
-            return false;
-        }
-        let short = f_trace_height * PRONE_SHORT_FEET_FRAC + PRONE_WAIST_ALONG;
-        if dist < short {
-            first_hit = false;
-            end[2] += PRONE_SHORT_FEET_BUMP;
-            let delta = [end[0] - start[0], end[1] - start[1], end[2] - start[2]];
-            let pitch_len = vec3_normalize_to(delta, &mut forward);
-            trace = prone_trace(collision, start, end, cap_mins, cap_maxs);
-            if trace.fraction >= 1.0 {
-                prone_feet_dist
-            } else {
-                first_hit = true;
-                let retry = trace.fraction * pitch_len + PRONE_CAPSULE;
-                if retry < short {
-                    return false;
-                }
-                retry
-            }
-        } else {
-            dist
-        }
-    };
+#[derive(Clone, Copy, Debug)]
+pub struct ProneGround {
+    pub on_ground: bool,
+    pub walkable: bool,
+}
 
-    let mut feet = vec3_lerp(start, end, trace.fraction);
-    let waist_scale = if on_ground {
-        PRONE_GROUNDED_WAIST_SCALE
-    } else {
-        1.0
-    };
-    start = [
-        origin[0] + PRONE_WAIST_ALONG * forward[0],
-        origin[1] + PRONE_WAIST_ALONG * forward[1],
-        origin[2] + f_trace_height + PRONE_WAIST_ALONG * forward[2],
-    ];
-    let down = waist_scale * f_size + f_trace_height - PRONE_CAPSULE;
-    end = [start[0], start[1], start[2] - down];
-    trace = prone_trace(collision, start, end, cap_mins, cap_maxs);
-    if trace.fraction == 1.0 {
-        return prone_fail(
+impl ProneBody {
+    #[must_use]
+    pub fn check<C: CollisionBackend>(
+        self,
+        collision: &C,
+        already_prone: bool,
+        ground: ProneGround,
+        not_last_stand: bool,
+        mut torso_pitch: Option<&mut f32>,
+        mut waist_pitch: Option<&mut f32>,
+    ) -> bool {
+        let Self {
+            origin,
+            radius: f_size,
+            height: f_height,
+            yaw: f_yaw,
+            feet_distance: prone_feet_dist,
+        } = self;
+        let ProneGround {
             on_ground,
-            torso_pitch.as_deref_mut(),
-            waist_pitch.as_deref_mut(),
-        );
-    }
-    if trace.walkable == 0 {
-        return false;
-    }
-    let waist_dist = down * trace.fraction + PRONE_CAPSULE;
-    let mut waist = vec3_lerp(start, end, trace.fraction);
-    waist[2] -= PRONE_CAPSULE;
-    if first_hit {
-        if first_dist - waist_dist < waist_dist * PRONE_WAIST_FEET_REJECT {
+            walkable: ground_walkable,
+        } = ground;
+        if !already_prone {
+            let lifted = [origin[0], origin[1], origin[2] + PRONE_FIRST_LIFT];
+            let hull = collision.trace(GroundTraceInput {
+                start: origin,
+                end: lifted,
+                mins: [-f_size, -f_size, 0.0],
+                maxs: [f_size, f_size, f_height],
+                tracemask: PRONE_TRACE_MASK,
+            });
+            if hull.allsolid != 0 {
+                return false;
+            }
+        }
+        if on_ground && !ground_walkable {
+            return false;
+        }
+
+        let yaw = if not_last_stand {
+            f_yaw - PRONE_YAW_FLIP
+        } else {
+            f_yaw
+        };
+        let (fwd_xy, _) = yaw_vectors_2d(yaw);
+        let mut forward = [fwd_xy[0], fwd_xy[1], 0.0];
+        let f_trace_height = f_height - PRONE_CAPSULE;
+        let mut start = [origin[0], origin[1], origin[2] + f_trace_height];
+        let along = prone_feet_dist - PRONE_CAPSULE;
+        let mut end = [
+            start[0] + along * forward[0],
+            start[1] + along * forward[1],
+            start[2] + along * forward[2],
+        ];
+        let cap_mins = [-PRONE_CAPSULE, -PRONE_CAPSULE, -PRONE_CAPSULE];
+        let cap_maxs = [PRONE_CAPSULE, PRONE_CAPSULE, PRONE_CAPSULE];
+        let mut trace = prone_trace(collision, start, end, cap_mins, cap_maxs);
+        let mut first_hit = false;
+        let first_dist = if trace.fraction >= 1.0 {
+            prone_feet_dist
+        } else {
+            if !on_ground {
+                return false;
+            }
+            first_hit = true;
+            let dist = along * trace.fraction + PRONE_CAPSULE;
+            if dist < f_size + PRONE_MIN_FIRST_PAD {
+                return false;
+            }
+            let short = f_trace_height * PRONE_SHORT_FEET_FRAC + PRONE_WAIST_ALONG;
+            if dist < short {
+                first_hit = false;
+                end[2] += PRONE_SHORT_FEET_BUMP;
+                let delta = [end[0] - start[0], end[1] - start[1], end[2] - start[2]];
+                let pitch_len = vec3_normalize_to(delta, &mut forward);
+                trace = prone_trace(collision, start, end, cap_mins, cap_maxs);
+                if trace.fraction >= 1.0 {
+                    prone_feet_dist
+                } else {
+                    first_hit = true;
+                    let retry = trace.fraction * pitch_len + PRONE_CAPSULE;
+                    if retry < short {
+                        return false;
+                    }
+                    retry
+                }
+            } else {
+                dist
+            }
+        };
+
+        let mut feet = vec3_lerp(start, end, trace.fraction);
+        let waist_scale = if on_ground {
+            PRONE_GROUNDED_WAIST_SCALE
+        } else {
+            1.0
+        };
+        start = [
+            origin[0] + PRONE_WAIST_ALONG * forward[0],
+            origin[1] + PRONE_WAIST_ALONG * forward[1],
+            origin[2] + f_trace_height + PRONE_WAIST_ALONG * forward[2],
+        ];
+        let down = waist_scale * f_size + f_trace_height - PRONE_CAPSULE;
+        end = [start[0], start[1], start[2] - down];
+        trace = prone_trace(collision, start, end, cap_mins, cap_maxs);
+        if trace.fraction == 1.0 {
             return prone_fail(
                 on_ground,
                 torso_pitch.as_deref_mut(),
                 waist_pitch.as_deref_mut(),
             );
         }
-        let mut delta = [feet[0] - waist[0], feet[1] - waist[1], feet[2] - waist[2]];
-        delta[0] += PRONE_CAPSULE * forward[0];
-        delta[1] += PRONE_CAPSULE * forward[1];
-        delta[2] += PRONE_CAPSULE * forward[2] + PRONE_CAPSULE;
-        vec3_normalize(&mut delta);
-        let mad_scale = along - PRONE_WAIST_ALONG;
-        end = [
-            start[0] + mad_scale * delta[0],
-            start[1] + mad_scale * delta[1],
-            start[2] + mad_scale * delta[2],
-        ];
-        end[0] = (along * forward[0] + origin[0] + end[0]) * 0.5;
-        end[1] = (along * forward[1] + origin[1] + end[1]) * 0.5;
-        trace = prone_trace(collision, start, end, cap_mins, cap_maxs);
-        if trace.fraction < 1.0 {
-            start = vec3_lerp(start, end, trace.fraction);
-            start[2] += PRONE_WAIST_ALONG;
-            end[2] += PRONE_WAIST_ALONG;
-            trace = prone_trace(collision, start, end, cap_mins, cap_maxs);
-            if trace.fraction < 1.0 {
+        if trace.walkable == 0 {
+            return false;
+        }
+        let waist_dist = down * trace.fraction + PRONE_CAPSULE;
+        let mut waist = vec3_lerp(start, end, trace.fraction);
+        waist[2] -= PRONE_CAPSULE;
+        if first_hit {
+            if first_dist - waist_dist < waist_dist * PRONE_WAIST_FEET_REJECT {
                 return prone_fail(
                     on_ground,
                     torso_pitch.as_deref_mut(),
                     waist_pitch.as_deref_mut(),
                 );
             }
+            let mut delta = [feet[0] - waist[0], feet[1] - waist[1], feet[2] - waist[2]];
+            delta[0] += PRONE_CAPSULE * forward[0];
+            delta[1] += PRONE_CAPSULE * forward[1];
+            delta[2] += PRONE_CAPSULE * forward[2] + PRONE_CAPSULE;
+            vec3_normalize(&mut delta);
+            let mad_scale = along - PRONE_WAIST_ALONG;
+            end = [
+                start[0] + mad_scale * delta[0],
+                start[1] + mad_scale * delta[1],
+                start[2] + mad_scale * delta[2],
+            ];
+            end[0] = (along * forward[0] + origin[0] + end[0]) * 0.5;
+            end[1] = (along * forward[1] + origin[1] + end[1]) * 0.5;
+            trace = prone_trace(collision, start, end, cap_mins, cap_maxs);
+            if trace.fraction < 1.0 {
+                start = vec3_lerp(start, end, trace.fraction);
+                start[2] += PRONE_WAIST_ALONG;
+                end[2] += PRONE_WAIST_ALONG;
+                trace = prone_trace(collision, start, end, cap_mins, cap_maxs);
+                if trace.fraction < 1.0 {
+                    return prone_fail(
+                        on_ground,
+                        torso_pitch.as_deref_mut(),
+                        waist_pitch.as_deref_mut(),
+                    );
+                }
+            }
+            feet = vec3_lerp(start, end, trace.fraction);
+        }
+
+        start = feet;
+        end = [
+            feet[0],
+            feet[1],
+            feet[2] - ((feet[2] - waist[2]) + (feet[2] - waist[2]) + f_size),
+        ];
+        trace = prone_trace(collision, start, end, cap_mins, cap_maxs);
+        if trace.fraction == 1.0 {
+            return prone_fail(
+                on_ground,
+                torso_pitch.as_deref_mut(),
+                waist_pitch.as_deref_mut(),
+            );
+        }
+        if trace.walkable == 0 {
+            return false;
         }
         feet = vec3_lerp(start, end, trace.fraction);
-    }
-
-    start = feet;
-    end = [
-        feet[0],
-        feet[1],
-        feet[2] - ((feet[2] - waist[2]) + (feet[2] - waist[2]) + f_size),
-    ];
-    trace = prone_trace(collision, start, end, cap_mins, cap_maxs);
-    if trace.fraction == 1.0 {
-        return prone_fail(
-            on_ground,
-            torso_pitch.as_deref_mut(),
-            waist_pitch.as_deref_mut(),
+        feet[2] -= PRONE_CAPSULE;
+        let torso = origin;
+        let torso_delta = if not_last_stand {
+            [
+                torso[0] - waist[0],
+                torso[1] - waist[1],
+                torso[2] - waist[2],
+            ]
+        } else {
+            [
+                waist[0] - torso[0],
+                waist[1] - torso[1],
+                waist[2] - torso[2],
+            ]
+        };
+        let f_torso = angle_normalize_360(vec_to_pitch(torso_delta));
+        let waist_delta = if not_last_stand {
+            [waist[0] - feet[0], waist[1] - feet[1], waist[2] - feet[2]]
+        } else {
+            [feet[0] - waist[0], feet[1] - waist[1], feet[2] - waist[2]]
+        };
+        let f_waist = angle_normalize_360(vec_to_pitch(waist_delta));
+        let pitch_diff = angle_subtract(f_torso, f_waist);
+        let mut success = true;
+        if !(PRONE_PITCH_DELTA_MIN..=PRONE_PITCH_DELTA_MAX).contains(&pitch_diff) {
+            success = false;
+        }
+        let zero = [0.0, 0.0, 0.0];
+        trace = prone_trace(
+            collision,
+            [torso[0], torso[1], torso[2] + PRONE_POINT_LIFT],
+            [waist[0], waist[1], waist[2] + PRONE_POINT_LIFT],
+            zero,
+            zero,
         );
+        if trace.fraction < 1.0 {
+            success = false;
+        }
+        trace = prone_trace(
+            collision,
+            [waist[0], waist[1], waist[2] + PRONE_POINT_LIFT],
+            [feet[0], feet[1], feet[2] + PRONE_POINT_LIFT],
+            zero,
+            zero,
+        );
+        if trace.fraction < 1.0 {
+            success = false;
+        }
+        if let Some(slot) = torso_pitch.as_deref_mut() {
+            *slot = f_torso;
+        }
+        if let Some(slot) = waist_pitch.as_deref_mut() {
+            *slot = f_waist;
+        }
+        if success {
+            return true;
+        }
+        prone_fail(on_ground, torso_pitch, waist_pitch)
     }
-    if trace.walkable == 0 {
-        return false;
-    }
-    feet = vec3_lerp(start, end, trace.fraction);
-    feet[2] -= PRONE_CAPSULE;
-    let torso = origin;
-    let torso_delta = if not_last_stand {
-        [
-            torso[0] - waist[0],
-            torso[1] - waist[1],
-            torso[2] - waist[2],
-        ]
-    } else {
-        [
-            waist[0] - torso[0],
-            waist[1] - torso[1],
-            waist[2] - torso[2],
-        ]
-    };
-    let f_torso = angle_normalize_360(vec_to_pitch(torso_delta));
-    let waist_delta = if not_last_stand {
-        [waist[0] - feet[0], waist[1] - feet[1], waist[2] - feet[2]]
-    } else {
-        [feet[0] - waist[0], feet[1] - waist[1], feet[2] - waist[2]]
-    };
-    let f_waist = angle_normalize_360(vec_to_pitch(waist_delta));
-    let pitch_diff = angle_subtract(f_torso, f_waist);
-    let mut success = true;
-    if !(PRONE_PITCH_DELTA_MIN..=PRONE_PITCH_DELTA_MAX).contains(&pitch_diff) {
-        success = false;
-    }
-    let zero = [0.0, 0.0, 0.0];
-    trace = prone_trace(
-        collision,
-        [torso[0], torso[1], torso[2] + PRONE_POINT_LIFT],
-        [waist[0], waist[1], waist[2] + PRONE_POINT_LIFT],
-        zero,
-        zero,
-    );
-    if trace.fraction < 1.0 {
-        success = false;
-    }
-    trace = prone_trace(
-        collision,
-        [waist[0], waist[1], waist[2] + PRONE_POINT_LIFT],
-        [feet[0], feet[1], feet[2] + PRONE_POINT_LIFT],
-        zero,
-        zero,
-    );
-    if trace.fraction < 1.0 {
-        success = false;
-    }
-    if let Some(slot) = torso_pitch.as_deref_mut() {
-        *slot = f_torso;
-    }
-    if let Some(slot) = waist_pitch.as_deref_mut() {
-        *slot = f_waist;
-    }
-    if success {
-        return true;
-    }
-    prone_fail(on_ground, torso_pitch, waist_pitch)
 }
 
 fn prone_fail(

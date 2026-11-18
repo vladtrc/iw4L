@@ -62,9 +62,11 @@ pub struct DObjSemanticState {
     pub composition: DObjCompositionDescriptor,
     pub pose_revision: u32,
     pub tag_rotations: Vec<crate::TagRotation>,
+    pub root_override: Option<crate::RootBonePose>,
     pub tree: Option<XAnimTreeSnapshot>,
     pub requested_parts: Option<PartBits>,
     pub hide_part_bits: HidePartBits,
+    pub player_controller: Option<crate::PlayerControllerInput>,
 }
 
 impl DObjSemanticState {
@@ -73,9 +75,11 @@ impl DObjSemanticState {
             composition: DObjCompositionDescriptor::single(composition_revision, model),
             pose_revision,
             tag_rotations: Vec::new(),
+            root_override: None,
             tree: None,
             requested_parts: None,
             hide_part_bits: HidePartBits::default(),
+            player_controller: None,
         }
     }
 
@@ -90,6 +94,7 @@ impl DObjSemanticState {
             composition: DObjCompositionDescriptor::single(composition_revision, model),
             pose_revision,
             tag_rotations: Vec::new(),
+            root_override: None,
             tree: Some(XAnimTreeSnapshot {
                 definition_revision: 1,
                 state_revision: pose_revision,
@@ -110,6 +115,7 @@ impl DObjSemanticState {
             }),
             requested_parts: None,
             hide_part_bits: HidePartBits::default(),
+            player_controller: None,
         }
     }
 
@@ -125,13 +131,69 @@ impl DObjSemanticState {
         Ok(DObjPoseRequest {
             tree,
             tag_rotations: self.tag_rotations.clone(),
+            root_override: self.root_override,
             requested_parts: self.requested_parts,
             hide_part_bits: self.hide_part_bits,
+            player_controller: self.player_controller,
         })
     }
 }
 
 impl XAnimTreeSnapshot {
+    pub fn active(
+        runtime: &XAnimTreeRuntime,
+        definition_revision: u32,
+        state_revision: u32,
+    ) -> Self {
+        let mut mapping = vec![None; runtime.definition().nodes().len()];
+        let mut nodes = Vec::new();
+        for (index, definition) in runtime.definition().nodes().iter().enumerate() {
+            let state = runtime.states()[index];
+            if state.weight == 0.0
+                || definition
+                    .parent
+                    .is_some_and(|parent| mapping[parent.0 as usize].is_none())
+            {
+                continue;
+            }
+            let (kind, clip, parts) = match &definition.kind {
+                XAnimNodeKind::Blend => (XAnimSemanticNodeKind::Blend, None, None),
+                XAnimNodeKind::Additive => (XAnimSemanticNodeKind::Additive, None, None),
+                XAnimNodeKind::Leaf { clip, parts } => {
+                    (XAnimSemanticNodeKind::Leaf, Some(clip.name.clone()), *parts)
+                }
+            };
+            mapping[index] = Some(XAnimNodeId(nodes.len() as u16));
+            nodes.push(XAnimSemanticNode {
+                parent: definition
+                    .parent
+                    .and_then(|parent| mapping[parent.0 as usize]),
+                kind,
+                clip,
+                parts,
+                state,
+            });
+        }
+        if nodes.is_empty() {
+            nodes.push(XAnimSemanticNode {
+                parent: None,
+                kind: XAnimSemanticNodeKind::Blend,
+                clip: None,
+                parts: None,
+                state: XAnimNodeState {
+                    weight: 1.0,
+                    goal_weight: 1.0,
+                    ..Default::default()
+                },
+            });
+        }
+        Self {
+            definition_revision,
+            state_revision,
+            nodes,
+        }
+    }
+
     pub fn resolve(
         &self,
         mut resolve_clip: impl FnMut(&str) -> Option<Arc<AnimClip>>,

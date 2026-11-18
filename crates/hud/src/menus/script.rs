@@ -75,7 +75,7 @@ pub(crate) fn parse(script: &str) -> Vec<Command> {
     let toks = tokens(script);
     let mut out = Vec::new();
     let mut i = 0;
-    let arg = |i: usize| toks.get(i).cloned().unwrap_or_default();
+    let arg = |i: usize| toks.get(i).cloned().unwrap_or(String::new());
     let float = |i: usize| {
         toks.get(i)
             .and_then(|t| t.parse::<f32>().ok())

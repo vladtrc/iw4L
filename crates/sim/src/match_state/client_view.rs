@@ -64,6 +64,7 @@ pub struct ViewEffects {
     pub pain_vision: Option<crate::VisionChange>,
     pub depth_of_field: ScriptDepthOfField,
     pub blur: Option<ScriptBlur>,
+    pub water_sheeting: Option<ScriptWaterSheeting>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -149,10 +150,34 @@ impl ScriptBlur {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ScriptWaterSheeting {
+    pub set_ms: i32,
+    pub duration_ms: i32,
+}
+
+impl ScriptWaterSheeting {
+    pub fn new(set_ms: i32, duration_ms: i32) -> Self {
+        Self {
+            set_ms,
+            duration_ms: if duration_ms < 0 { 3000 } else { duration_ms },
+        }
+    }
+
+    pub fn sample(self, now_ms: i32) -> Option<f32> {
+        if self.duration_ms == 0 {
+            return Some(0.0);
+        }
+        let elapsed = now_ms.wrapping_sub(self.set_ms).max(0);
+        (elapsed <= self.duration_ms).then(|| elapsed as f32 / self.duration_ms as f32)
+    }
+}
+
 /// Rendering dvars authored by GSC are delivered to clients without console gates.
 pub fn is_postfx_dvar(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
-    name.starts_with("r_film")
+    name.starts_with("cg_watersheeting")
+        || name.starts_with("r_film")
         || name.starts_with("r_glow")
         || name.starts_with("r_dof")
         || matches!(

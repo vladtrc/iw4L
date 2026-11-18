@@ -70,9 +70,10 @@ pub use player_angles::{
     legs_offset_deg, player_angles, swing_angles,
 };
 pub use script_mover::{
-    CG_SCRIPT_MOVER_NODRAW, SCRIPT_MOVER_BMODEL_SOLID, script_mover_add_bmodel,
+    CG_SCRIPT_MOVER_NODRAW, SCRIPT_MOVER_BMODEL_SOLID, SP_HERO_ONLY_LIGHTING,
+    SP_LESS_FREQUENT_LIGHTING, SP_SCRIPT_MODEL_AIM_ASSIST, script_mover_add_bmodel,
 };
 pub use trajectory::{
-    TR_GRAVITY, TR_INTERPOLATE, TR_LINEAR, TR_LINEAR_STOP, TR_STATIONARY, Trajectory,
-    evaluate_trajectory, evaluate_trajectory_delta, truncated_tr_delta,
+    GRAVITY_ACCELERATION, TR_GRAVITY, TR_INTERPOLATE, TR_LINEAR, TR_LINEAR_STOP, TR_STATIONARY,
+    Trajectory, evaluate_trajectory, evaluate_trajectory_delta, truncated_tr_delta,
 };

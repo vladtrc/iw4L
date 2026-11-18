@@ -367,25 +367,25 @@ impl GltfBuilder {
         catalog: &asset_material::MaterialDefinitions,
     ) -> Result<usize, &'static str> {
         let material = catalog.materials.get(canonical).ok_or("MaterialUnbound")?;
-        let (alpha_mode, alpha_cutoff, coverage_exact) = match catalog.agreed_draw_mode(material) {
+        let (alpha_mode, alpha_cutoff, coverage_exact) = match material.agreed_draw_mode() {
             Some(MaterialDrawMode::Opaque) => ("OPAQUE", None, true),
             Some(MaterialDrawMode::AlphaTest { .. }) => (
                 "MASK",
                 Some(
-                    catalog
-                        .agreed_alpha_test_cutoff(material)
+                    material
+                        .agreed_alpha_test_cutoff()
                         .flatten()
                         .ok_or("MaterialStateDisagreement")?,
                 ),
                 true,
             ),
             Some(_) => return Err("MaterialBlendUnsupported"),
-            None => match catalog.agreed_alpha_test_cutoff(material) {
+            None => match material.agreed_alpha_test_cutoff() {
                 Some(Some(cutoff)) => ("MASK", Some(cutoff), false),
                 _ => ("OPAQUE", None, false),
             },
         };
-        let (double_sided, cull_exact) = match catalog.cull_face(material) {
+        let (double_sided, cull_exact) = match material.cull_face() {
             Some(MaterialCullFace::Back) => (false, true),
             Some(MaterialCullFace::None) => (true, true),
             Some(MaterialCullFace::Front) => return Err("MaterialCullFrontUnsupported"),
@@ -394,7 +394,7 @@ impl GltfBuilder {
         let binding = single_color_binding(material)?;
         let image = binding.image.ok_or("MaterialImageUnavailable")?;
         let texture = self.texture(image, binding.sampler_state, catalog)?;
-        let transform = format!("{:?}", catalog.color_map_transform(material)).to_lowercase();
+        let transform = format!("{:?}", material.color_map_transform()).to_lowercase();
         self.project("MaterialPbrPreview");
         if !coverage_exact {
             self.project("MaterialCoverageOpaquePreview");
@@ -420,8 +420,8 @@ impl GltfBuilder {
                 "source_catalog_index": canonical,
                 "source_name": material.name.as_str(),
                 "technique_set": material.technique_set.as_str(),
-                "draw_mode": format!("{:?}", catalog.agreed_draw_mode(material)),
-                "cull": format!("{:?}", catalog.cull_face(material)),
+                "draw_mode": format!("{:?}", material.agreed_draw_mode()),
+                "cull": format!("{:?}", material.cull_face()),
                 "color_transform": transform,
                 "sampler_state": binding.sampler_state,
                 "coverage_exact": coverage_exact,

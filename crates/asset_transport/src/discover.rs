@@ -1,13 +1,8 @@
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
-pub(crate) const IW4_ZONE_VERSION: u32 = 0x114;
-
-const T5_ZONE_VERSION: u32 = 0x1D9;
-
-const IW5_ZONE_VERSION: u32 = 1;
-
-const T6_ZONE_VERSION: u32 = fastfile_t6::ZONE_VERSION_PC;
+const IW4_ZONE_VERSION: u32 = 0x114;
+use asset_core::{FamilyId, families};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GamesRoot(pub PathBuf);
@@ -16,67 +11,7 @@ pub struct GamesRoot(pub PathBuf);
 pub struct ZoneFile {
     pub path: PathBuf,
     pub zone_name: String,
-
-    pub alias_note: Option<String>,
 }
-
-pub fn load_dotenv() {
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        let candidate = dir.join(".env");
-        if candidate.is_file() {
-            let _ = dotenvy::from_path(&candidate);
-            return;
-        }
-    }
-    let Ok(mut dir) = std::env::current_dir() else {
-        return;
-    };
-    loop {
-        let candidate = dir.join(".env");
-        if candidate.is_file() {
-            let _ = dotenvy::from_path(&candidate);
-            return;
-        }
-        if !dir.pop() {
-            return;
-        }
-    }
-}
-
-pub fn games_root_from_env() -> Result<GamesRoot, String> {
-    load_dotenv();
-    let path = match std::env::var_os("IW4L_GAMES") {
-        Some(raw) => PathBuf::from(raw),
-        None => default_games_root()?,
-    };
-    if !path.is_dir() {
-        return Err(format!("IW4L_GAMES is not a directory: {}", path.display()));
-    }
-    Ok(GamesRoot(path))
-}
-
-#[cfg(windows)]
-fn default_games_root() -> Result<PathBuf, String> {
-    std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(Path::to_path_buf))
-        .ok_or_else(|| {
-            "IW4L_GAMES is unset and the portable launcher directory is unavailable".to_owned()
-        })
-}
-
-#[cfg(not(windows))]
-fn default_games_root() -> Result<PathBuf, String> {
-    Err("IW4L_GAMES is not set — copy .env.example to .env and set the games root".to_owned())
-}
-
-const SIBLING_TITLES: [&str; 3] = [
-    "Call of Duty Black Ops",
-    "Call of Duty Black Ops II",
-    "Call of Duty Modern Warfare 3",
-];
 
 static GAME_FOLDERS: std::sync::RwLock<Vec<PathBuf>> = std::sync::RwLock::new(Vec::new());
 
@@ -99,8 +34,10 @@ pub fn game_install_root(picked: &Path) -> PathBuf {
         .to_path_buf()
 }
 
-pub fn folder_holds_game(folder: &Path, game: crate::ZoneGame) -> bool {
-    let version = zone_version(game);
+pub fn folder_holds_game(folder: &Path, game: crate::FamilyId) -> bool {
+    let Some(version) = zone_version(game) else {
+        return false;
+    };
     let mut pending = vec![(folder.join("zone"), 0)];
     while let Some((dir, depth)) = pending.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -123,111 +60,10 @@ pub fn folder_holds_game(folder: &Path, game: crate::ZoneGame) -> bool {
     false
 }
 
-pub fn find_game_install(root: &Path, game: crate::ZoneGame) -> Option<PathBuf> {
+pub fn find_game_install(root: &Path, game: crate::FamilyId) -> Option<PathBuf> {
     search_roots(root)
         .into_iter()
         .find(|folder| folder_holds_game(folder, game))
-}
-
-pub fn search_roots(root: &Path) -> Vec<PathBuf> {
-    let roots = configured_search_roots(root);
-    #[cfg(not(windows))]
-    let mut roots = roots;
-    #[cfg(not(windows))]
-    for installed in crate::steam::installed_game_roots(&roots) {
-        if !roots.contains(&installed) {
-            roots.push(installed);
-        }
-    }
-    roots
-}
-
-pub(crate) fn configured_search_roots(root: &Path) -> Vec<PathBuf> {
-    let mut roots = vec![root.to_path_buf()];
-    for folder in GAME_FOLDERS
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .iter()
-    {
-        if !roots.contains(folder) {
-            roots.push(folder.clone());
-        }
-    }
-    if let Some(library) = root.parent() {
-        for title in SIBLING_TITLES {
-            let sibling = library.join(title);
-            if sibling != root && sibling.join("zone").is_dir() && !roots.contains(&sibling) {
-                roots.push(sibling);
-            }
-        }
-    }
-    #[cfg(windows)]
-    {
-        let Ok(entries) = std::fs::read_dir(root) else {
-            return roots;
-        };
-        let mut links = entries
-            .flatten()
-            .map(|entry| entry.path())
-            .filter(|path| {
-                path.extension()
-                    .is_some_and(|extension| extension.eq_ignore_ascii_case("lnk"))
-            })
-            .collect::<Vec<_>>();
-        links.sort();
-        for link_path in links {
-            match shortcut_target_root(&link_path) {
-                Ok(target) if !roots.contains(&target) => roots.push(target),
-                Ok(_) => {}
-                Err(error) => diag::warn!(
-                    Zone,
-                    "game shortcut {} ignored: {error}",
-                    link_path.display()
-                ),
-            }
-        }
-    }
-    roots
-}
-
-#[cfg(windows)]
-fn shortcut_target_root(link_path: &Path) -> Result<PathBuf, String> {
-    let link = lnk::ShellLink::open(link_path, lnk::encoding::WINDOWS_1252)
-        .map_err(|error| format!("cannot parse .lnk: {error}"))?;
-    let info = link
-        .link_info()
-        .as_ref()
-        .ok_or_else(|| ".lnk has no LinkInfo filesystem target".to_owned())?;
-    if !info.link_info_flags().has_volume_id_and_local_base_path() {
-        return Err(".lnk target is not on a local filesystem".to_owned());
-    }
-    let mut target = info
-        .local_base_path_unicode()
-        .as_deref()
-        .or_else(|| info.local_base_path())
-        .map(PathBuf::from)
-        .ok_or_else(|| ".lnk has no local base path".to_owned())?;
-    let suffix = info
-        .common_path_suffix_unicode()
-        .as_deref()
-        .unwrap_or_else(|| info.common_path_suffix());
-    if !suffix.is_empty() {
-        target.push(suffix);
-    }
-    game_root_for_shortcut_target(&target)
-}
-
-#[cfg(windows)]
-fn game_root_for_shortcut_target(target: &Path) -> Result<PathBuf, String> {
-    if target.is_dir() {
-        return Ok(target.to_path_buf());
-    }
-    if target.is_file()
-        && let Some(parent) = target.parent()
-    {
-        return Ok(parent.to_path_buf());
-    }
-    Err(format!("target does not exist: {}", target.display()))
 }
 
 pub fn peek_zone_version(path: &Path) -> Option<u32> {
@@ -240,8 +76,11 @@ fn read_zone_version(path: &Path) -> Result<u32, String> {
     use std::io::Read;
     file.read_exact(&mut header)
         .map_err(|error| error.to_string())?;
-    if &header[0..4] != b"IWff" && &header[0..8] != fastfile_t6::MAGIC_SIGNED {
-        return Err(format!("not an IWff envelope: {:02x?}", &header[..8]));
+    if !families()
+        .iter()
+        .any(|family| family.accepts_zone_header(&header))
+    {
+        return Err(format!("unrecognized zone envelope: {:02x?}", &header[..8]));
     }
     Ok(u32::from_le_bytes(header[8..12].try_into().unwrap()))
 }
@@ -269,7 +108,7 @@ fn is_not_game_dir(path: &Path) -> bool {
         })
 }
 
-fn files_under(roots: Vec<PathBuf>) -> impl Iterator<Item = Result<PathBuf, String>> {
+pub fn files_under(roots: Vec<PathBuf>) -> impl Iterator<Item = Result<PathBuf, String>> {
     let mut pending: VecDeque<_> = roots.into_iter().map(Ok).collect();
     let mut visited = HashSet::new();
     std::iter::from_fn(move || {
@@ -317,141 +156,29 @@ fn files_under(roots: Vec<PathBuf>) -> impl Iterator<Item = Result<PathBuf, Stri
     })
 }
 
-pub fn zone_game_for_path(path: &Path) -> Option<crate::ZoneGame> {
-    match peek_zone_version(path)? {
-        IW4_ZONE_VERSION => Some(crate::ZoneGame::Iw4),
-        T5_ZONE_VERSION => Some(crate::ZoneGame::T5),
-        IW5_ZONE_VERSION => Some(crate::ZoneGame::Iw5),
-        T6_ZONE_VERSION => Some(crate::ZoneGame::T6),
-        _ => None,
-    }
-}
-
-static CAMPAIGN_ZONES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-pub fn set_campaign_zone_set(campaign: bool) {
-    CAMPAIGN_ZONES.store(campaign, std::sync::atomic::Ordering::Relaxed);
-}
-
-pub fn campaign_zone_set() -> bool {
-    CAMPAIGN_ZONES.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-fn zone_in_set(zone: &str) -> Result<&str, String> {
-    if !campaign_zone_set() || MP_ONLY.with(std::cell::Cell::get) {
-        return Ok(zone);
-    }
-    match zone {
-        "common_mp" => Ok("common"),
-        "code_pre_gfx_mp" => Ok("code_pre_gfx"),
-        "code_post_gfx_mp" => Ok("code_post_gfx"),
-        "patch_mp" => Ok("patch"),
-        "ui_mp" => Ok("ui"),
-        _ if zone.starts_with("localized_") && zone.ends_with("_mp") => {
-            Err(format!("zone `{zone}.ff` has no campaign counterpart"))
-        }
-        _ => Ok(zone),
-    }
-}
-
-thread_local! {
-    static MP_ONLY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-pub fn find_mp_zone_file(root: &GamesRoot, zone: &str) -> Result<ZoneFile, String> {
-    with_mp_zones(|| find_zone_file(root, zone))
-}
-
-pub fn with_mp_zones<R>(f: impl FnOnce() -> R) -> R {
-    let outer = MP_ONLY.with(|only| only.replace(true));
-    let result = f();
-    MP_ONLY.with(|only| only.set(outer));
-    result
+pub fn zone_game_for_path(path: &Path) -> Option<FamilyId> {
+    let version = peek_zone_version(path)?;
+    families()
+        .iter()
+        .find(|family| family.zone_version() == version)
+        .map(|family| family.id())
 }
 
 pub fn find_zone_file_under(search_root: &Path, zone: &str) -> Result<ZoneFile, String> {
-    let zone = zone_in_set(zone)?;
-    let file_name = format!("{zone}.ff");
-    let mut iw4: Option<PathBuf> = None;
-    let mut t5: Option<PathBuf> = None;
-    let mut iw5: Option<PathBuf> = None;
-    let mut t6: Option<PathBuf> = None;
-    let mut other: Option<(PathBuf, u32)> = None;
     let mut errors = Vec::new();
-    for entry in game_files(search_root) {
-        let path = match entry {
-            Ok(path) => path,
-            Err(error) => {
-                errors.push(error);
-                continue;
-            }
-        };
-        if !path
-            .file_name()
-            .is_some_and(|n| n.eq_ignore_ascii_case(&file_name))
-        {
-            continue;
+    for family in families().iter() {
+        match find_zone_file_version(
+            &GamesRoot(search_root.to_owned()),
+            zone,
+            family.zone_version(),
+        ) {
+            Ok(found) => return Ok(found),
+            Err(error) => errors.push(error),
         }
-        match peek_zone_version(&path) {
-            Some(IW4_ZONE_VERSION) if iw4.is_none() => iw4 = Some(path),
-            Some(T5_ZONE_VERSION) if t5.is_none() => t5 = Some(path),
-            Some(IW5_ZONE_VERSION) if iw5.is_none() => iw5 = Some(path),
-            Some(T6_ZONE_VERSION) if t6.is_none() => t6 = Some(path),
-            Some(v) if other.is_none() => other = Some((path, v)),
-            None if other.is_none() => other = Some((path, 0)),
-            _ => {}
-        }
-    }
-    if let Some(path) = iw4 {
-        return Ok(ZoneFile {
-            path,
-            zone_name: zone.to_owned(),
-            alias_note: None,
-        });
-    }
-    if let Some(path) = t5 {
-        return Ok(ZoneFile {
-            path,
-            zone_name: zone.to_owned(),
-            alias_note: None,
-        });
-    }
-    if let Some(path) = iw5 {
-        return Ok(ZoneFile {
-            path,
-            zone_name: zone.to_owned(),
-            alias_note: None,
-        });
-    }
-    if let Some(path) = t6 {
-        return Ok(ZoneFile {
-            path,
-            zone_name: zone.to_owned(),
-            alias_note: None,
-        });
-    }
-    if let Some((path, version)) = other {
-        if version == 0 {
-            return Err(format!(
-                "zone `{file_name}` at {} is not a readable IWff envelope \
-                 (need IW4 0x114, T5 0x1d9, IW5 0x1 or T6 0x93)",
-                path.display()
-            ));
-        }
-        return Err(format!(
-            "zone `{file_name}` found at {} but version is {version:#x} \
-             (want IW4 0x114, T5 0x1d9, IW5 0x1 or T6 0x93)",
-            path.display()
-        ));
     }
     Err(format!(
-        "zone `{file_name}` not found under {}; scan errors: {}",
-        search_root.display(),
-        if errors.is_empty() {
-            "none".to_owned()
-        } else {
-            errors.join("; ")
-        }
+        "zone {zone} not found for any registered family: {}",
+        errors.join("; ")
     ))
 }
 
@@ -460,11 +187,6 @@ pub fn find_zone_file_version(
     zone: &str,
     version: u32,
 ) -> Result<ZoneFile, String> {
-    let zone = if version == IW4_ZONE_VERSION {
-        zone_in_set(zone)?
-    } else {
-        zone
-    };
     let file_name = format!("{zone}.ff");
     let mut found: Option<PathBuf> = None;
     let mut rejected = Vec::new();
@@ -507,40 +229,34 @@ pub fn find_zone_file_version(
     Ok(ZoneFile {
         path,
         zone_name: zone.to_owned(),
-        alias_note: None,
     })
 }
 
-pub fn split_zone_key(zone: &str) -> (Option<crate::ZoneGame>, &str) {
+pub fn split_zone_key(zone: &str) -> (Option<crate::FamilyId>, &str) {
     let Some((prefix, rest)) = zone.split_once(':') else {
         return (None, zone);
     };
-    match crate::ZoneGame::from_prefix(prefix) {
+    match FamilyId::parse(prefix) {
         Some(game) if !rest.is_empty() => (Some(game), rest),
         _ => (None, zone),
     }
 }
 
-pub fn map_load_title(key: &str, game: Option<crate::ZoneGame>) -> String {
+pub fn map_load_title(key: &str, game: Option<crate::FamilyId>) -> String {
     let (parsed, stem) = split_zone_key(key);
     match parsed.or(game) {
-        Some(game) => format!("{}:{stem}", game.prefix()),
+        Some(game) => format!("{}:{stem}", game.as_str()),
         None => stem.to_owned(),
     }
 }
 
-pub fn group_mp_maps(maps: &[String]) -> [Vec<&str>; 4] {
-    let mut cols = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+pub fn group_mp_maps(maps: &[String]) -> BTreeMap<FamilyId, Vec<&str>> {
+    let mut groups: BTreeMap<FamilyId, Vec<&str>> = BTreeMap::new();
     for map in maps {
-        let col = match split_zone_key(map).0 {
-            Some(crate::ZoneGame::Iw4) | None => 0,
-            Some(crate::ZoneGame::Iw5) => 1,
-            Some(crate::ZoneGame::T5) => 2,
-            Some(crate::ZoneGame::T6) => 3,
-        };
-        cols[col].push(map.as_str());
+        let family = split_zone_key(map).0.unwrap_or(FamilyId::IW4);
+        groups.entry(family).or_default().push(map.as_str());
     }
-    cols
+    groups
 }
 
 pub fn find_zone_file(root: &GamesRoot, zone: &str) -> Result<ZoneFile, String> {
@@ -549,64 +265,26 @@ pub fn find_zone_file(root: &GamesRoot, zone: &str) -> Result<ZoneFile, String> 
         return Err("zone name is empty".into());
     }
     let (game, stem) = split_zone_key(&zone);
-    find_zone_stem(root, game, stem)
+    find_stem_file(root, game, stem)
 }
 
-pub fn zone_version(game: crate::ZoneGame) -> u32 {
-    match game {
-        crate::ZoneGame::Iw4 => IW4_ZONE_VERSION,
-        crate::ZoneGame::T5 => T5_ZONE_VERSION,
-        crate::ZoneGame::Iw5 => IW5_ZONE_VERSION,
-        crate::ZoneGame::T6 => T6_ZONE_VERSION,
-    }
+pub fn zone_version(game: FamilyId) -> Option<u32> {
+    families().get(game).map(|family| family.zone_version())
 }
 
 fn find_stem_file(
     root: &GamesRoot,
-    game: Option<crate::ZoneGame>,
+    game: Option<crate::FamilyId>,
     stem: &str,
 ) -> Result<ZoneFile, String> {
     match game {
-        Some(game) => find_zone_file_version(root, stem, zone_version(game)),
+        Some(game) => find_zone_file_version(
+            root,
+            stem,
+            zone_version(game).ok_or_else(|| format!("unregistered family {}", game.as_str()))?,
+        ),
         None => find_zone_file_under(&root.0, stem),
     }
-}
-
-fn find_zone_stem(
-    root: &GamesRoot,
-    game: Option<crate::ZoneGame>,
-    stem: &str,
-) -> Result<ZoneFile, String> {
-    if stem.starts_with("mp_") || campaign_zone_set() {
-        return find_stem_file(root, game, stem);
-    }
-    let Some(prefixed) = resolve_mp_zone_alias(stem) else {
-        return find_stem_file(root, game, stem);
-    };
-    match find_stem_file(root, game, &prefixed) {
-        Ok(mut found) => {
-            let note = format!(
-                "zone alias: `{stem}` -> `{prefixed}` (MP stem preferred over bare `{stem}.ff`)"
-            );
-            found.alias_note = Some(note.clone());
-            match std::fs::metadata(&found.path) {
-                Ok(meta) => diag::info!(Zone, "{note} ({} bytes)", meta.len()),
-                Err(_) => diag::info!(Zone, "{note}"),
-            }
-            Ok(found)
-        }
-        Err(mp_err) => match find_stem_file(root, game, stem) {
-            Ok(found) => Ok(found),
-            Err(bare_err) => Err(format!("{mp_err}; {bare_err}")),
-        },
-    }
-}
-
-pub fn resolve_mp_zone_alias(zone: &str) -> Option<String> {
-    if zone.is_empty() || zone.starts_with("mp_") || zone.ends_with("_mp") {
-        return None;
-    }
-    Some(format!("mp_{zone}"))
 }
 
 pub fn find_common_mp_for_zone(zone_ff: &Path) -> Result<ZoneFile, String> {
@@ -615,7 +293,7 @@ pub fn find_common_mp_for_zone(zone_ff: &Path) -> Result<ZoneFile, String> {
 
 pub fn find_runtime_zone(root: &GamesRoot, zone_ff: &Path, zone: &str) -> Result<ZoneFile, String> {
     match zone_game_for_path(zone_ff) {
-        Some(crate::ZoneGame::Iw4) | None => find_zone_for_tree(zone_ff, zone),
+        Some(crate::FamilyId::IW4) | None => find_zone_for_tree(zone_ff, zone),
         Some(_) => {
             let found = find_zone_file_under(&root.0, zone)?;
             match peek_zone_version(&found.path) {
@@ -672,6 +350,63 @@ pub fn game_root_for_zone(zone_ff: &Path) -> Result<PathBuf, String> {
         "no game tree with a `zone/` directory above {}",
         zone_ff.display()
     ))
+}
+
+pub struct LocalizedZones {
+    dir: PathBuf,
+    prefix: String,
+}
+
+impl LocalizedZones {
+    pub fn find(anchor: &Path, language: Option<&str>, game: FamilyId) -> Result<Self, String> {
+        let root = game_root_for_zone(anchor)?.join("zone");
+        let mut choices: Vec<_> = files_under(vec![root])
+            .filter_map(Result::ok)
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|name| name.ends_with("_code_post_gfx_mp.ff"))
+                    && zone_game_for_path(path) == Some(game)
+            })
+            .collect();
+        choices.sort();
+        let preferred = choices.iter().position(|path| {
+            path.parent()
+                .and_then(Path::file_name)
+                .and_then(|s| s.to_str())
+                .zip(language)
+                .is_some_and(|(a, b)| a.eq_ignore_ascii_case(b))
+        });
+        let chosen = match preferred {
+            Some(index) => &choices[index],
+            None if choices.len() == 1 => &choices[0],
+            _ => {
+                return Err(format!(
+                    "{} language archive selection is ambiguous or missing: {} candidates",
+                    game.as_str().to_uppercase(),
+                    choices.len()
+                ));
+            }
+        };
+        let name = chosen
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or("language archive name")?;
+        let prefix = name
+            .strip_suffix("code_post_gfx_mp.ff")
+            .ok_or("language prefix")?;
+        let dir = chosen.parent().ok_or("language directory")?;
+        Ok(Self {
+            dir: dir.to_path_buf(),
+            prefix: prefix.to_owned(),
+        })
+    }
+
+    pub fn zone(&self, stem: &str) -> Option<ZoneFile> {
+        let zone_name = format!("{}{stem}", self.prefix);
+        let path = self.dir.join(format!("{zone_name}.ff"));
+        path.is_file().then_some(ZoneFile { path, zone_name })
+    }
 }
 
 pub fn games_root_report(root: &GamesRoot) -> String {
@@ -805,7 +540,7 @@ pub fn list_mp_map_packs(root: &GamesRoot) -> Vec<MapPack> {
             continue;
         }
         if let Some(game) = zone_game_for_path(&path) {
-            zones.push((game.prefix(), stem, map_pack_folder(&path)));
+            zones.push((game.as_str(), stem, map_pack_folder(&path)));
         }
     }
     let loads: HashSet<(&str, &str)> = zones
@@ -837,6 +572,82 @@ pub fn list_mp_map_packs(root: &GamesRoot) -> Vec<MapPack> {
         .collect()
 }
 
+fn map_pack_folder(zone_ff: &Path) -> String {
+    game_root_for_zone(zone_ff)
+        .ok()
+        .and_then(|tree| {
+            zone_ff
+                .strip_prefix(tree.join("zone"))
+                .ok()?
+                .components()
+                .next()?
+                .as_os_str()
+                .to_str()
+                .map(str::to_ascii_uppercase)
+        })
+        .filter(|folder| folder.starts_with("DLC"))
+        .unwrap_or_else(|| "BASE".to_owned())
+}
+
+static ARTIFACTS_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+pub fn install_artifacts_root(path: PathBuf) -> Result<(), &'static str> {
+    ARTIFACTS_ROOT
+        .set(path)
+        .map_err(|_| "artifact root already installed")
+}
+
+pub fn ensure_artifacts_dir() -> Result<PathBuf, String> {
+    let dir = ARTIFACTS_ROOT.get().cloned().unwrap_or_else(|| {
+        std::env::var_os("IW4L_ARTIFACTS_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("iw4l-artifacts"))
+    });
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    Ok(dir)
+}
+
+pub trait GamesProvider: Send + Sync + 'static {
+    fn game_root(&self) -> Result<GamesRoot, String>;
+    fn search_roots(&self, root: &Path) -> Vec<PathBuf>;
+}
+
+static PROVIDER: std::sync::OnceLock<Box<dyn GamesProvider>> = std::sync::OnceLock::new();
+
+pub fn install_games_provider(provider: impl GamesProvider) -> Result<(), &'static str> {
+    PROVIDER
+        .set(Box::new(provider))
+        .map_err(|_| "games provider already installed")
+}
+
+pub fn games_root() -> Result<GamesRoot, String> {
+    PROVIDER
+        .get()
+        .ok_or("builder must install a games provider")?
+        .game_root()
+}
+
+pub fn search_roots(root: &Path) -> Vec<PathBuf> {
+    PROVIDER
+        .get()
+        .expect("builder must install a games provider before discovery")
+        .search_roots(root)
+}
+
+pub fn configured_search_roots(root: &Path) -> Vec<PathBuf> {
+    let mut roots = vec![root.to_path_buf()];
+    for folder in GAME_FOLDERS
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+    {
+        if !roots.contains(folder) {
+            roots.push(folder.clone());
+        }
+    }
+    roots
+}
+
 pub fn list_sp_maps(root: &GamesRoot) -> Vec<String> {
     let videos = video_dirs(&root.0)
         .into_iter()
@@ -863,7 +674,7 @@ fn sp_maps_in(
         .filter(|path| {
             path.extension()
                 .is_some_and(|ext| ext.eq_ignore_ascii_case("ff"))
-                && zone_game_for_path(path) == Some(crate::ZoneGame::Iw4)
+                && zone_game_for_path(path) == Some(crate::FamilyId::IW4)
         })
         .filter_map(|path| Some(path.file_stem()?.to_str()?.to_ascii_lowercase()))
         .collect();
@@ -873,27 +684,10 @@ fn sp_maps_in(
         .collect()
 }
 
-fn map_pack_folder(zone_ff: &Path) -> String {
-    game_root_for_zone(zone_ff)
-        .ok()
-        .and_then(|tree| {
-            zone_ff
-                .strip_prefix(tree.join("zone"))
-                .ok()?
-                .components()
-                .next()?
-                .as_os_str()
-                .to_str()
-                .map(str::to_ascii_uppercase)
-        })
-        .filter(|folder| folder.starts_with("DLC"))
-        .unwrap_or_else(|| "BASE".to_owned())
-}
-
 pub fn is_campaign_level(root: &GamesRoot, zone: &str) -> bool {
     let zone = zone.trim().to_ascii_lowercase();
     let (game, stem) = split_zone_key(&zone);
-    if !matches!(game, None | Some(crate::ZoneGame::Iw4)) || stem.starts_with("mp_") {
+    if !matches!(game, None | Some(crate::FamilyId::IW4)) || stem.starts_with("mp_") {
         return false;
     }
     video_dirs(&root.0)
@@ -920,99 +714,4 @@ pub fn video_dirs(root: &Path) -> Vec<PathBuf> {
         }
     }
     dirs
-}
-
-pub fn ensure_artifacts_dir() -> Result<PathBuf, String> {
-    let dir = std::env::var_os("IW4L_ARTIFACTS_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("iw4l-artifacts"));
-    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-    Ok(dir)
-}
-
-/// T5 language archives carry a language prefix rather than `localized_`.
-pub fn find_t5_localized_zones(
-    anchor: &Path,
-    language: Option<&str>,
-) -> Result<Vec<ZoneFile>, String> {
-    let (dir, prefix) = language_archive(anchor, language, crate::ZoneGame::T5)?;
-    Ok(["code_post_gfx_mp", "common_mp", "ui_mp"]
-        .into_iter()
-        .filter_map(|stem| t5_localized_zone(&dir, &prefix, stem))
-        .collect())
-}
-
-pub fn find_t5_localized_zone(
-    anchor: &Path,
-    language: Option<&str>,
-    stem: &str,
-) -> Result<Option<ZoneFile>, String> {
-    let (dir, prefix) = language_archive(anchor, language, crate::ZoneGame::T5)?;
-    Ok(t5_localized_zone(&dir, &prefix, stem))
-}
-
-pub fn find_t6_localized_zones(
-    anchor: &Path,
-    language: Option<&str>,
-) -> Result<Vec<ZoneFile>, String> {
-    let (dir, prefix) = language_archive(anchor, language, crate::ZoneGame::T6)?;
-    Ok(["patch_mp", "ui_mp", "code_post_gfx_mp"]
-        .into_iter()
-        .filter_map(|stem| t5_localized_zone(&dir, &prefix, stem))
-        .collect())
-}
-
-fn t5_localized_zone(dir: &Path, prefix: &str, stem: &str) -> Option<ZoneFile> {
-    let zone_name = format!("{prefix}{stem}");
-    let path = dir.join(format!("{zone_name}.ff"));
-    path.is_file().then_some(ZoneFile {
-        path,
-        zone_name,
-        alias_note: None,
-    })
-}
-
-fn language_archive(
-    anchor: &Path,
-    language: Option<&str>,
-    game: crate::ZoneGame,
-) -> Result<(PathBuf, String), String> {
-    let root = game_root_for_zone(anchor)?.join("zone");
-    let mut choices: Vec<_> = files_under(vec![root])
-        .filter_map(Result::ok)
-        .filter(|path| {
-            path.file_name()
-                .and_then(|s| s.to_str())
-                .is_some_and(|name| name.ends_with("_code_post_gfx_mp.ff"))
-                && zone_game_for_path(path) == Some(game)
-        })
-        .collect();
-    choices.sort();
-    let preferred = choices.iter().position(|path| {
-        path.parent()
-            .and_then(Path::file_name)
-            .and_then(|s| s.to_str())
-            .zip(language)
-            .is_some_and(|(a, b)| a.eq_ignore_ascii_case(b))
-    });
-    let chosen = match preferred {
-        Some(index) => &choices[index],
-        None if choices.len() == 1 => &choices[0],
-        _ => {
-            return Err(format!(
-                "{} language archive selection is ambiguous or missing: {} candidates",
-                game.prefix().to_uppercase(),
-                choices.len()
-            ));
-        }
-    };
-    let name = chosen
-        .file_name()
-        .and_then(|s| s.to_str())
-        .ok_or("language archive name")?;
-    let prefix = name
-        .strip_suffix("code_post_gfx_mp.ff")
-        .ok_or("language prefix")?;
-    let dir = chosen.parent().ok_or("language directory")?;
-    Ok((dir.to_path_buf(), prefix.to_owned()))
 }

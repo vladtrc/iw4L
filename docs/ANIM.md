@@ -25,8 +25,8 @@ A pure evaluator, used by **both** the authority **and** the client:
 
 * `XAnimTreeDefinition` (the immutable hierarchy) + `XAnimTreeRuntime` (state;
   leaf time normalized into `[0,1]`, `update` is the per-leaf advance);
-* `DObjAnimRuntime` — `update` / `pose_request` / `compose`; DObj reuse is
-  equality of `(eType, model*)`, not "always a fresh one";
+* `DObj` composes skeletons and attachments; `DObjReuseKey` identifies reusable
+  compositions by entity type and model identity;
 * `RetainedModelCapability` — pose, `XBoneInfo`, collSurf/collTris for hitscan;
 * `build_body_head_weapon_dobj` — body + head on `j_spine4` + weapon on its tag.
 

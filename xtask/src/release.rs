@@ -110,6 +110,35 @@ impl Drop for Scratch {
     }
 }
 
+fn master_manifest(root: &Path) -> Res<PathBuf> {
+    let metadata = capture(Command::new("cargo").current_dir(root).args([
+        "metadata",
+        "--format-version",
+        "1",
+        "--locked",
+    ]))?;
+    let metadata: Value = serde_json::from_str(&metadata).map_err(|error| error.to_string())?;
+    let owners: Vec<_> = metadata["packages"]
+        .as_array()
+        .ok_or("cargo metadata has no packages")?
+        .iter()
+        .filter(|package| package["name"] == "master_protocol")
+        .filter_map(|package| package["manifest_path"].as_str())
+        .collect();
+    let [owner] = owners.as_slice() else {
+        return Err("master build requires exactly one master_protocol dependency owner".into());
+    };
+    let manifest = capture(Command::new("cargo").current_dir(root).args([
+        "locate-project",
+        "--workspace",
+        "--message-format",
+        "plain",
+        "--manifest-path",
+        owner,
+    ]))?;
+    Ok(PathBuf::from(manifest.trim()))
+}
+
 pub fn build_master(root: &Path, profile: &str) -> Res<PathBuf> {
     windows::require_profile(profile)?;
     require_tools(&["cargo"])?;
@@ -118,10 +147,14 @@ pub fn build_master(root: &Path, profile: &str) -> Res<PathBuf> {
         "{} -C target-feature=+crt-static",
         std::env::var("RUSTFLAGS").unwrap_or_else(|_| String::new())
     );
+    let manifest = master_manifest(root)?;
     let messages = capture(
         Command::new("cargo")
             .current_dir(root)
-            .args(["build", "--profile", profile, "--locked", "--target"])
+            .arg("build")
+            .arg("--manifest-path")
+            .arg(&manifest)
+            .args(["--profile", profile, "--locked", "--target"])
             .arg(windows::LINUX_TARGET)
             .args([
                 "-p",

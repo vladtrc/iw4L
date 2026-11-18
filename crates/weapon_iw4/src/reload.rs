@@ -62,7 +62,7 @@ pub fn weapon_process_input_wants_reload(
         return false;
     }
     let ws = hand.weaponstate;
-    if crate::offhand::in_offhand_family(ws) || matches!(ws, 0xd | 0xe | 0xf) {
+    if crate::offhand::in_offhand_family(ws) || matches!(ws, 0xd..=0xf) {
         return false;
     }
     match WeaponState::from_i32(ws) {

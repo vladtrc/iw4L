@@ -60,37 +60,19 @@ pub fn cull_sphere(planes: &[[f32; 4]], plane_count: u32, pos: [f32; 3], radius:
 }
 
 #[inline]
-pub fn cull_cloud(
+pub fn cull_elem_sphere(
     cull_elem_draw: bool,
     planes: &[[f32; 4]],
     view_plane_count: u32,
     elem_flags: i32,
     pos: [f32; 3],
-    size0: f32,
-    size1: f32,
-    scale: f32,
+    radius: f32,
 ) -> bool {
     if !cull_elem_draw {
         return false;
     }
     let count = cull_cloud_plane_count(elem_flags, view_plane_count);
-    cull_sphere(planes, count, pos, cull_cloud_radius(size0, size1, scale))
-}
-
-#[inline]
-pub fn cull_elem_light(
-    cull_elem_draw: bool,
-    planes: &[[f32; 4]],
-    view_plane_count: u32,
-    elem_flags: i32,
-    pos: [f32; 3],
-    size0: f32,
-) -> bool {
-    if !cull_elem_draw {
-        return false;
-    }
-    let count = cull_cloud_plane_count(elem_flags, view_plane_count);
-    cull_sphere(planes, count, pos, size0)
+    cull_sphere(planes, count, pos, radius)
 }
 
 #[inline]

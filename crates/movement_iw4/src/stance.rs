@@ -44,6 +44,76 @@ fn stance_hull_allsolid<C: CollisionBackend>(
     trace.allsolid != 0
 }
 
+fn restrict_script_stance(ps: &mut PlayerState, cmd: &mut UserCmd) {
+    let flags = ps.pm_flags;
+    if flags & pm_flags::SCRIPT_NO_STANCES == 0 {
+        return;
+    }
+    let linked = ps.pm_type == playerstate_iw4::PM_TYPE_NORMAL_LINKED
+        || ps.e_flags & eflags::SP_LINKED_STANCE != 0;
+    let stance = if linked {
+        if cmd.buttons & buttons::PRONE != 0 {
+            if flags & (pm_flags::PRONE | pm_flags::CROUCH | pm_flags::SCRIPT_NO_STAND) == 0
+                || flags & pm_flags::SCRIPT_NO_CROUCH != 0
+            {
+                EV_STANCE_FORCE_STAND
+            } else {
+                EV_STANCE_FORCE_CROUCH
+            }
+        } else if cmd.buttons & buttons::CROUCH != 0 {
+            if flags & pm_flags::SCRIPT_NO_CROUCH == 0 {
+                return;
+            }
+            EV_STANCE_FORCE_STAND
+        } else {
+            if flags & pm_flags::SCRIPT_NO_STAND == 0 {
+                return;
+            }
+            EV_STANCE_FORCE_CROUCH
+        }
+    } else if cmd.buttons & buttons::PRONE != 0 {
+        if flags & pm_flags::SCRIPT_NO_PRONE == 0 {
+            return;
+        }
+        if flags & (pm_flags::PRONE | pm_flags::CROUCH | pm_flags::SCRIPT_NO_STAND) == 0 {
+            EV_STANCE_FORCE_STAND
+        } else if flags & pm_flags::SCRIPT_NO_CROUCH == 0 {
+            EV_STANCE_FORCE_CROUCH
+        } else {
+            EV_STANCE_FORCE_STAND
+        }
+    } else if cmd.buttons & buttons::CROUCH != 0 {
+        if flags & pm_flags::SCRIPT_NO_CROUCH == 0 {
+            return;
+        }
+        if flags & (pm_flags::PRONE | pm_flags::CROUCH | pm_flags::SCRIPT_NO_PRONE) == 0 {
+            EV_STANCE_FORCE_PRONE
+        } else if flags & pm_flags::SCRIPT_NO_STAND == 0 {
+            EV_STANCE_FORCE_STAND
+        } else {
+            EV_STANCE_FORCE_PRONE
+        }
+    } else {
+        if flags & pm_flags::SCRIPT_NO_STAND == 0 {
+            return;
+        }
+        if flags & (pm_flags::PRONE | pm_flags::SCRIPT_NO_PRONE) == pm_flags::PRONE {
+            EV_STANCE_FORCE_PRONE
+        } else if flags & pm_flags::SCRIPT_NO_CROUCH == 0 {
+            EV_STANCE_FORCE_CROUCH
+        } else {
+            EV_STANCE_FORCE_PRONE
+        }
+    };
+    cmd.buttons &= !(buttons::PRONE | buttons::CROUCH);
+    cmd.buttons |= match stance {
+        EV_STANCE_FORCE_PRONE => buttons::PRONE,
+        EV_STANCE_FORCE_CROUCH => buttons::CROUCH,
+        _ => 0,
+    };
+    add_predictable_event(ps, stance, 0);
+}
+
 pub fn update_stance_flags<C: CollisionBackend>(
     ps: &mut PlayerState,
     cmd: &mut UserCmd,
@@ -89,6 +159,8 @@ pub fn update_stance_flags<C: CollisionBackend>(
         cmd.buttons &= !0x300;
         add_predictable_event(ps, EV_STANCE_FORCE_STAND, 0);
     }
+
+    restrict_script_stance(ps, cmd);
 
     let crouch_btn = (cmd.buttons & buttons::CROUCH) != 0;
     let prone_btn = (cmd.buttons & buttons::PRONE) != 0;

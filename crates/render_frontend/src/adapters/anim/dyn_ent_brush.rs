@@ -1,6 +1,7 @@
 use bevy::platform::collections::HashSet;
 use frame::ScopeApp;
 
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use dpvs_iw4::{
     Bounds, DpvsPlanes, GFX_CFG_ENT_COUNT, dyn_brush_scene_list_admits, dyn_ent_in_cell,
@@ -67,10 +68,10 @@ pub fn register_dyn_ent_brush_systems(app: &mut App) {
                 exec_cell_dyn_brush_cmds
                     .in_set(frame::InMatch)
                     .after(link_dyn_ent_brush_cells)
-                    .after(frame::WorkerCmdSet::CellStatic),
+                    .after(crate::prepare::scene::gfx_scene::occupy_script_brush_scene)
+                    .after(frame::WorkerCmdSet::WorldVisibility),
             )
-                .in_set(frame::RenderSet::Anim)
-                .in_set(frame::WorkerCmdSet::CellDynBrush),
+                .in_set(frame::RenderSet::Anim),
         )
         .add_systems(
             Update,
@@ -83,17 +84,19 @@ pub fn register_dyn_ent_brush_systems(app: &mut App) {
                 exec_cell_scene_ent_cmds
                     .in_set(frame::InMatch)
                     .after(link_scene_ents)
-                    .after(frame::WorkerCmdSet::CellStatic),
+                    .after(frame::WorkerCmdSet::WorldVisibility),
             )
                 .in_set(frame::RenderSet::Anim)
-                .in_set(frame::WorkerCmdSet::CellSceneEnt),
+                .in_set(frame::WorkerCmdSet::SceneVisibility),
         )
         .add_systems(
             Update,
             drain_dpvs_ent_cmds
                 .in_set(frame::InMatch)
-                .after(frame::WorkerCmdSet::CellSceneEnt)
-                .in_set(frame::WorkerCmdSet::DpvsEnt),
+                .after(exec_cell_scene_ent_cmds)
+                .after(link_scene_ents)
+                .after(size_scene_ent_cell_bits)
+                .in_set(frame::WorkerCmdSet::SceneVisibility),
         );
 }
 
@@ -140,6 +143,11 @@ fn link_dyn_ent_brush_cells(
     ensure_primary_light_words(&mut vis.words, client_count, sun, primary_count);
     vis.words.fill(0);
     for brush in &scene.dyn_ent_brushes {
+        // This membership table belongs to the host DPVS. Foreign brushes
+        // are admitted below through their own native cells and virtual views.
+        if sim::world_graph::world_at(brush.origin) != 0 {
+            continue;
+        }
         let Some(bounds) = brush.bounds else {
             continue;
         };
@@ -162,20 +170,23 @@ fn link_dyn_ent_brush_cells(
     }
 }
 
-fn exec_cell_dyn_brush_cmds(
+pub(crate) fn exec_cell_dyn_brush_cmds(
     mut scene: Option<ResMut<WorldScene>>,
     mut stats: Option<ResMut<DpvsFrameStats>>,
     membership: Res<DynEntBrushCellBits>,
+    published: Res<render_scene::PublishedCellVis>,
+    native_cells: Res<render_scene::WorldDpvsCells>,
+    gfx: Res<HostGfxScene>,
     mut worker_cmds: ResMut<FrontendWorkerCmds>,
 ) {
     let planes: Vec<[f32; 4]> = stats
         .as_ref()
         .map(|s| s.frustum_planes.clone())
-        .unwrap_or_default();
+        .unwrap_or(Vec::new());
     let brushes: Vec<_> = scene
         .as_ref()
         .map(|s| s.dyn_ent_brushes.clone())
-        .unwrap_or_default();
+        .unwrap_or(Vec::new());
     let bits = &membership.membership;
     let vis_len = brushes
         .iter()
@@ -212,10 +223,13 @@ fn exec_cell_dyn_brush_cmds(
     let Some(scene) = scene.as_mut() else {
         return;
     };
-    let admitted: Vec<u16> = scene
+    let mut admitted: Vec<u16> = scene
         .dyn_ent_brushes
         .iter()
         .filter_map(|brush| {
+            if sim::world_graph::world_at(brush.origin) != 0 {
+                return None;
+            }
             let vis_byte = vis.get(usize::from(brush.index)).copied().unwrap_or(0);
             if dyn_brush_scene_list_admits(vis_byte, brush.surface_count) {
                 Some(brush.brush_model)
@@ -224,6 +238,58 @@ fn exec_cell_dyn_brush_cmds(
             }
         })
         .collect();
+    if !published.views.is_empty() {
+        // Native owners, not every brush prototype in the GfxWorld table.
+        // Root script claims are already filtered for current NODRAW state.
+        let mut owners = std::collections::BTreeMap::new();
+        for brush in &scene.dyn_ent_brushes {
+            if sim::world_graph::world_at(brush.origin) == 0
+                && let Some(bounds) = brush.bounds
+            {
+                owners.insert(brush.brush_model, (0, bounds));
+            }
+        }
+        if let Some(cull) = scene.cull.as_mut() {
+            for layer in &cull.atlas_layers {
+                for &(model, bounds) in &layer.bmodel_bounds {
+                    owners.insert(model, (layer.world, bounds));
+                }
+            }
+            for brush in &gfx.scene.scene_brushes {
+                let Ok(model) = u16::try_from(brush.model_index) else {
+                    continue;
+                };
+                if model == 0 {
+                    continue;
+                }
+                let Some(&local) = cull.brush_model_bounds.get(usize::from(model)) else {
+                    continue;
+                };
+                let quat = brush.quat.unwrap_or([0.0, 0.0, 0.0, 1.0]);
+                let bounds =
+                    crate::prepare::scene::world::posed_brush_bounds(brush.origin, quat, local);
+                owners.insert(model, (0, bounds));
+                if let Some(pose) = cull.bmodel_world_from_local.get_mut(usize::from(model)) {
+                    let q = Quat::from_array(quat);
+                    let q = if q.length_squared() > 1e-12 {
+                        q.normalize()
+                    } else {
+                        Quat::IDENTITY
+                    };
+                    *pose = Mat4::from_rotation_translation(q, Vec3::from_array(brush.origin));
+                }
+            }
+        }
+        let (union, views) = brush_view_admission(&owners, &published, &native_cells);
+        admitted = union;
+        if let Some(portal) = scene.portal_view.as_mut() {
+            for (view, ids) in views {
+                if let Some(Some(visible)) = portal.visibility.get_mut(view) {
+                    visible.bmodels = ids.into();
+                }
+            }
+        }
+    }
     if admitted.iter().all(|&brush_model| brush_model == 0) {
         return;
     }
@@ -243,7 +309,7 @@ fn exec_cell_dyn_brush_cmds(
         return;
     };
     let mut already = HashSet::new();
-    for item in &cull.draw_items {
+    for item in &cull.draws.items {
         for offset in 0..item.run {
             already.insert(item.surf.saturating_add(offset));
         }
@@ -267,13 +333,39 @@ fn exec_cell_dyn_brush_cmds(
         added = added.saturating_add(span_added);
     }
     if added == 0 {
+        refresh_draw_items_id(cull);
         return;
     }
     refresh_draw_items_id(cull);
     if let Some(stats) = stats.as_mut() {
-        stats.keys = cull.draw_items.len() as u32;
-        stats.rebinds = draw_item_rebinds(&cull.draw_items);
+        stats.keys = cull.draws.items.len() as u32;
+        stats.rebinds = draw_item_rebinds(&cull.draws.items);
     }
+}
+
+fn brush_view_admission(
+    owners: &std::collections::BTreeMap<u16, (usize, Bounds)>,
+    published: &render_scene::PublishedCellVis,
+    native: &render_scene::WorldDpvsCells,
+) -> (Vec<u16>, Vec<(usize, Vec<u16>)>) {
+    let mut union = std::collections::BTreeSet::new();
+    let mut views = Vec::new();
+    for view in &published.views {
+        let ids: Vec<_> = owners
+            .iter()
+            .filter_map(|(&model, &(world, bounds))| {
+                (model != 0
+                    && (view.shared || world == view.world)
+                    && native
+                        .for_world(world)
+                        .is_some_and(|cells| view.admits_bounds(cells, bounds)))
+                .then_some(model)
+            })
+            .collect();
+        union.extend(ids.iter().copied());
+        views.push((view.view, ids));
+    }
+    (union.into_iter().collect(), views)
 }
 
 fn size_scene_ent_cell_bits(scene: Option<Res<WorldScene>>, mut bits: ResMut<SceneEntCellBits>) {
@@ -411,59 +503,66 @@ fn skin_scene_ent_and_mark(
     entnum: u32,
 ) {
     let gate = scene.scene_dobj(entnum).map(|dobj| dobj.cull_gate);
-    if let Some(mut gate) = gate {
-        if dpvs_iw4::scene_dobj_gate_skin_begin(&mut gate) {
-            let ready = skin_inputs.by_ent.get(&entnum).cloned();
-            let expanded = ready.or_else(|| {
-                skin_inputs.pending.get(&entnum).map(|pending| {
-                    crate::prepare::scene::gfx_scene::expand_scene_ent_pending(
-                        pending,
-                        surface_cache,
-                    )
-                })
-            });
-            let mut entries = Vec::new();
-            let summary = match expanded.as_ref() {
-                Some(input) => {
-                    let models: Vec<dpvs_iw4::PreSkinModel<'_>> = input
-                        .models
-                        .iter()
-                        .map(|model| dpvs_iw4::PreSkinModel {
-                            lod: model.lod,
-                            bone_count: model.bone_count,
-                            surfaces: &model.surfaces,
-                        })
-                        .collect();
-                    dpvs_iw4::pre_skin_scene_ent(
-                        &models,
-                        &input.hide_part_bits,
-                        skin_inputs.frame_bytes_used,
-                        |entry| entries.push(entry),
-                    )
-                }
+    if let Some(mut gate) = gate
+        && dpvs_iw4::scene_dobj_gate_skin_begin(&mut gate)
+    {
+        let ready = skin_inputs.by_ent.get(&entnum).cloned();
+        let expanded = ready.or_else(|| {
+            skin_inputs.pending.get(&entnum).map(|pending| {
+                crate::prepare::scene::gfx_scene::expand_scene_ent_pending(pending, surface_cache)
+            })
+        });
+        let mut entries = Vec::new();
+        let summary = match expanded.as_ref() {
+            Some(input) => {
+                let models: Vec<dpvs_iw4::PreSkinModel<'_>> = input
+                    .models
+                    .iter()
+                    .map(|model| dpvs_iw4::PreSkinModel {
+                        lod: model.lod,
+                        bone_count: model.bone_count,
+                        surfaces: &model.surfaces,
+                    })
+                    .collect();
+                dpvs_iw4::pre_skin_scene_ent(
+                    &models,
+                    &input.hide_part_bits,
+                    skin_inputs.frame_bytes_used,
+                    |entry| entries.push(entry),
+                )
+            }
 
-                None => dpvs_iw4::PreSkinSummary::default(),
-            };
-            skin_inputs.frame_bytes_used =
-                skin_inputs.frame_bytes_used.saturating_add(summary.bytes);
-            scene.store_scene_ent_skin(
-                entnum,
-                render_frontend::SceneEntSkinnedSurfs { entries, summary },
-            );
-        }
+            None => dpvs_iw4::PreSkinSummary::default(),
+        };
+        skin_inputs.frame_bytes_used = skin_inputs.frame_bytes_used.saturating_add(summary.bytes);
+        scene.store_scene_ent_skin(
+            entnum,
+            render_frontend::SceneEntSkinnedSurfs { entries, summary },
+        );
     }
     scene.mark_scene_ent_visible(entnum);
 }
 
-fn exec_cell_scene_ent_cmds(
+#[derive(SystemParam)]
+pub(crate) struct SceneEntSkinning<'w> {
+    gfx: ResMut<'w, HostGfxScene>,
+    skin_inputs: ResMut<'w, crate::prepare::scene::gfx_scene::SceneEntSkinInputs>,
+    surface_cache: ResMut<'w, crate::prepare::scene::gfx_scene::SceneEntSurfaceCache>,
+}
+
+pub(crate) fn exec_cell_scene_ent_cmds(
     bits: Res<SceneEntCellBits>,
-    mut gfx: ResMut<HostGfxScene>,
-    mut skin_inputs: ResMut<crate::prepare::scene::gfx_scene::SceneEntSkinInputs>,
-    mut surface_cache: ResMut<crate::prepare::scene::gfx_scene::SceneEntSurfaceCache>,
+    skinning: SceneEntSkinning,
     world: Option<Res<WorldScene>>,
     stats: Option<Res<DpvsFrameStats>>,
     mut worker_cmds: ResMut<FrontendWorkerCmds>,
 ) {
+    let SceneEntSkinning {
+        mut gfx,
+        mut skin_inputs,
+        mut surface_cache,
+    } = skinning;
+
     let _ = worker_cmds.queues.reset_type(WORKER_CMD_DPVS_ENT);
     let ready = bits.is_ready();
     gfx.scene.scene_ent_walked = false;
@@ -471,7 +570,7 @@ fn exec_cell_scene_ent_cmds(
     let planes: Vec<[f32; 4]> = stats
         .as_ref()
         .map(|s| s.frustum_planes.clone())
-        .unwrap_or_default();
+        .unwrap_or(Vec::new());
     let mut pending: Vec<DpvsEntWorkerCmd> = Vec::new();
     let cull = world.as_ref().and_then(|w| w.cull.as_ref());
     let dpvs = cull.map(|cull| DpvsPlanes {
@@ -606,16 +705,22 @@ fn exec_cell_scene_ent_cmds(
 
 fn drain_dpvs_ent_cmds(
     mut worker_cmds: ResMut<FrontendWorkerCmds>,
-    mut gfx: ResMut<HostGfxScene>,
-    mut skin_inputs: ResMut<crate::prepare::scene::gfx_scene::SceneEntSkinInputs>,
-    mut surface_cache: ResMut<crate::prepare::scene::gfx_scene::SceneEntSurfaceCache>,
+    skinning: SceneEntSkinning,
     world: Option<Res<WorldScene>>,
     stats: Option<Res<DpvsFrameStats>>,
+    prepared: Option<Res<crate::prepare::scene::view_parms::PreparedSceneView>>,
+    mut last_atlas_world: Local<Option<usize>>,
 ) {
+    let SceneEntSkinning {
+        mut gfx,
+        mut skin_inputs,
+        mut surface_cache,
+    } = skinning;
+
     let planes: Vec<[f32; 4]> = stats
         .as_ref()
         .map(|s| s.frustum_planes.clone())
-        .unwrap_or_default();
+        .unwrap_or(Vec::new());
     let cull = world.as_ref().and_then(|w| w.cull.as_ref());
     let dpvs = cull.map(|cull| DpvsPlanes {
         planes: &cull.dpvs.planes,
@@ -659,4 +764,64 @@ fn drain_dpvs_ent_cmds(
             skin_scene_ent_and_mark(scene, inputs, cache, entnum);
         },
     );
+    // The retail cell bitsets above belong to world 0. Other atlas worlds
+    // need their own view admission, not a test against Terminal's cells.
+    if let (Some(world), Some(prepared)) = (world.as_deref(), prepared.as_deref())
+        && prepared.ready
+        && let Some(view) = world.portal_view.as_ref()
+    {
+        let admitted: Vec<u32> = scene
+            .scene_dobjs
+            .iter()
+            .map(|model| (model.origin, model.radius, model.info))
+            .chain(
+                scene
+                    .scene_models
+                    .iter()
+                    .map(|model| (model.origin, model.radius, model.info)),
+            )
+            .filter_map(|(origin, radius, info)| {
+                let model_world = view.point_tag(origin).saturating_sub(1) as usize;
+                if model_world == 0 && view.camera_world == 0 && view.draw_views(0).len() == 1 {
+                    return None;
+                }
+                let radius = radius.unwrap_or(128.0);
+                if !view
+                    .visible_centers(prepared.eye.to_array(), origin, radius)
+                    .into_iter()
+                    .any(|center| !dpvs_iw4::scene_ent_sphere_hides(center, radius, &planes))
+                {
+                    return None;
+                }
+                Some(scene_info_entnum(info))
+            })
+            .collect();
+        for &entnum in &admitted {
+            if let Some(dobj) = scene
+                .scene_dobjs
+                .iter_mut()
+                .find(|dobj| scene_info_entnum(dobj.info) == entnum)
+                && dobj.cull_gate < dpvs_iw4::SCENE_DOBJ_GATE_BOUNDED
+                && let Some(bounds) =
+                    scene_ent_pose_bounds(dobj.origin, dobj.radius, dobj.posed_bounds)
+            {
+                dobj.posed_bounds = Some(bounds);
+                dobj.cull_gate = dpvs_iw4::SCENE_DOBJ_GATE_BOUNDED;
+            }
+            skin_scene_ent_and_mark(scene, inputs, cache, entnum);
+        }
+        scene.scene_ent_walked = true;
+        if *last_atlas_world != Some(view.camera_world) {
+            let surfaces: Vec<_> = admitted
+                .iter()
+                .map(|&id| (id, scene.scene_ent_surface_count(id)))
+                .collect();
+            diag::info!(
+                World,
+                "atlas dynamic: camera_world={} admitted_surfaces={surfaces:?}",
+                view.camera_world
+            );
+            *last_atlas_world = Some(view.camera_world);
+        }
+    }
 }

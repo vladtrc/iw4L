@@ -84,10 +84,10 @@ fn get_orientation_spawn_built(
         &mut offset,
         effect_at_spawn.axis,
         flags,
-        sp.spawn_offset_radius[0],
-        sp.spawn_offset_radius[1],
-        sp.spawn_offset_height[0],
-        sp.spawn_offset_height[1],
+        crate::FxSpawnOffset {
+            radius: sp.spawn_offset_radius,
+            height: sp.spawn_offset_height,
+        },
         sp.seed,
     );
     origin[0] += offset[0];

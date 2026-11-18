@@ -11,6 +11,8 @@ pub mod loc;
 pub mod master;
 pub mod mrs;
 pub mod net_feel;
+pub mod org;
+pub mod perf_compare;
 pub mod perf_overhead;
 pub mod perfetto_query;
 pub mod publish;

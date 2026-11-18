@@ -5,18 +5,37 @@ use crate::script::{RoundScript, Value};
 use crate::world::ClientId;
 use bevy_ecs::prelude::World;
 
-pub(crate) mod campaign;
+mod scripted;
+pub(crate) use scripted::register;
 
 #[derive(Clone, Debug)]
-pub(crate) struct EntityHit {
+pub struct EntityHit {
     pub target: ScriptModelId,
     pub amount: i32,
     pub attacker: Option<ClientId>,
+    pub attacker_entity: Option<crate::ScriptModelId>,
     pub means: &'static str,
     pub weapon: u32,
     pub point: [f32; 3],
     pub dir: [f32; 3],
     pub bone: Option<usize>,
+    pub hitloc: u8,
+    pub flags: i32,
+}
+
+// Script damage can address an entity without a rendered/collision presence.
+// Keep its GSC identities through the same damage and death services as hits.
+#[derive(Clone)]
+pub(crate) struct ObjectHit {
+    pub amount: i32,
+    pub attacker: Value,
+    pub inflictor: Value,
+    pub means: &'static str,
+    pub weapon: u32,
+    pub point: [f32; 3],
+    pub dir: [f32; 3],
+    pub bone: Option<usize>,
+    pub hitloc: u8,
     pub flags: i32,
 }
 
@@ -46,7 +65,7 @@ const MEANS: &[&str] = &[
     "MOD_DOGS",
 ];
 
-pub(crate) fn means_named(name: &str) -> Result<&'static str, String> {
+pub fn means_named(name: &str) -> Result<&'static str, String> {
     MEANS
         .iter()
         .copied()
@@ -55,7 +74,7 @@ pub(crate) fn means_named(name: &str) -> Result<&'static str, String> {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct ScriptBlast {
+pub struct ScriptBlast {
     pub origin: [f32; 3],
     pub radius: f32,
     pub max: f32,
@@ -67,12 +86,13 @@ pub(crate) struct ScriptBlast {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct ScriptHit {
+pub struct ScriptHit {
     pub piece: Option<i32>,
     pub target: HitTarget,
     pub amount: i32,
     pub origin: [f32; 3],
     pub attacker: Option<ClientId>,
+    pub attacker_entity: Option<crate::ScriptModelId>,
     pub inflictor: Option<ScriptModelId>,
     pub means: &'static str,
     pub weapon: u32,
@@ -81,9 +101,32 @@ pub(crate) struct ScriptHit {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum HitTarget {
+pub enum HitTarget {
     Player(ClientId),
     Entity(ScriptModelId),
+}
+
+pub(crate) fn attacker_value(
+    world: &World,
+    client: Option<ClientId>,
+    entity: Option<ScriptModelId>,
+) -> Value {
+    if let Some(entity) = entity {
+        return world
+            .resource::<RoundScript>()
+            .presented_by(entity)
+            .map_or(Value::Undefined, Value::Object);
+    }
+    client.map_or_else(
+        || {
+            world
+                .resource::<RoundScript>()
+                .engine
+                .world
+                .map_or(Value::Undefined, Value::Object)
+        },
+        |client| super::players::player_object(world, client.0),
+    )
 }
 
 pub(crate) fn apply_script_blasts(world: &mut World, tick: crate::Tick) {
@@ -94,17 +137,14 @@ pub(crate) fn apply_script_blasts(world: &mut World, tick: crate::Tick) {
         ),
         None => return,
     };
-    for mut hit in hits {
+    for hit in hits {
         match hit.target {
-            HitTarget::Player(client) => {
-                if !campaign::shield_player(world, client, &mut hit) {
-                    continue;
-                }
+            HitTarget::Player(_) => {
                 crate::damage::apply_script_hit(&mut FrameWorld::from_world(world), tick, &hit);
             }
             HitTarget::Entity(target) => {
                 if let Some(piece) = hit.piece {
-                    crate::t5_destructible::apply_piece_hit(
+                    crate::model_behaviors::apply_piece_hit(
                         &mut FrameWorld::from_world(world),
                         tick,
                         crate::AuthorityModelOwner::ScriptModel(target),
@@ -122,18 +162,20 @@ pub(crate) fn apply_script_blasts(world: &mut World, tick: crate::Tick) {
                     Some(Value::Vector(at)) => at,
                     _ => hit.origin,
                 };
-                drop(runtime);
+
                 damage_entity(
                     world,
                     &EntityHit {
                         target,
                         amount: hit.amount,
                         attacker: hit.attacker,
+                        attacker_entity: hit.attacker_entity,
                         means: hit.means,
                         weapon: hit.weapon,
                         point: hit.origin,
                         dir: std::array::from_fn(|i| at[i] - hit.origin[i]),
                         bone: None,
+                        hitloc: hit.hitloc,
                         flags: hit.flags,
                     },
                 );
@@ -158,11 +200,13 @@ pub(crate) fn apply_script_blasts(world: &mut World, tick: crate::Tick) {
                     target,
                     amount,
                     attacker: blast.attacker,
+                    attacker_entity: None,
                     means: blast.means,
                     weapon: blast.weapon,
                     point: mid,
                     dir: std::array::from_fn(|i| mid[i] - blast.origin[i]),
                     bone: None,
+                    hitloc: 0,
                     flags: 1,
                 },
             );
@@ -223,6 +267,65 @@ pub(crate) fn radius_targets(
     targets
 }
 
+pub(crate) fn apply_object_hit(world: &mut World, object: u64, hit: &ObjectHit) -> bool {
+    let client = world.resource::<RoundScript>().player_client(object);
+    let Some(client) = client else {
+        let mut damage = hit.clone();
+        if hit.means != "MOD_MELEE" && world.resource::<RoundScript>().actors.contains_key(&object)
+        {
+            let scale = FrameWorld::from_world(world)
+                .combat_facts_for(hit.weapon)
+                .map_or(1.0, |facts| {
+                    weapon_iw4::location_damage_scale(&facts.location_damage, hit.hitloc)
+                });
+            if scale == 0.0 {
+                return false;
+            }
+            damage.amount = (f64::from(hit.amount) * f64::from(scale)) as i32;
+        }
+        damage.amount = damage.amount.max(1);
+        return damage_object(world, object, &damage);
+    };
+    let runtime = world.resource::<RoundScript>();
+    let (attacker, attacker_entity) = match hit.attacker {
+        Value::Object(id) => (
+            runtime.player_client(id).map(ClientId),
+            runtime.entities.get(&id).and_then(|entity| entity.presence),
+        ),
+        _ => (None, None),
+    };
+    let inflictor = match hit.inflictor {
+        Value::Object(id) => runtime
+            .entities
+            .get(&id)
+            .and_then(|entity| entity.presence)
+            .map(crate::script_player::HitInflictor::ScriptModel),
+        _ => None,
+    };
+    let tick = world.resource::<crate::step::StepRequest>().tick;
+    super::players::player_damage_from(
+        world,
+        tick,
+        &crate::script_player::Hit {
+            victim: ClientId(client),
+            attacker,
+            attacker_entity,
+            amount: hit.amount,
+            flags: hit.flags,
+            means: hit.means,
+            weapon: hit.weapon,
+            point: hit.point,
+            dir: hit.dir,
+            direction_present: hit.dir != [0.0; 3],
+            hitloc: hit.hitloc,
+            inflictor,
+            commit: None,
+        },
+        Some(hit.attacker.clone()),
+        Some(hit.inflictor.clone()),
+    )
+}
+
 pub(crate) fn damage_entity(world: &mut World, hit: &EntityHit) -> bool {
     let Some(object) = world
         .get_resource::<RoundScript>()
@@ -233,9 +336,35 @@ pub(crate) fn damage_entity(world: &mut World, hit: &EntityHit) -> bool {
     else {
         return false;
     };
-    if campaign::invulnerable(world, object) {
-        return true;
-    }
+    let attacker = attacker_value(world, hit.attacker, hit.attacker_entity);
+    damage_object(
+        world,
+        object,
+        &ObjectHit {
+            amount: hit.amount,
+            attacker,
+            inflictor: Value::Undefined,
+            means: hit.means,
+            weapon: hit.weapon,
+            point: hit.point,
+            dir: hit.dir,
+            bone: hit.bone,
+            hitloc: hit.hitloc,
+            flags: hit.flags,
+        },
+    )
+}
+
+pub(crate) fn damage_object(world: &mut World, object: u64, hit: &ObjectHit) -> bool {
+    let Some(entity) = world
+        .resource::<RoundScript>()
+        .entities
+        .get(&object)
+        .filter(|entity| entity.accepts_damage(hit.flags))
+    else {
+        return false;
+    };
+    let presence = entity.presence;
     let frame = FrameWorld::from_world(world);
     let part = hit
         .bone
@@ -243,24 +372,20 @@ pub(crate) fn damage_entity(world: &mut World, hit: &EntityHit) -> bool {
             frame
                 .entity_collision_capabilities()
                 .iter()
-                .find(|row| row.owner.script_model() == Some(hit.target))
+                .find(|row| presence.is_some() && row.owner.script_model() == presence)
                 .and_then(|row| row.dobj.as_ref())
                 .and_then(|dobj| dobj.bone_name(bone))
                 .map(str::to_owned)
         })
-        .unwrap_or_default();
+        .unwrap_or(String::new());
     let weapon = crate::script_player::weapon_name(&frame, hit.weapon);
-    let attacker = hit.attacker.map_or(Value::Undefined, |a| {
-        super::players::player_object(world, a.0)
-    });
+    let attacker = &hit.attacker;
     if world.resource::<RoundScript>().entities[&object].kind
         == super::entities::EntityKind::Vehicle
     {
-        super::vehicles::damage(world, object, hit, attacker, &weapon, &part);
+        super::vehicles::damage(world, object, hit, attacker.clone(), &weapon, &part);
         return true;
     }
-    let actor = world.resource::<RoundScript>().entities[&object].kind
-        == super::entities::EntityKind::Actor;
     let mut runtime = world.resource_mut::<RoundScript>();
     let model = match runtime.object_field(object, "model") {
         Value::String(model) => model,
@@ -271,12 +396,17 @@ pub(crate) fn damage_entity(world: &mut World, hit: &EntityHit) -> bool {
         Value::Float(health) => health as i32,
         _ => 0,
     };
-    let after = before.saturating_sub(hit.amount);
+    let shielded = runtime
+        .actors
+        .get(&object)
+        .is_some_and(|actor| actor.damage_shield);
+    let after = if shielded {
+        before
+    } else {
+        before.saturating_sub(hit.amount)
+    };
     runtime.set_object_field(object, "health", Value::Int(after));
-    drop(runtime);
-    if actor {
-        super::actors::damaged(world, object, hit, &attacker, &weapon, &part);
-    }
+
     let receiver = Value::Object(object);
     raise(
         world,
@@ -292,16 +422,40 @@ pub(crate) fn damage_entity(world: &mut World, hit: &EntityHit) -> bool {
             Value::string(""),
             Value::String(part.as_str().into()),
             Value::Int(hit.flags),
-            Value::String(weapon.into()),
+            Value::String(weapon.clone().into()),
         ],
     );
     if before > 0 && after <= 0 {
-        raise(world, receiver, "death", vec![attacker]);
+        // G_Damage notifies non-player death with attacker, MOD and weapon.
+        let death_weapon = if hit.weapon == 0 {
+            Value::Undefined
+        } else {
+            Value::String(weapon.clone().into())
+        };
+        raise(
+            world,
+            receiver,
+            "death",
+            vec![attacker.clone(), Value::string(hit.means), death_weapon],
+        );
+        if world.resource::<RoundScript>().actors.contains_key(&object)
+            && let Err(message) = super::actors::death::begin(world, object, hit, &weapon, attacker)
+        {
+            world.resource_mut::<RoundScript>().fault = Some(crate::script::Fault::at(
+                &crate::script::Location {
+                    module: "<engine>".into(),
+                    function: "actor death".into(),
+                    line: 0,
+                    column: 0,
+                },
+                message,
+            ));
+        }
     }
     true
 }
 
-pub(crate) fn destructible_callback(
+pub fn destructible_callback(
     world: &mut World,
     owner: crate::AuthorityModelOwner,
     entry: &str,
@@ -313,22 +467,21 @@ pub(crate) fn destructible_callback(
     else {
         return;
     };
-    let name = format!("iw4l_maps/destructibles::{entry}");
     let now = super::players::now_ms(world);
     if let Err(fault) =
-        crate::script::runtime::run_now(world, &name, Value::Object(object), args, now)
+        crate::script::runtime::run_now(world, entry, Value::Object(object), args, now)
     {
         diag::warn!(Sim, "destructible callback unavailable: {fault:?}");
     }
 }
 
-pub(crate) fn destructible_attacker(world: &World, attacker: Option<crate::ClientId>) -> Value {
+pub fn destructible_attacker(world: &World, attacker: Option<crate::ClientId>) -> Value {
     attacker.map_or(Value::Undefined, |client| {
         super::players::player_object(world, client.0)
     })
 }
 
-pub(crate) fn destructible_effect(
+pub fn destructible_effect(
     world: &mut World,
     name: String,
     origin: [f32; 3],
@@ -336,10 +489,8 @@ pub(crate) fn destructible_effect(
     up: [f32; 3],
 ) -> Option<u64> {
     let now = super::players::now_ms(world);
-    let Some(mut runtime) = world.get_resource_mut::<RoundScript>() else {
-        return None;
-    };
-    let Ok(id) = runtime.create_entity(super::entities::EntityKind::Spawned, "script_model") else {
+    let mut runtime = world.get_resource_mut::<RoundScript>()?;
+    let Ok(id) = runtime.create_entity(super::entities::EntityKind::Fx, "fxentity") else {
         return None;
     };
     let forward = glam::Vec3::from_array(direction)
@@ -360,13 +511,13 @@ pub(crate) fn destructible_effect(
     Some(id)
 }
 
-pub(crate) fn stop_destructible_effect(world: &mut World, id: u64) {
+pub fn stop_destructible_effect(world: &mut World, id: u64) {
     if let Some(mut runtime) = world.get_resource_mut::<RoundScript>() {
         runtime.delete_entity(id);
     }
 }
 
-pub(crate) fn set_destructible_model(
+pub fn set_destructible_model(
     world: &mut World,
     owner: crate::AuthorityModelOwner,
     model: Option<&str>,
@@ -384,7 +535,7 @@ pub(crate) fn set_destructible_model(
     runtime.entities.get_mut(&object).unwrap().loop_sound = sound.map(std::sync::Arc::from);
 }
 
-pub(crate) fn destructible_debris(
+pub fn destructible_debris(
     world: &mut World,
     dobj: crate::AuthorityDObjState,
     offset: [f32; 3],
@@ -433,7 +584,7 @@ pub(crate) fn destructible_debris(
     let entity = runtime.entities.get_mut(&object).unwrap();
     entity.presence = Some(presence);
     entity.solid = false;
-    drop(runtime);
+
     let now = super::players::now_ms(world);
     world
         .resource_mut::<RoundScript>()

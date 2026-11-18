@@ -1,12 +1,12 @@
 use crate::script::Value;
 use crate::script::runtime::to_text;
 
-pub(crate) fn arg(args: &[Value], index: usize) -> Result<&Value, String> {
+pub fn arg(args: &[Value], index: usize) -> Result<&Value, String> {
     args.get(index)
         .ok_or_else(|| format!("parameter {} does not exist", index + 1))
 }
 
-pub(crate) fn float(args: &[Value], index: usize) -> Result<f32, String> {
+pub fn float(args: &[Value], index: usize) -> Result<f32, String> {
     match arg(args, index)? {
         Value::Int(n) => Ok(*n as f32),
         Value::Float(n) => Ok(*n),
@@ -18,7 +18,7 @@ pub(crate) fn float(args: &[Value], index: usize) -> Result<f32, String> {
     }
 }
 
-pub(crate) fn int(args: &[Value], index: usize) -> Result<i32, String> {
+pub fn int(args: &[Value], index: usize) -> Result<i32, String> {
     match arg(args, index)? {
         Value::Int(n) => Ok(*n),
         Value::Float(n) => Ok(*n as i32),
@@ -30,7 +30,7 @@ pub(crate) fn int(args: &[Value], index: usize) -> Result<i32, String> {
     }
 }
 
-pub(crate) fn vector(args: &[Value], index: usize) -> Result<[f32; 3], String> {
+pub fn vector(args: &[Value], index: usize) -> Result<[f32; 3], String> {
     match arg(args, index)? {
         Value::Vector(v) => Ok(*v),
         other => Err(format!(
@@ -41,7 +41,7 @@ pub(crate) fn vector(args: &[Value], index: usize) -> Result<[f32; 3], String> {
     }
 }
 
-pub(crate) fn optional<T>(
+pub fn optional<T>(
     args: &[Value],
     index: usize,
     read: fn(&[Value], usize) -> Result<T, String>,
@@ -52,7 +52,7 @@ pub(crate) fn optional<T>(
     }
 }
 
-pub(crate) fn kind(value: &Value) -> &'static str {
+pub fn kind(value: &Value) -> &'static str {
     match value {
         Value::Undefined => "undefined",
         Value::Int(_) => "an int",
@@ -68,7 +68,7 @@ pub(crate) fn kind(value: &Value) -> &'static str {
     }
 }
 
-pub(crate) fn string(args: &[Value], index: usize) -> Result<String, String> {
+pub fn string(args: &[Value], index: usize) -> Result<String, String> {
     let value = args
         .get(index)
         .ok_or_else(|| format!("parameter {} does not exist", index + 1))?;

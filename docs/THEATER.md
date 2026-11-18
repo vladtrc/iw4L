@@ -2,7 +2,7 @@
 
 Choose **THEATER** beneath **OPTIONS** on the main menu. The library lists
 `iw4l-artifacts/demos/*.iw4ldemo` and `clips/*/clip.iw4ldemo`, newest first.
-Tiles show map, duration, type and preview over the MW2 menu background.
+Tiles show map, duration, type and preview over the IW4 menu background.
 Refresh after saving a film. Incompatible, empty or damaged recordings show an error.
 Use `record [name]` / `stoprecord` in a match, or `clip` for the recent buffer.
 Incompatible recordings require the build that recorded them. Player demos and clips
@@ -25,7 +25,10 @@ Tab/Shift+Tab and Enter also select controls; Tools/Select opens editing tools.
 Free camera uses WASD, Q/E and Shift; hold the right mouse button to look.
 K places a camera waypoint; Dolly follows a cubic position path and interpolates
 rotation and field of view on the same clock as the recorded scene. Blue timeline
-markers and waypoint rows show saved camera times. Edit pose jumps to a waypoint
+markers and waypoint rows show saved camera times. Waypoints retain their
+physical world. Dolly interpolates positions and orientations through a unique
+portal between adjacent worlds, including separately placed scene worlds;
+ambiguous connections require an explicit camera route. Edit pose jumps to a waypoint
 and restores its camera/FOV; Update pose replaces it, Set time moves it to the
 playhead, and Delete waypoint removes it. Placing a key at an existing time replaces
 that key. FOV controls edit free/chase/attached views; Dolly uses saved waypoint FOVs.

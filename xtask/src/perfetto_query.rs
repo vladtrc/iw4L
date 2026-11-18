@@ -364,10 +364,14 @@ fn manifest_summary(trace: &Path) -> String {
         .filter(|command| !command.is_empty())
         .unwrap_or_else(|| "MISSING".into());
     format!(
-        "manifest: {} zone={} role={} git={} focus={} workload={workload:?} elapsed_ms={} buffer_size_kb={}",
+        "manifest: {} zone={} role={} build_git={} runtime_git={} focus={} workload={workload:?} elapsed_ms={} buffer_size_kb={}",
         path.display(),
         field("zone"),
         field("role"),
+        value
+            .pointer("/build/git_sha")
+            .filter(|value| !value.is_null())
+            .map_or_else(|| "MISSING".into(), serde_json::Value::to_string),
         field("git"),
         field("focus"),
         field("elapsed_ms"),
@@ -551,7 +555,8 @@ fn finish_processor(
             output.status
         ));
     }
-    parse_csv(&stdout).ok_or_else(|| format!("no CSV in trace_processor stdout:\n{stdout}"))
+    parse_csv(&stdout)
+        .ok_or_else(|| format!("invalid or missing CSV in trace_processor stdout:\n{stdout}"))
 }
 
 #[derive(Debug)]
@@ -587,55 +592,69 @@ pub(crate) fn cell_f64(headers: &[String], row: &[String], name: &str) -> Option
 }
 
 fn parse_csv(text: &str) -> Option<Table> {
-    let mut headers = None;
-    let mut rows = Vec::new();
-    for line in text.lines() {
-        let line = line.trim_end_matches('\r');
-        if !line.starts_with('"') && !line.contains(',') {
-            continue;
-        }
-        let cells = split_csv(line);
-        if headers.is_none() {
-            headers = Some(cells);
-        } else {
-            rows.push(cells);
-        }
-    }
-    Some(Table {
-        headers: headers?,
-        rows,
-    })
-}
-
-fn split_csv(line: &str) -> Vec<String> {
-    let mut cells = Vec::new();
-    let mut rest = line;
-    while !rest.is_empty() {
-        if let Some(stripped) = rest.strip_prefix('"') {
-            let Some(end) = stripped.find('"') else {
-                break;
-            };
-            cells.push(stripped[..end].replace("\"\"", "\""));
-            rest = &stripped[end + 1..];
-            if let Some(next) = rest.strip_prefix(',') {
-                rest = next;
+    let start = text
+        .split_inclusive('\n')
+        .scan(0, |offset, line| {
+            let start = *offset;
+            *offset += line.len();
+            Some((start, line))
+        })
+        .find(|(_, line)| line.starts_with('"') || line.contains(','))?
+        .0;
+    let mut records = Vec::new();
+    let mut row = Vec::new();
+    let mut field = String::new();
+    let mut quoted = false;
+    let mut closed = false;
+    let mut chars = text[start..].chars().peekable();
+    while let Some(ch) = chars.next() {
+        if quoted {
+            if ch == '"' {
+                if chars.peek() == Some(&'"') {
+                    chars.next();
+                    field.push('"');
+                } else {
+                    quoted = false;
+                    closed = true;
+                }
             } else {
-                break;
+                field.push(ch);
             }
             continue;
         }
-        match rest.find(',') {
-            Some(end) => {
-                cells.push(rest[..end].to_owned());
-                rest = &rest[end + 1..];
+        match ch {
+            ',' => {
+                row.push(std::mem::take(&mut field));
+                closed = false;
             }
-            None => {
-                cells.push(rest.to_owned());
-                break;
+            '\n' | '\r' => {
+                if ch == '\r' && chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                if !row.is_empty() || !field.is_empty() || closed {
+                    row.push(std::mem::take(&mut field));
+                    records.push(std::mem::take(&mut row));
+                }
+                closed = false;
             }
+            '"' if field.is_empty() && !closed => quoted = true,
+            _ if closed || ch == '"' => return None,
+            _ => field.push(ch),
         }
     }
-    cells
+    if quoted {
+        return None;
+    }
+    if !row.is_empty() || !field.is_empty() || closed {
+        row.push(field);
+        records.push(row);
+    }
+    let mut records = records.into_iter();
+    let headers = records.next()?;
+    let rows: Vec<_> = records.collect();
+    rows.iter()
+        .all(|row| row.len() == headers.len())
+        .then_some(Table { headers, rows })
 }
 
 fn print_table(table: &Table) {

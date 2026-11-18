@@ -2,11 +2,16 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
+use asset_core::{FamilyId, game_folder_families, game_folder_family};
 use bevy::prelude::*;
-use frame::OtherGame;
 
-fn settings_key(game: OtherGame) -> String {
-    format!("game_folder_{}", game.key())
+fn settings_key(game: FamilyId) -> String {
+    format!(
+        "game_folder_{}",
+        game_folder_family(game)
+            .expect("registered folder family")
+            .key
+    )
 }
 
 pub(crate) fn parse_game_folder(
@@ -14,8 +19,9 @@ pub(crate) fn parse_game_folder(
     value: &str,
     settings: &mut frame::GameSettings,
 ) -> bool {
-    let Some(game) = OtherGame::ALL
+    let Some(game) = game_folder_families()
         .into_iter()
+        .map(|(id, _)| id)
         .find(|&game| settings_key(game) == key)
     else {
         return false;
@@ -25,8 +31,9 @@ pub(crate) fn parse_game_folder(
 }
 
 pub(crate) fn serialize_game_folders(settings: &frame::GameSettings) -> Vec<String> {
-    OtherGame::ALL
+    game_folder_families()
         .into_iter()
+        .map(|(id, _)| id)
         .map(|game| {
             let folder = settings.game_folder(game).replace(['\n', '\r'], "");
             format!("{}={folder}", settings_key(game))
@@ -47,26 +54,19 @@ pub fn stored_game_folders(artifacts: &Path) -> Vec<PathBuf> {
             parse_game_folder(key, value, &mut settings);
         }
     }
-    OtherGame::ALL
+    game_folder_families()
         .into_iter()
+        .map(|(id, _)| id)
         .map(|game| settings.game_folder(game))
         .filter(|folder| !folder.is_empty())
         .map(PathBuf::from)
         .collect()
 }
 
-fn zone_game(game: OtherGame) -> asset_transport::ZoneGame {
-    match game {
-        OtherGame::BlackOps => asset_transport::ZoneGame::T5,
-        OtherGame::BlackOps2 => asset_transport::ZoneGame::T6,
-        OtherGame::ModernWarfare3 => asset_transport::ZoneGame::Iw5,
-    }
-}
-
 #[derive(Resource)]
 pub(crate) struct FolderPicks {
-    sender: mpsc::Sender<(OtherGame, PathBuf)>,
-    receiver: Mutex<mpsc::Receiver<(OtherGame, PathBuf)>>,
+    sender: mpsc::Sender<(FamilyId, PathBuf)>,
+    receiver: Mutex<mpsc::Receiver<(FamilyId, PathBuf)>>,
     dialog_open: Arc<AtomicBool>,
 }
 
@@ -82,7 +82,7 @@ impl Default for FolderPicks {
 }
 
 impl FolderPicks {
-    fn open_dialog(&self, game: OtherGame, start: Option<PathBuf>) {
+    fn open_dialog(&self, game: FamilyId, start: Option<PathBuf>) {
         if self.dialog_open.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -91,8 +91,12 @@ impl FolderPicks {
         let spawned = std::thread::Builder::new()
             .name("game folder dialog".into())
             .spawn(move || {
-                let mut dialog =
-                    rfd::FileDialog::new().set_title(format!("Choose the {} folder", game.title()));
+                let mut dialog = rfd::FileDialog::new().set_title(format!(
+                    "Choose the {} folder",
+                    game_folder_family(game)
+                        .expect("registered folder family")
+                        .title
+                ));
                 if let Some(start) = start.filter(|start| start.is_dir()) {
                     dialog = dialog.set_directory(start);
                 }
@@ -117,17 +121,17 @@ fn tail(text: &str, chars: usize) -> String {
     format!("...{kept}")
 }
 
-fn folder_line(games_root: Option<&Path>, game: OtherGame, folder: &str) -> String {
+fn folder_line(games_root: Option<&Path>, game: FamilyId, folder: &str) -> String {
     const WIDTH: usize = 40;
     if !folder.is_empty() {
         let path = Path::new(folder);
-        return if asset_transport::folder_holds_game(path, zone_game(game)) {
+        return if asset_transport::folder_holds_game(path, game) {
             tail(folder, WIDTH)
         } else {
             format!("^1Not this game:^7 {}", tail(folder, WIDTH - 15))
         };
     }
-    match games_root.and_then(|root| asset_transport::find_game_install(root, zone_game(game))) {
+    match games_root.and_then(|root| asset_transport::find_game_install(root, game)) {
         Some(found) => format!("Found: {}", tail(&found.display().to_string(), WIDTH - 7)),
         None => "^3Not found^7 - choose its folder".to_owned(),
     }
@@ -138,8 +142,8 @@ pub(crate) fn game_folder_menu(
     picks: Res<FolderPicks>,
     mut settings: ResMut<frame::GameSettings>,
     mut dvars: ResMut<frame::UiMenuDvars>,
-    mut at_launch: Local<Option<[String; 3]>>,
-    mut shown: Local<Option<[String; 3]>>,
+    mut at_launch: Local<Option<std::collections::BTreeMap<FamilyId, String>>>,
+    mut shown: Local<Option<std::collections::BTreeMap<FamilyId, String>>>,
 ) {
     let launched = at_launch.get_or_insert_with(|| settings.game_folders.clone());
     for command in events.read() {
@@ -151,14 +155,17 @@ pub(crate) fn game_folder_menu(
         };
         match name.as_str() {
             "ui_pick_game_folder" => {
-                if let Some(game) = OtherGame::from_key(value) {
+                if let Some(game) = game_folder_families()
+                    .into_iter()
+                    .find_map(|(id, policy)| (policy.key == value).then_some(id))
+                {
                     let current = settings.game_folder(game);
                     let start = (!current.is_empty()).then(|| PathBuf::from(current));
                     picks.open_dialog(game, start);
                 }
             }
             "ui_reset_game_folders" if value == "1" => {
-                for game in OtherGame::ALL {
+                for (game, _) in game_folder_families() {
                     settings.set_game_folder(game, String::new());
                 }
                 settings.touch();
@@ -179,14 +186,22 @@ pub(crate) fn game_folder_menu(
     if shown.as_ref() == Some(&settings.game_folders) {
         return;
     }
-    let games_root = asset_transport::games_root_from_env().ok();
-    for game in OtherGame::ALL {
+    let games_root = asset_transport::games_root().ok();
+    for (game, _) in game_folder_families() {
         let line = folder_line(
             games_root.as_ref().map(|root| root.0.as_path()),
             game,
             settings.game_folder(game),
         );
-        dvars.set(&format!("ui_game_folder_{}", game.key()), line);
+        dvars.set(
+            &format!(
+                "ui_game_folder_{}",
+                game_folder_family(game)
+                    .expect("registered folder family")
+                    .key
+            ),
+            line,
+        );
     }
     let hint = if settings.game_folders == *launched {
         "Folders left empty are looked for next to the MW2 folder."

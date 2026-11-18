@@ -18,6 +18,19 @@ pub enum AccountIdentityError {
     InvalidProof,
 }
 
+impl fmt::Display for AccountIdentityError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Entropy => "account identity entropy unavailable",
+            Self::InvalidKey => "invalid account identity key",
+            Self::InvalidContext => "invalid account identity challenge context",
+            Self::InvalidProof => "invalid account identity proof",
+        })
+    }
+}
+
+impl std::error::Error for AccountIdentityError {}
+
 struct KeyMaterial {
     seed: [u8; 32],
     pair: Ed25519KeyPair,

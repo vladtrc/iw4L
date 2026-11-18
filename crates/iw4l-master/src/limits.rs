@@ -17,5 +17,5 @@ pub(crate) fn configured() -> Result<TransportBudget, String> {
 }
 
 pub(crate) fn values() -> TransportBudget {
-    configured().unwrap_or_default()
+    configured().unwrap_or_else(|_| TransportBudget::default())
 }

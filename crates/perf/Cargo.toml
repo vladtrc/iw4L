@@ -3,11 +3,11 @@ name = "perf"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
-description = "Native Perfetto recording and generated typed instrumentation."
+description = "Native Perfetto recording and call-site instrumentation."
 
 [features]
 default = ["native"]
-native = ["dep:perfetto-sdk"]
+native = ["dep:perfetto-sdk", "dep:perfetto-sdk-sys"]
 
 [dependencies]
 diag.workspace = true
@@ -16,6 +16,7 @@ uuid = { version = "1", features = ["v4"] }
 
 [target.'cfg(unix)'.dependencies]
 perfetto-sdk = { version = "1", optional = true }
+perfetto-sdk-sys = { version = "1.3", optional = true }
 
 [lints]
 workspace = true

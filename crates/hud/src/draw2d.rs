@@ -67,7 +67,7 @@ pub struct Draw2dCmd {
     pub color: [f32; 4],
     pub material: String,
 
-    pub material_namespace: asset_core::AssetNamespace,
+    pub material_namespace: asset_core::FamilyId,
     pub op: Draw2dOp,
     pub provenance: Draw2dProvenance,
 
@@ -200,7 +200,7 @@ pub struct Draw2dQuad {
     pub color: [f32; 4],
     pub material: String,
 
-    pub material_namespace: asset_core::AssetNamespace,
+    pub material_namespace: asset_core::FamilyId,
     pub provenance: Draw2dProvenance,
     pub layer: u8,
 
@@ -264,7 +264,7 @@ enum CmdSlot {
 }
 
 struct CmdHost {
-    material_namespace: asset_core::AssetNamespace,
+    material_namespace: asset_core::FamilyId,
     clip: Option<[f32; 4]>,
     provenance: Draw2dProvenance,
     layer: u8,
@@ -482,36 +482,20 @@ fn tessellate_fonts_in(
                                 fx: fx.fx,
                             });
                         if let Some(glow) = &host.glow {
-                            out.extend(text_run_quads(
+                            out.extend(host.text_run_quads(
                                 def,
-                                parsed.text,
-                                parsed.x,
-                                parsed.y,
-                                parsed.x_scale,
-                                parsed.y_scale,
+                                &parsed,
                                 glow.color,
-                                host.clip,
                                 &glow.material,
-                                host.material_namespace,
-                                host.provenance.clone(),
-                                host.layer,
                                 parsed.render_flags & !hud_iw4::TEXT_RENDERFLAG_DROP_SHADOW,
                                 fx,
                             ));
                         }
-                        out.extend(text_run_quads(
+                        out.extend(host.text_run_quads(
                             def,
-                            parsed.text,
-                            parsed.x,
-                            parsed.y,
-                            parsed.x_scale,
-                            parsed.y_scale,
+                            &parsed,
                             hud_iw4::unpack_color_bgra(parsed.color_bgra),
-                            host.clip,
                             &material,
-                            host.material_namespace,
-                            host.provenance.clone(),
-                            host.layer,
                             parsed.render_flags,
                             fx,
                         ));
@@ -528,12 +512,21 @@ fn quad_from_stretch(
     parsed: hud_iw4::GfxCmdStretchPic,
     clip: Option<[f32; 4]>,
     material: String,
-    material_namespace: asset_core::AssetNamespace,
+    material_namespace: asset_core::FamilyId,
     provenance: Draw2dProvenance,
     layer: u8,
 ) -> Draw2dQuad {
     let (xy, st) = hud_iw4::draw_stretch_pic_corners(
-        parsed.x, parsed.y, parsed.w, parsed.h, parsed.s0, parsed.t0, parsed.s1, parsed.t1,
+        hud_iw4::AppliedRect {
+            x: parsed.x,
+            y: parsed.y,
+            w: parsed.w,
+            h: parsed.h,
+        },
+        hud_iw4::TextureWindow {
+            min: [parsed.s0, parsed.t0],
+            max: [parsed.s1, parsed.t1],
+        },
     );
     Draw2dQuad {
         xy,
@@ -547,200 +540,236 @@ fn quad_from_stretch(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn text_run_quads(
-    font: &FontDef,
-    text: &str,
-    x: f32,
-    y: f32,
-    x_scale: f32,
-    y_scale: f32,
-    run_color: [f32; 4],
-    clip: Option<[f32; 4]>,
-    material: &str,
-    material_namespace: asset_core::AssetNamespace,
-    provenance: Draw2dProvenance,
-    layer: u8,
-    render_flags: u32,
-    fx: Option<TextRunFx>,
-) -> Vec<Draw2dQuad> {
-    let mut max_length_remaining = i32::MAX;
-    let mut vars = None;
-    if let Some(fx) = fx {
-        match hud_iw4::setup_pulse_fx_vars(
-            hud_iw4::seh_print_strlen(text),
-            max_length_remaining,
-            fx.scene_time,
-            fx.fx,
-        ) {
-            None => return Vec::new(),
-            Some(v) => {
-                max_length_remaining = v.max_length;
-                vars = Some(v);
-            }
-        }
-    }
-    let mut seed = vars.map_or(1, |v| v.rand_seed);
-    let draw_rand_char_at_end = vars.is_some_and(|v| v.draw_rand_char_at_end);
-    let decay_time_elapsed = vars.map_or(0, |v| v.decay_time_elapsed);
-    let fx_birth_time = fx.map_or(0, |f| f.fx.birth_time);
-    let fx_decay_duration = fx.map_or(0, |f| f.fx.decay_duration);
-
-    let decaying =
-        vars.is_some_and(|v| v.decaying) && hud_iw4::decay_tick_count(fx_decay_duration).is_some();
-
-    let shadow_offset = hud_iw4::text_drop_shadow_offset(render_flags);
-    let shadow_color = [0.0, 0.0, 0.0, run_color[3]];
-    let outline_size = hud_iw4::text_outline_size(render_flags);
-    // Every outline is drawn before any face glyph.
-    let mut outline = Vec::new();
-
-    let mut cursor_x = x;
-    let mut color = run_color;
-    let mut out = Vec::new();
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        if max_length_remaining == 0 {
-            break;
-        }
-
-        if c == '^'
-            && let Some(n) = chars.peek().copied()
-            && n.is_ascii_digit()
-        {
-            chars.next();
-            let mut tint = hud_iw4::color_from_caret_digit(n);
-            tint[3] *= run_color[3];
-            color = tint;
-            continue;
-        }
-        let orig_letter = c as u32;
-        let mut letter = orig_letter;
-        let mut fade_alpha = 0u8;
-        let mut skip_drawing = false;
-        let mut extra_fx_char = false;
-
-        if draw_rand_char_at_end && max_length_remaining == 1 {
-            letter = hud_iw4::font_get_random_letter(seed);
-            fade_alpha = hud_iw4::FX_TYPING_LETTER_ALPHA;
-            if hud_iw4::rand_with_seed(&mut seed) % 2 != 0 {
-                letter = hud_iw4::FX_EXTRA_CHAR_LETTER;
-                extra_fx_char = true;
-            }
-        } else if decaying
-            && let Some(info) = hud_iw4::get_decaying_letter_info(
-                letter,
-                &mut seed,
-                decay_time_elapsed,
-                fx_birth_time,
-                fx_decay_duration,
-                (color[3] * 255.0) as u8,
-            )
-        {
-            skip_drawing = info.skip_drawing;
-            fade_alpha = info.alpha;
-            letter = info.letter;
-            extra_fx_char = info.draw_extra_fx_char;
-        }
-
-        let extra_index = extra_fx_char.then(|| {
-            let mut temp = seed;
-            hud_iw4::rand_with_seed(&mut temp)
-        });
-
-        if let Some(icon) = frame::ControllerIcon::from_char(c) {
-            let size = font.pixel_height as f32;
-            let (xy, st) = hud_iw4::draw_stretch_pic_corners(
-                cursor_x,
-                y - size * y_scale * 0.8,
-                size * x_scale,
-                size * y_scale,
-                0.0,
-                0.0,
-                1.0,
-                1.0,
-            );
-            let alpha = if decaying || (draw_rand_char_at_end && max_length_remaining == 1) {
-                f32::from(hud_iw4::modulate_byte_colors(
-                    (color[3] * 255.0) as u8,
-                    fade_alpha,
-                )) / 255.0
-            } else {
-                color[3]
-            };
-            if !skip_drawing {
-                out.push(Draw2dQuad {
-                    xy,
-                    st,
-                    color: [1.0, 1.0, 1.0, alpha],
-                    material: icon.material().to_owned(),
-                    material_namespace,
-                    provenance: provenance.clone(),
-                    layer,
-                    clip,
-                });
-            }
-            cursor_x += size * x_scale;
-            max_length_remaining = max_length_remaining.saturating_sub(1);
-            continue;
-        }
-
-        let Some(glyph) = font.glyph(letter) else {
-            continue;
-        };
-
-        let (decay_offset, advance) = if letter == orig_letter {
-            (0.0, glyph.dx)
-        } else {
-            match font.glyph(orig_letter) {
-                Some(orig) => (
-                    f32::from(orig.pixel_width) * 0.5 - f32::from(glyph.pixel_width) * 0.5,
-                    orig.dx,
-                ),
-                None => (0.0, glyph.dx),
-            }
-        };
-        let mut letter_color = color;
-        if decaying || (draw_rand_char_at_end && max_length_remaining == 1) {
-            letter_color[3] = f32::from(hud_iw4::modulate_byte_colors(
-                (color[3] * 255.0) as u8,
-                fade_alpha,
-            )) / 255.0;
-        }
-        if !skip_drawing {
-            let gx = cursor_x + (f32::from(glyph.x0) + decay_offset) * x_scale;
-            let gy = y + f32::from(glyph.y0) * y_scale;
-            let gw = f32::from(glyph.pixel_width) * x_scale;
-            let gh = f32::from(glyph.pixel_height) * y_scale;
-            let (quad_material, s0, t0, s1, t1) = match extra_index {
-                Some(index) => {
-                    let (s0, s1) = hud_iw4::decode_fx_char_st(index);
-                    (
-                        hud_iw4::DECODE_CHARACTERS_MATERIAL.to_owned(),
-                        s0,
-                        0.0,
-                        s1,
-                        1.0,
-                    )
+impl CmdHost {
+    fn text_run_quads(
+        &self,
+        font: &FontDef,
+        parsed: &hud_iw4::GfxCmdDrawText2D<'_>,
+        run_color: [f32; 4],
+        material: &str,
+        render_flags: u32,
+        fx: Option<TextRunFx>,
+    ) -> Vec<Draw2dQuad> {
+        let text = parsed.text;
+        let x = parsed.x;
+        let y = parsed.y;
+        let x_scale = parsed.x_scale;
+        let y_scale = parsed.y_scale;
+        let clip = self.clip;
+        let material_namespace = self.material_namespace;
+        let provenance = self.provenance.clone();
+        let layer = self.layer;
+        let mut max_length_remaining = i32::MAX;
+        let mut vars = None;
+        if let Some(fx) = fx {
+            match hud_iw4::setup_pulse_fx_vars(
+                hud_iw4::seh_print_strlen(text),
+                max_length_remaining,
+                fx.scene_time,
+                fx.fx,
+            ) {
+                None => return Vec::new(),
+                Some(v) => {
+                    max_length_remaining = v.max_length;
+                    vars = Some(v);
                 }
-                None => (material.to_owned(), glyph.s0, glyph.t0, glyph.s1, glyph.t1),
-            };
-            if let Some(size) = outline_size {
-                for [dx, dy] in hud_iw4::TEXT_OUTLINE_OFFSETS {
-                    let (xy, st) = hud_iw4::draw_stretch_pic_corners(
-                        gx + size * dx,
-                        gy + size * dy,
-                        gw,
-                        gh,
-                        s0,
-                        t0,
-                        s1,
-                        t1,
-                    );
-                    outline.push(Draw2dQuad {
+            }
+        }
+        let mut seed = vars.map_or(1, |v| v.rand_seed);
+        let draw_rand_char_at_end = vars.is_some_and(|v| v.draw_rand_char_at_end);
+        let decay_time_elapsed = vars.map_or(0, |v| v.decay_time_elapsed);
+        let fx_birth_time = fx.map_or(0, |f| f.fx.birth_time);
+        let fx_decay_duration = fx.map_or(0, |f| f.fx.decay_duration);
+
+        let decaying = vars.is_some_and(|v| v.decaying)
+            && hud_iw4::decay_tick_count(fx_decay_duration).is_some();
+
+        let shadow_offset = hud_iw4::text_drop_shadow_offset(render_flags);
+        let shadow_color = [0.0, 0.0, 0.0, run_color[3]];
+        let outline_size = hud_iw4::text_outline_size(render_flags);
+        // Every outline is drawn before any face glyph.
+        let mut outline = Vec::new();
+
+        let mut cursor_x = x;
+        let mut color = run_color;
+        let mut out = Vec::new();
+        let mut chars = text.chars().peekable();
+        while let Some(c) = chars.next() {
+            if max_length_remaining == 0 {
+                break;
+            }
+
+            if c == '^'
+                && let Some(n) = chars.peek().copied()
+                && n.is_ascii_digit()
+            {
+                chars.next();
+                let mut tint = hud_iw4::color_from_caret_digit(n);
+                tint[3] *= run_color[3];
+                color = tint;
+                continue;
+            }
+            let orig_letter = c as u32;
+            let mut letter = orig_letter;
+            let mut fade_alpha = 0u8;
+            let mut skip_drawing = false;
+            let mut extra_fx_char = false;
+
+            if draw_rand_char_at_end && max_length_remaining == 1 {
+                letter = hud_iw4::font_get_random_letter(seed);
+                fade_alpha = hud_iw4::FX_TYPING_LETTER_ALPHA;
+                if hud_iw4::rand_with_seed(&mut seed) % 2 != 0 {
+                    letter = hud_iw4::FX_EXTRA_CHAR_LETTER;
+                    extra_fx_char = true;
+                }
+            } else if decaying
+                && let Some(info) = hud_iw4::get_decaying_letter_info(
+                    letter,
+                    &mut seed,
+                    decay_time_elapsed,
+                    fx_birth_time,
+                    fx_decay_duration,
+                    (color[3] * 255.0) as u8,
+                )
+            {
+                skip_drawing = info.skip_drawing;
+                fade_alpha = info.alpha;
+                letter = info.letter;
+                extra_fx_char = info.draw_extra_fx_char;
+            }
+
+            let extra_index = extra_fx_char.then(|| {
+                let mut temp = seed;
+                hud_iw4::rand_with_seed(&mut temp)
+            });
+
+            if let Some(icon) = frame::ControllerIcon::from_char(c) {
+                let size = font.pixel_height as f32;
+                let (xy, st) = hud_iw4::draw_stretch_pic_corners(
+                    hud_iw4::AppliedRect {
+                        x: cursor_x,
+                        y: y - size * y_scale * 0.8,
+                        w: size * x_scale,
+                        h: size * y_scale,
+                    },
+                    hud_iw4::TextureWindow {
+                        min: [0.0, 0.0],
+                        max: [1.0, 1.0],
+                    },
+                );
+                let alpha = if decaying || (draw_rand_char_at_end && max_length_remaining == 1) {
+                    f32::from(hud_iw4::modulate_byte_colors(
+                        (color[3] * 255.0) as u8,
+                        fade_alpha,
+                    )) / 255.0
+                } else {
+                    color[3]
+                };
+                if !skip_drawing {
+                    out.push(Draw2dQuad {
                         xy,
                         st,
-                        color: shadow_color,
+                        color: [1.0, 1.0, 1.0, alpha],
+                        material: icon.material().to_owned(),
+                        material_namespace,
+                        provenance: provenance.clone(),
+                        layer,
+                        clip,
+                    });
+                }
+                cursor_x += size * x_scale;
+                max_length_remaining = max_length_remaining.saturating_sub(1);
+                continue;
+            }
+
+            let Some(glyph) = font.glyph(letter) else {
+                continue;
+            };
+
+            let (decay_offset, advance) = if letter == orig_letter {
+                (0.0, glyph.dx)
+            } else {
+                match font.glyph(orig_letter) {
+                    Some(orig) => (
+                        f32::from(orig.pixel_width) * 0.5 - f32::from(glyph.pixel_width) * 0.5,
+                        orig.dx,
+                    ),
+                    None => (0.0, glyph.dx),
+                }
+            };
+            let mut letter_color = color;
+            if decaying || (draw_rand_char_at_end && max_length_remaining == 1) {
+                letter_color[3] = f32::from(hud_iw4::modulate_byte_colors(
+                    (color[3] * 255.0) as u8,
+                    fade_alpha,
+                )) / 255.0;
+            }
+            if !skip_drawing {
+                let gx = cursor_x + (f32::from(glyph.x0) + decay_offset) * x_scale;
+                let gy = y + f32::from(glyph.y0) * y_scale;
+                let gw = f32::from(glyph.pixel_width) * x_scale;
+                let gh = f32::from(glyph.pixel_height) * y_scale;
+                let (quad_material, s0, t0, s1, t1) = match extra_index {
+                    Some(index) => {
+                        let (s0, s1) = hud_iw4::decode_fx_char_st(index);
+                        (
+                            hud_iw4::DECODE_CHARACTERS_MATERIAL.to_owned(),
+                            s0,
+                            0.0,
+                            s1,
+                            1.0,
+                        )
+                    }
+                    None => (material.to_owned(), glyph.s0, glyph.t0, glyph.s1, glyph.t1),
+                };
+                if let Some(size) = outline_size {
+                    for [dx, dy] in hud_iw4::TEXT_OUTLINE_OFFSETS {
+                        let (xy, st) = hud_iw4::draw_stretch_pic_corners(
+                            hud_iw4::AppliedRect {
+                                x: gx + size * dx,
+                                y: gy + size * dy,
+                                w: gw,
+                                h: gh,
+                            },
+                            hud_iw4::TextureWindow {
+                                min: [s0, t0],
+                                max: [s1, t1],
+                            },
+                        );
+                        outline.push(Draw2dQuad {
+                            xy,
+                            st,
+                            color: shadow_color,
+                            material: quad_material.clone(),
+                            material_namespace,
+                            provenance: provenance.clone(),
+                            layer,
+                            clip,
+                        });
+                    }
+                }
+                if let Some(off) = shadow_offset {
+                    let (xy, st) = hud_iw4::draw_stretch_pic_corners(
+                        hud_iw4::AppliedRect {
+                            x: gx + off,
+                            y: gy + off,
+                            w: gw,
+                            h: gh,
+                        },
+                        hud_iw4::TextureWindow {
+                            min: [s0, t0],
+                            max: [s1, t1],
+                        },
+                    );
+                    out.push(Draw2dQuad {
+                        xy,
+                        st,
+
+                        color: if extra_index.is_some() {
+                            letter_color
+                        } else {
+                            shadow_color
+                        },
                         material: quad_material.clone(),
                         material_namespace,
                         provenance: provenance.clone(),
@@ -748,43 +777,35 @@ fn text_run_quads(
                         clip,
                     });
                 }
-            }
-            if let Some(off) = shadow_offset {
-                let (xy, st) =
-                    hud_iw4::draw_stretch_pic_corners(gx + off, gy + off, gw, gh, s0, t0, s1, t1);
+                let (xy, st) = hud_iw4::draw_stretch_pic_corners(
+                    hud_iw4::AppliedRect {
+                        x: gx,
+                        y: gy,
+                        w: gw,
+                        h: gh,
+                    },
+                    hud_iw4::TextureWindow {
+                        min: [s0, t0],
+                        max: [s1, t1],
+                    },
+                );
                 out.push(Draw2dQuad {
                     xy,
                     st,
-
-                    color: if extra_index.is_some() {
-                        letter_color
-                    } else {
-                        shadow_color
-                    },
-                    material: quad_material.clone(),
+                    color: letter_color,
+                    material: quad_material,
                     material_namespace,
                     provenance: provenance.clone(),
                     layer,
                     clip,
                 });
             }
-            let (xy, st) = hud_iw4::draw_stretch_pic_corners(gx, gy, gw, gh, s0, t0, s1, t1);
-            out.push(Draw2dQuad {
-                xy,
-                st,
-                color: letter_color,
-                material: quad_material,
-                material_namespace,
-                provenance: provenance.clone(),
-                layer,
-                clip,
-            });
+            cursor_x += f32::from(advance) * x_scale;
+            max_length_remaining = max_length_remaining.saturating_sub(1);
         }
-        cursor_x += f32::from(advance) * x_scale;
-        max_length_remaining = max_length_remaining.saturating_sub(1);
+        outline.extend(out);
+        outline
     }
-    outline.extend(out);
-    outline
 }
 
 fn quad_from_cmd(cmd: &Draw2dCmd, clip: Option<[f32; 4]>) -> Draw2dQuad {

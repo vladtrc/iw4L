@@ -19,6 +19,7 @@ const RETIRED: u8 = 2;
 pub enum AudioScope {
     Menu,
     Match,
+    MatchMusic,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,7 +38,6 @@ pub enum InstanceStatus {
 pub(crate) struct InstanceState {
     pub id: u64,
     pub scope: AudioScope,
-    pub epoch: u64,
     pub stopped: AtomicBool,
     pub finish_attack: AtomicBool,
     pub paused: AtomicBool,
@@ -141,20 +141,39 @@ struct Cursor {
     voice: RenderVoiceId,
     position: f64,
     gains: [crate::media::GainEnvelope; 3],
+    eq: crate::eq::VoiceEq,
 }
 
 struct RenderState {
+    slaves: crate::master::SlaveMixer,
     cursors: [Cursor; PHYSICAL_VOICES],
     buses: crate::mix_bus::MixBuses,
     limiter: crate::mix_bus::MasterLimiter,
+    room: crate::room_dsp::RoomProcessor,
+    room_target: crate::room_mix::RoomTarget,
+    room_active: bool,
+    eq_target: crate::eq::EqTarget,
+    eq_revision: u64,
+}
+
+/// The mix taken off the device for an offline capture. While armed the device
+/// plays silence, and the control thread renders up to `target` and keeps the
+/// blocks here, so the mix advances by the capturer's clock, not the wall's.
+#[derive(Default)]
+pub(crate) struct CaptureTap {
+    pub armed: AtomicBool,
+    pub target: AtomicU64,
+    pub samples: Mutex<Vec<[f32; 2]>>,
 }
 
 pub(crate) struct RenderShared {
     slots: [Slot; PHYSICAL_VOICES],
     rendering: AtomicBool,
     state: UnsafeCell<RenderState>,
+    pub room: crate::room_mix::RoomControl,
+    pub eq: crate::eq::EqControl,
+    pub slaves: crate::master::SlaveControl,
     pub frame: AtomicU64,
-    pub presentation_epoch: AtomicU64,
     pub match_paused: AtomicBool,
     pub master: AtomicU32,
     pub busy_blocks: AtomicU64,
@@ -166,6 +185,7 @@ pub(crate) struct RenderShared {
     pub device_underruns: AtomicU64,
     pub cancelled: AtomicBool,
     pub peak: AtomicU32,
+    pub capture: CaptureTap,
     pub(crate) stream: Arc<Mutex<Option<Arc<StreamRing>>>>,
 }
 
@@ -182,21 +202,36 @@ impl Drop for RenderLease<'_> {
 }
 
 impl RenderShared {
+    pub fn synchronize(&self) {
+        while self.rendering.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             slots: std::array::from_fn(|_| Slot::new()),
             rendering: AtomicBool::new(false),
             state: UnsafeCell::new(RenderState {
+                slaves: Default::default(),
                 cursors: [Cursor {
                     voice: RenderVoiceId(0),
                     position: 0.0,
                     gains: [crate::media::GainEnvelope::default(); 3],
+                    eq: Default::default(),
                 }; PHYSICAL_VOICES],
                 buses: Default::default(),
                 limiter: Default::default(),
+                room: Default::default(),
+                room_target: Default::default(),
+                room_active: false,
+                eq_target: Default::default(),
+                eq_revision: 0,
             }),
+            room: Default::default(),
+            eq: Default::default(),
+            slaves: Default::default(),
             frame: AtomicU64::new(0),
-            presentation_epoch: AtomicU64::new(0),
             match_paused: AtomicBool::new(false),
             master: AtomicU32::new(1.0f32.to_bits()),
             busy_blocks: AtomicU64::new(0),
@@ -208,6 +243,7 @@ impl RenderShared {
             device_underruns: AtomicU64::new(0),
             cancelled: AtomicBool::new(false),
             peak: AtomicU32::new(0),
+            capture: CaptureTap::default(),
             stream: Arc::default(),
         }
     }
@@ -233,10 +269,60 @@ impl RenderShared {
         // The lease is held until every reference to this state has expired.
         let state = unsafe { &mut *self.state.get() };
         let frame = self.frame.load(Ordering::Relaxed);
-        let epoch = self.presentation_epoch.load(Ordering::Acquire);
+        let old = state.room_target;
+        self.room.read(&mut state.room_target);
+        if old.epoch != state.room_target.epoch {
+            state.room.clear();
+            state.room_active = false;
+        }
+        if old.epoch != state.room_target.epoch || old.room != state.room_target.room {
+            state.room.set_room(state.room_target.room);
+        }
+        let room_block = crate::room_mix::RoomBlock::new(state.room_target, frame);
+        let eq_epoch = state.eq_target.epoch;
+        self.eq.read(&mut state.eq_revision, &mut state.eq_target);
+        if state.eq_target.epoch != eq_epoch {
+            for cursor in &mut state.cursors {
+                cursor.eq = Default::default();
+            }
+        }
         let cancelled = self.cancelled.load(Ordering::Acquire);
         let match_paused = self.match_paused.load(Ordering::Acquire);
         let hold_one_shots = device == Some(false) && self.device_required.load(Ordering::Relaxed);
+        let mut master_active = false;
+        let mut master_percentage = 0.0f32;
+        for slot in &self.slots {
+            if slot.phase.load(Ordering::Acquire) != PUBLISHED {
+                continue;
+            }
+            let assignment = unsafe { (&*slot.assignment.get()).as_ref().unwrap() };
+            let instance = &assignment.instance;
+            let Some(voice) = assignment.media.master_slave.filter(|voice| voice.master) else {
+                continue;
+            };
+            if cancelled
+                || instance.scope == AudioScope::Menu
+                || (match_paused && instance.scope == AudioScope::Match)
+                || instance.stopped.load(Ordering::Acquire)
+                || !instance.audible.load(Ordering::Acquire)
+                || frame < assignment.start_frame
+                || (hold_one_shots && !assignment.looping)
+                || assignment.media.release.as_ref().is_some_and(|release| {
+                    release.expired(frame)
+                        || (release.requested() && !instance.has_reached(InstanceStatus::Started))
+                })
+            {
+                continue;
+            }
+            master_active = true;
+            master_percentage = master_percentage.max(voice.master_percentage);
+        }
+        state.slaves.advance(
+            master_active,
+            master_percentage,
+            QUANTUM as u64,
+            &self.slaves,
+        );
         for (index, slot) in self.slots.iter().enumerate() {
             if slot.phase.load(Ordering::Acquire) != PUBLISHED {
                 continue;
@@ -248,11 +334,15 @@ impl RenderShared {
                     assignment,
                     &mut state.cursors[index],
                     frame,
-                    epoch,
                     cancelled,
                     hold_one_shots,
-                    match_paused,
                     state.buses.bus(assignment.media.bus),
+                    &RenderMix {
+                        room: &room_block,
+                        eq: &state.eq_target,
+                        slaves: &state.slaves,
+                        match_paused,
+                    },
                 );
                 match device {
                     Some(true) => {
@@ -288,7 +378,15 @@ impl RenderShared {
                 slot.phase.store(RETIRED, Ordering::Release);
             }
         }
-        state.buses.mix_into(output);
+        let mut sends = [[0.0; 2]; QUANTUM];
+        state.buses.mix_into(output, &mut sends);
+        state.room_active |= sends.iter().flatten().any(|v| *v != 0.0);
+        if state.room_active {
+            for (target, wet) in output.iter_mut().zip(state.room.process_block(&sends)) {
+                target[0] += wet[0];
+                target[1] += wet[1];
+            }
+        }
         if let Ok(stream) = self.stream.try_lock()
             && let Some(ring) = stream.as_ref()
         {
@@ -319,21 +417,23 @@ impl RenderShared {
         true
     }
 
-    // These operations require the sole control owner, including in offline use.
-    pub unsafe fn publish(&self, assignment: Assignment) -> Result<usize, Assignment> {
-        let Some(index) = self
+    /// # Safety
+    /// The caller must be the sole control owner of this `RenderShared`.
+    /// Calls to `publish` and `reclaim` must not overlap, including across threads.
+    pub unsafe fn publish(&self, assignment: Assignment) -> Option<usize> {
+        let index = self
             .slots
             .iter()
-            .position(|slot| slot.phase.load(Ordering::Acquire) == FREE)
-        else {
-            return Err(assignment);
-        };
+            .position(|slot| slot.phase.load(Ordering::Acquire) == FREE)?;
         let slot = &self.slots[index];
         unsafe { *slot.assignment.get() = Some(assignment) };
         slot.phase.store(PUBLISHED, Ordering::Release);
-        Ok(index)
+        Some(index)
     }
 
+    /// # Safety
+    /// The caller must be the sole control owner of this `RenderShared`.
+    /// Calls to `publish` and `reclaim` must not overlap, including across threads.
     pub unsafe fn reclaim(&self, index: usize) -> Option<Assignment> {
         let slot = self.slots.get(index)?;
         if slot.phase.load(Ordering::Acquire) != RETIRED {
@@ -345,20 +445,27 @@ impl RenderShared {
     }
 }
 
+struct RenderMix<'a> {
+    room: &'a crate::room_mix::RoomBlock,
+    eq: &'a crate::eq::EqTarget,
+    slaves: &'a crate::master::SlaveMixer,
+    match_paused: bool,
+}
+
 fn render_assignment(
     assignment: &Assignment,
     cursor: &mut Cursor,
     frame: u64,
-    epoch: u64,
     cancelled: bool,
     hold_one_shots: bool,
-    match_paused: bool,
-    output: &mut [[f32; 2]; QUANTUM],
+    (output, sends): (&mut [[f32; 2]; QUANTUM], &mut [[f32; 2]; QUANTUM]),
+    mix: &RenderMix<'_>,
 ) -> (bool, usize) {
+    let room = mix.room;
+    let eq = mix.eq;
     let instance = &assignment.instance;
     if cancelled
         || instance.stopped.load(Ordering::Acquire)
-        || (instance.scope == AudioScope::Match && instance.epoch != epoch)
         || assignment.media.release.as_ref().is_some_and(|release| {
             release.expired(frame)
                 || (release.requested() && !instance.has_reached(InstanceStatus::Started))
@@ -367,19 +474,24 @@ fn render_assignment(
         instance.set_status(InstanceStatus::Finished);
         return (true, 0);
     }
-    if hold_one_shots && !assignment.looping || match_paused && instance.scope == AudioScope::Match
-    {
+    let match_paused = mix.match_paused && instance.scope == AudioScope::Match;
+    if hold_one_shots && !assignment.looping {
         return (false, 0);
     }
-    let rate = f32::from_bits(instance.rate.load(Ordering::Relaxed));
+    let rate = f32::from_bits(instance.rate.load(Ordering::Relaxed))
+        * assignment.media.playback_rate_scale();
     let step = f64::from(assignment.media.rate()) / f64::from(SAMPLE_RATE) * f64::from(rate);
     if cursor.voice != assignment.voice {
         cursor.voice = assignment.voice;
         cursor.position = assignment.start_cursor;
         cursor.gains = [crate::media::GainEnvelope::default(); 3];
-        if assignment.looping && !instance.paused.load(Ordering::Relaxed) {
+        cursor.eq = Default::default();
+        if assignment.looping && !instance.paused.load(Ordering::Relaxed) && !match_paused {
             cursor.position += frame.saturating_sub(assignment.start_frame) as f64 * step;
         }
+    }
+    if match_paused {
+        return (false, 0);
     }
     if !instance.audible.load(Ordering::Acquire) {
         instance
@@ -400,9 +512,20 @@ fn render_assignment(
         return (false, 0);
     }
     instance.set_status(InstanceStatus::Started);
-    let gain = f32::from_bits(instance.gain.load(Ordering::Relaxed));
+    let slave_gain = if instance.scope == AudioScope::Menu {
+        1.0
+    } else {
+        assignment
+            .media
+            .master_slave
+            .map_or(1.0, |voice| voice.gain(mix.slaves))
+    };
+    let gain = f32::from_bits(instance.gain.load(Ordering::Relaxed)) * slave_gain;
     let frames = assignment.media.frames();
     let gains = assignment.media.gains(&mut cursor.gains);
+    let use_eq = eq.enabled
+        && instance.scope != AudioScope::Menu
+        && !eq.bypasses(assignment.media.eq_entity);
     let mut rendered = 0;
     for (offset, target) in output[first..].iter_mut().enumerate() {
         let audio_frame = frame + first as u64 + offset as u64;
@@ -430,12 +553,26 @@ fn render_assignment(
                 return (true, rendered);
             }
         }
-        let sample = assignment
+        let mut sample = assignment
             .media
             .interpolate(cursor.position, assignment.looping);
+        if use_eq && let Some(channel) = assignment.media.eq_channel {
+            sample = cursor
+                .eq
+                .process(eq.channels[usize::from(channel)], eq.fraction, sample);
+        }
         let gains = gains.sample(audio_frame);
-        target[0] += sample[0] * gain * gains[0];
-        target[1] += sample[1] * gain * gains[1];
+        let routing = (instance.scope != AudioScope::Menu)
+            .then_some(assignment.media.room)
+            .flatten();
+        let routed = routing.map_or([1.0, 0.0], |voice| {
+            voice.gains(room.levels[first + offset], room.enabled)
+        });
+        for side in 0..2 {
+            let sample = sample[side] * gain * gains[side];
+            target[side] += sample * routed[0];
+            sends[first + offset][side] += sample * routed[1];
+        }
         cursor.position += step;
         rendered += 1;
     }

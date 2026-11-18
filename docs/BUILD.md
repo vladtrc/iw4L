@@ -36,7 +36,7 @@ and the `x11` / `wayland` features compile to nothing. Menu and
 is pipelined with a frame latency of 2 there; `IW4L_PIPELINED_RENDERING=0` and
 `IW4L_FRAME_LATENCY=1` restore the serialised arm.
 Game data: the Windows depot of a Steam copy, `steamcmd
-+@sSteamCmdForcePlatformType windows +force_install_dir ~/Games/MW2 +login
++@sSteamCmdForcePlatformType windows +force_install_dir ~/Games/iw4 +login
 <user> +app_update 10190 +quit`, then `IW4L_GAMES=~/Games`.
 
 Then follow `README.md` (Build and run): copy `.env.example`, set

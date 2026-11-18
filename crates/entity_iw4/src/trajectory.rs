@@ -10,9 +10,12 @@ pub const TR_GRAVITY: i32 = 5;
 
 const TRAJECTORY_MSEC_TO_SEC: f32 = 0.001;
 
-const TRAJECTORY_GRAVITY: f32 = 400.0;
+/// Acceleration in world units per second squared for gravity trajectories.
+pub const GRAVITY_ACCELERATION: f32 = 800.0;
 
-const TRAJECTORY_GRAVITY_DELTA: f32 = 800.0;
+const TRAJECTORY_GRAVITY: f32 = GRAVITY_ACCELERATION * 0.5;
+
+const TRAJECTORY_GRAVITY_DELTA: f32 = GRAVITY_ACCELERATION;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Trajectory {

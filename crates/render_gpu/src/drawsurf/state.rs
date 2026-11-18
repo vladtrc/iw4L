@@ -133,11 +133,7 @@ impl GfxPassState {
     pub fn unsupported_host_fields(self) -> Option<UnsupportedStateFields> {
         self.0.unsupported_host_fields()
     }
-    pub fn apply_change_state_0_host(
-        self,
-        _alpha_mode: bevy::prelude::AlphaMode,
-        multiply_pass: bool,
-    ) -> ChangeState0Host {
+    pub fn apply_change_state_0_host(self, multiply_pass: bool) -> ChangeState0Host {
         ChangeState0Host {
             blend: DrawBlend(self.0.blend(multiply_pass)),
             cull: self.0.cull(),

@@ -47,7 +47,7 @@ are named here because the reading happened, not because anything of theirs is
 distributed: none of them is vendored, linked, bundled or otherwise shipped.
 
 OpenAssetTools — https://github.com/Laupetin/OpenAssetTools
-  Open-source modding tools for older Call of Duty games. Its asset-structure
+  Open-source modding tools for IW and T-series game formats. Its asset-structure
   headers document the on-disk layouts IW4L reads. Licensed under GPLv3.
 
 oat (iw4x-x64 fork of OpenAssetTools) — https://github.com/iw4x-x64/oat
@@ -57,17 +57,17 @@ oat (iw4x-x64 fork of OpenAssetTools) — https://github.com/iw4x-x64/oat
   compiled against, generated from or distributed with those headers.
 
 IW4x — https://github.com/iw4x/iw4x-client
-  A custom client for Call of Duty: Modern Warfare 2 (2009), with dedicated
+  An IW4-compatible custom client, with dedicated
   servers, security fixes and modding support. Read as a cross-reference for
   asset and protocol behaviour. Licensed under GPLv3.
 
 KisakCOD — https://github.com/SwagSoftware/KisakCOD
-  A Call of Duty 4 open-source reimplementation. Read as a cross-reference for
+  An IW3-compatible open-source reimplementation. Read as a cross-reference for
   engine structure. IW4L targets IW4, so this is a neighbouring generation of
   the same engine family, not the same codebase.
 
 t6-scripts (Plutonium) — https://github.com/plutoniummod/t6-scripts
-  Decompiled Black Ops II multiplayer scripts. Read for how Black Ops II
+  Decompiled T6 multiplayer scripts. Read for how T6
   equipment behaves (Bouncing Betty, Shock Charge, Trophy System, Sensor
   Grenade, EMP Grenade, C4, Tactical Insertion) and for its constants. IW4L's
   `crates/assets/src/t6_equipment.gsc.txt` is written for IW4L, not copied
@@ -91,8 +91,8 @@ OxideAV WMA — https://github.com/OxideAV/oxideav-wma
 Game content
 --------------------------------------------------------------------------------
 
-No Call of Duty game data is contained in this repository or in any IW4L
-release archive. IW4L reads game data from a copy of the game the user already
-owns and has installed. Call of Duty, Modern Warfare, Black Ops, related
-trademarks and all original game assets belong to their respective owners.
+No original game data is contained in this repository or in any IW4L
+release archive. IW4L reads compatible game data from an installation the user
+already owns. All original game assets and related trademarks belong to their
+respective owners.
 IW4L is not affiliated with, endorsed by or supported by them.

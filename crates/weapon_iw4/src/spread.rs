@@ -151,16 +151,27 @@ pub fn add_aim_spread_fire(aim_spread_scale: &mut f32, f_weapon_pos_frac: f32, f
     *aim_spread_scale = v;
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AimSpreadPosture {
+    pub ground_entity_num: i32,
+    pub pm_type: i32,
+    pub e_flags: u32,
+    pub weapon_pos_frac: f32,
+}
+
 pub fn adjust_aim_spread_scale(
     state: &mut AimSpreadState,
     weap: &WeaponSpreadFacts,
     decay: &WeaponAimSpreadDecayFacts,
-    ground_entity_num: i32,
-    pm_type: i32,
-    e_flags: u32,
-    f_weapon_pos_frac: f32,
+    posture: AimSpreadPosture,
     motion: &AimSpreadMotion,
 ) {
+    let AimSpreadPosture {
+        ground_entity_num,
+        pm_type,
+        e_flags,
+        weapon_pos_frac: f_weapon_pos_frac,
+    } = posture;
     let airborne =
         ground_entity_num == playerstate_iw4::ENTITYNUM_NONE && pm_type != PM_TYPE_NORMAL_LINKED;
 

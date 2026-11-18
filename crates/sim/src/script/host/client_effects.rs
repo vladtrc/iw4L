@@ -53,28 +53,96 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
     );
     vision_channel!("visionsetnight", "visionsetnightforplayer", night_vision);
     vision_channel!("visionsetpain", "visionsetpainforplayer", pain_vision);
-    registry.register(Method, "setblurforplayer", |world, receiver, args| {
-        let client = player(world, receiver)?;
-        let to = float(args, 0)?;
-        let seconds = optional(args, 1, float)?.unwrap_or(0.0);
-        if args.len() > 2 || !to.is_finite() || to < 0.0 || !seconds.is_finite() || seconds < 0.0 {
-            return Err("setBlurForPlayer requires a nonnegative blur and transition time".into());
+    registry.register(Function, "setblur", |world, _, args| {
+        if world.resource::<RoundScript>().profile != asset_core::RuntimeProfile::Campaign {
+            return Err("setBlur requires the campaign native contract".into());
         }
-        blur(world, client, to, (seconds * 1000.0).round() as i32);
+        let (to, duration_ms) = campaign_blur(args)?;
+        let now = crate::level_time_ms(world.resource::<crate::step::StepRequest>().tick);
+        let mut frame = FrameWorld::from_world(world);
+        for client in frame.client_ids_sorted() {
+            change_blur(
+                &mut frame.client_meta_mut(client).view_effects,
+                now,
+                to,
+                duration_ms,
+            );
+        }
         Ok(Value::Undefined)
     });
-    registry.register(Function, "setblur", |world, _, args| {
-        let to = float(args, 0)?;
-        let seconds = float(args, 1)?;
-        if !to.is_finite() || to < 0.0 || !seconds.is_finite() || seconds < 0.0 {
-            return Err("setBlur requires a nonnegative blur and transition time".into());
-        }
-        for client in FrameWorld::from_world(world).client_ids_sorted() {
-            blur(world, client.0, to, (seconds * 1000.0).round() as i32);
-        }
+    registry.register(Method, "setblurforplayer", |world, receiver, args| {
+        let client = player(world, receiver)?;
+        let (to, duration_ms) =
+            if world.resource::<RoundScript>().profile == asset_core::RuntimeProfile::Campaign {
+                campaign_blur(args)?
+            } else {
+                let to = float(args, 0)?;
+                let seconds = optional(args, 1, float)?.unwrap_or(0.0);
+                if args.len() > 2
+                    || !to.is_finite()
+                    || to < 0.0
+                    || !seconds.is_finite()
+                    || seconds < 0.0
+                {
+                    return Err(
+                        "setBlurForPlayer requires a nonnegative blur and transition time".into(),
+                    );
+                }
+                (to, (seconds * 1000.0).round() as i32)
+            };
+        let now = crate::level_time_ms(world.resource::<crate::step::StepRequest>().tick);
+        edit_view(world, client, |view| {
+            change_blur(view, now, to, duration_ms)
+        });
         Ok(Value::Undefined)
     });
     super::rumble::register(registry);
+}
+
+pub(crate) fn register_iw4(registry: &mut NativeRegistry) {
+    registry.register(Method, "setwatersheeting", |world, receiver, args| {
+        let client = player(world, receiver)?;
+        if world.resource::<RoundScript>().profile != asset_core::RuntimeProfile::Campaign {
+            return Err("setWaterSheeting requires the campaign native contract".into());
+        }
+        let mode = super::args::int(args, 0)?;
+        let duration_ms = if args.len() == 2 {
+            let seconds = float(args, 1)?;
+            let milliseconds = seconds * 1000.0;
+            if !milliseconds.is_finite()
+                || !(i32::MIN as f32..i32::MAX as f32).contains(&milliseconds)
+            {
+                return Err("water sheeting duration is outside the millisecond range".into());
+            }
+            milliseconds as i32
+        } else {
+            0
+        };
+        let now = crate::level_time_ms(world.resource::<crate::step::StepRequest>().tick);
+        edit_view(world, client, |view| {
+            view.water_sheeting =
+                (mode != 0).then(|| crate::ScriptWaterSheeting::new(now, duration_ms));
+        });
+        Ok(Value::Undefined)
+    });
+}
+
+fn campaign_blur(args: &[Value]) -> Result<(f32, i32), String> {
+    let to = float(args, 0)?;
+    let seconds = float(args, 1)?;
+    if !to.is_finite() || to < 0.0 || !seconds.is_finite() || seconds < 0.0 {
+        return Err("setBlur requires a nonnegative blur and transition time".into());
+    }
+    Ok((to, (seconds * 1000.0) as i32))
+}
+
+fn change_blur(view: &mut crate::ViewEffects, now: i32, to: f32, duration_ms: i32) {
+    view.blur = Some(crate::ScriptBlur {
+        from: view.blur.map_or(0.0, |blur| blur.sample(now)),
+        to,
+        set_ms: now,
+        duration_ms,
+    });
 }
 
 fn local_sound(
@@ -156,18 +224,6 @@ fn depth_of_field(args: &[Value]) -> Result<crate::ScriptDepthOfField, String> {
         near_blur,
         far_blur,
     })
-}
-
-pub(crate) fn blur(world: &mut World, client: u32, to: f32, duration_ms: i32) {
-    let now = crate::level_time_ms(world.resource::<crate::step::StepRequest>().tick);
-    edit_view(world, client, |view| {
-        view.blur = Some(crate::ScriptBlur {
-            from: view.blur.map_or(0.0, |blur| blur.sample(now)),
-            to,
-            set_ms: now,
-            duration_ms,
-        });
-    });
 }
 
 fn edit_view(world: &mut World, client: u32, edit: impl FnOnce(&mut crate::ViewEffects)) {

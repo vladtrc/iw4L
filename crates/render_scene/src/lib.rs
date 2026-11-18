@@ -1,8 +1,11 @@
+mod prepare_status;
+pub use prepare_status::{SkinFailure, WorldPresentAck};
 mod skin_support;
 pub use skin_support::SkinSupport;
 pub mod camera;
 pub mod dpvs_cells;
 pub mod dyn_atpoint;
+pub mod film;
 pub mod frustum;
 pub mod gfx_scene;
 pub mod host;
@@ -16,9 +19,10 @@ pub mod world_instances;
 pub mod xmodel_draw;
 
 pub use camera::{
-    CameraView, FlyCamera, FpvLens, SimCamera, WorldCameraPose, transform_from_iw_view,
+    CameraView, CameraWorld, FlyCamera, FpvLens, SimCamera, WorldCameraPose, place_simulation_pose,
+    place_simulation_transform, transform_from_iw_view,
 };
-pub use dpvs_cells::{DynEntModelEntity, PublishedCellVis, WorldDpvsCells};
+pub use dpvs_cells::{DynEntModelEntity, PublishedCellView, PublishedCellVis, WorldDpvsCells};
 pub use dyn_atpoint::DynAtPointLookup;
 pub use frustum::{FrustumSpec, clip_from_world_frustum_planes, perspective_frustum_planes};
 pub use gfx_scene::{
@@ -47,15 +51,18 @@ pub use model_lighting_atlas::{
 pub use plugin::RenderScenePlugin;
 pub use present::{TessMaterials, WorldPresentFacts};
 pub use smodel::{
-    AuthoredMaps, LodRampArgs, LodRampSkinnedDvar, SmodelPassMaterial, runtime_cull_face,
-    runtime_maps, smodel_camera_lod,
+    AuthoredMaps, FamilyLodView, LodRampArgs, LodRampSkinnedDvar, LodViewKey, LodViewProfiles,
+    SmodelPassMaterial, runtime_cull_face, runtime_maps, smodel_camera_lod,
 };
 pub use view_parms::{
     LockPvsView, PreparedSceneView, RLockPvs, RSubwindowDvar, RZnearDepthhackDvar, RZnearDvar,
-    SmEnableDvar, SmSunEnableDvar, host_clip_from_view, lens_world_from_parent_child,
-    pack_live_view_parms, prepare_scene_view,
+    SceneViewProjection, SceneViewTarget, SmEnableDvar, SmSunEnableDvar, host_clip_from_view,
+    lens_world_from_parent_child, pack_live_view_parms, prepare_scene_view,
 };
 pub use world_instances::{WorldDynEntInstance, WorldScriptModelInstance};
 pub use xmodel_draw::{
     PreparedSunShadowFrame, XModelCasterBound, XModelColourRefusal, XModelSurfaceDraw,
 };
+
+#[derive(bevy::prelude::Resource, Default)]
+pub struct PortalRenderControls(pub render_frame::portal_plan::PortalRenderSettings);

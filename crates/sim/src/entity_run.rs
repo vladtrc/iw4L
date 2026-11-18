@@ -140,20 +140,14 @@ fn think_script_mover(world: &mut FrameWorld, tick: Tick, entity: crate::EntityR
     if view.relations.parent.is_some() {
         think_parent_link(world, time_ms, entity);
         think_scheduled_or_refuse(world, entity);
-        return;
     }
     let at_time = i32::try_from(tick.0.saturating_mul(crate::MATCH_TICK_MS)).unwrap_or(i32::MAX);
     let Some(mover) = world.script_mover_by_number(entity.number()) else {
         return;
     };
-    let apos = apos_from_entity_state(&mover.state);
-    for capabilities in world.entity_collision_capabilities_mut() {
-        if capabilities.owner.script_model() != Some(mover.id) {
-            continue;
-        }
-        if let Some(dobj) = capabilities.dobj.as_mut() {
-            dobj.apply_trajectory_apos_at(apos, at_time);
-        }
+    let content = world.content();
+    if let Some(row) = world.collision_owner_mut(mover.id) {
+        crate::presence::follow_mover(row, &mover, at_time, &content);
     }
 }
 
@@ -222,7 +216,6 @@ fn apply_parent_link_pose(
 ) {
     match kind {
         EntityRunKind::ScriptMover | EntityRunKind::PrimaryLight => {
-            let mut linked_id = None;
             if let Some(mover) = world.script_mover_mut_by_number(number) {
                 parent_link_pose(&mut mover.state, origin, angles);
                 let snapped = snap_angles(angles);
@@ -232,18 +225,6 @@ fn apply_parent_link_pose(
                 let bounds = link_entity_world_bounds(origin, mover.box_mid, mover.box_half);
                 mover.link_mid = bounds.mid;
                 mover.link_half = bounds.half;
-                linked_id = Some(mover.id);
-            }
-            if let Some(id) = linked_id {
-                for capabilities in world.entity_collision_capabilities_mut() {
-                    if capabilities.owner.script_model() != Some(id) {
-                        continue;
-                    }
-                    for brush in &mut capabilities.linked_brushes {
-                        brush.origin = origin;
-                        brush.angles = angles;
-                    }
-                }
             }
         }
         EntityRunKind::Item => {

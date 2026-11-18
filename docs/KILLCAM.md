@@ -13,6 +13,7 @@ projectiles, script movers, combat events and script effects.
   receive killcam HUD metadata when no archived player state is available.
 - Projectile cameras keep their last position after impact. Reused entity
   slots cannot redirect the camera to another projectile or mover.
+  A projectile that rebounds away from its target resumes camera tracking.
 
 Sound event identities use archived ticks during replay, including entity-ring
 sounds and viewmodel animation markers. Repeated snapshots do not replay the

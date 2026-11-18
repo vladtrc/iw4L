@@ -109,7 +109,7 @@ pub fn cull_box_from_cone(
     sep -= (axis[0] * box_half[0]).abs();
     sep -= (axis[1] * box_half[1]).abs();
     sep -= (axis[2] * box_half[2]).abs();
-    !(sep < 0.0)
+    sep >= 0.0 || sep.is_nan()
 }
 
 pub fn cull_box_from_conic_section_of_sphere(
@@ -233,8 +233,8 @@ pub fn cull_point_from_light_region_hull(
     local: [f32; 3],
     extra: f32,
 ) -> bool {
-    for i in 0..3 {
-        if (local[i] - hull.kdop_mid[i]).abs() >= extra + hull.kdop_half[i] {
+    for (i, local_entry) in local[..3].iter().enumerate() {
+        if ((*local_entry) - hull.kdop_mid[i]).abs() >= extra + hull.kdop_half[i] {
             return true;
         }
     }

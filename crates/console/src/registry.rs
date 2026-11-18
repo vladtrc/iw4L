@@ -149,7 +149,7 @@ impl ConsoleRegistry {
         spec.args
             .get(arg_index)
             .map(|completer| completer.complete_with_context(prefix, &tokens[1..arg_index + 1]))
-            .unwrap_or_default()
+            .unwrap_or(Vec::new())
     }
 }
 

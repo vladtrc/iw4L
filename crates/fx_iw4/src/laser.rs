@@ -69,69 +69,87 @@ pub fn laser_point_on_ray(origin: [f32; 3], dir: [f32; 3], t: f32) -> [f32; 3] {
     ]
 }
 
-pub fn laser_post_light(
-    hit: bool,
-    light_dvar: bool,
-    param_4: i32,
-    origin: [f32; 3],
-    dir: [f32; 3],
-    begin_t: f32,
-    end_t: f32,
-    radius: f32,
-) -> Option<FxPostLight> {
-    if !hit || !laser_post_light_allows(light_dvar, param_4) {
-        return None;
-    }
-    let (begin_t, end_t) = laser_post_light_span(begin_t, end_t);
-    Some(FxPostLight {
-        begin: laser_point_on_ray(origin, dir, begin_t),
-        end: laser_point_on_ray(origin, dir, end_t),
-        radius,
-        color_packed: FX_LASER_POST_LIGHT_COLOR,
-        material_name: FX_LASER_POST_LIGHT_MATERIAL,
-    })
+#[derive(Clone, Copy, Debug)]
+pub struct FxLaserRay {
+    pub origin: [f32; 3],
+    pub direction: [f32; 3],
+    pub range: f32,
 }
 
-pub fn laser_from_tag_orientation(
-    origin: [f32; 3],
-    forward: [f32; 3],
-    view: [f32; 3],
-    range: f32,
-    begin_pad: f32,
-    end_nudge: f32,
-    light_dvar: bool,
-    param_4: i32,
-    width_dvar: f32,
-) -> Option<FxPostLight> {
-    let end = laser_point_on_ray(origin, forward, range);
-    let view_dist = crate::vec::vec3_distance(end, view);
-    laser_from_brush_trace(
-        false, 1.0, 0, origin, forward, range, begin_pad, end_nudge, 0.0, light_dvar, param_4,
-        width_dvar, view_dist,
-    )
+#[derive(Clone, Copy, Debug)]
+pub struct FxLaserTrace {
+    pub startsolid: bool,
+    pub fraction: f32,
+    pub contents: u32,
 }
 
-pub fn laser_from_brush_trace(
-    startsolid: bool,
-    fraction: f32,
-    contents: u32,
-    origin: [f32; 3],
-    dir: [f32; 3],
-    range: f32,
-    begin_pad: f32,
-    end_nudge: f32,
-    extra: f32,
-    light_dvar: bool,
-    param_4: i32,
-    width_dvar: f32,
-    view_dist: f32,
-) -> Option<FxPostLight> {
-    if !laser_brush_trace_allows(startsolid) {
-        return None;
+#[derive(Clone, Copy, Debug)]
+pub struct FxLaserLightSettings {
+    pub enabled: bool,
+    pub begin_pad: f32,
+    pub end_nudge: f32,
+    pub width: f32,
+}
+
+impl FxLaserRay {
+    pub fn post_light(
+        &self,
+        hit: bool,
+        enabled: bool,
+        begin_t: f32,
+        end_t: f32,
+        radius: f32,
+    ) -> Option<FxPostLight> {
+        if !hit || !enabled {
+            return None;
+        }
+        let (begin_t, end_t) = laser_post_light_span(begin_t, end_t);
+        Some(FxPostLight {
+            begin: laser_point_on_ray(self.origin, self.direction, begin_t),
+            end: laser_point_on_ray(self.origin, self.direction, end_t),
+            radius,
+            color_packed: FX_LASER_POST_LIGHT_COLOR,
+            material_name: FX_LASER_POST_LIGHT_MATERIAL,
+        })
     }
-    let end_t = laser_post_light_end_t(fraction, range, end_nudge, extra, contents);
-    let radius = laser_radius_from_dist(width_dvar, view_dist);
-    laser_post_light(
-        true, light_dvar, param_4, origin, dir, begin_pad, end_t, radius,
-    )
+
+    pub fn light_from_tag(
+        &self,
+        view: [f32; 3],
+        settings: FxLaserLightSettings,
+    ) -> Option<FxPostLight> {
+        let end = laser_point_on_ray(self.origin, self.direction, self.range);
+        let view_dist = crate::vec::vec3_distance(end, view);
+        self.light_from_brush_trace(
+            FxLaserTrace {
+                startsolid: false,
+                fraction: 1.0,
+                contents: 0,
+            },
+            settings,
+            0.0,
+            view_dist,
+        )
+    }
+
+    pub fn light_from_brush_trace(
+        &self,
+        trace: FxLaserTrace,
+        settings: FxLaserLightSettings,
+        extra: f32,
+        view_dist: f32,
+    ) -> Option<FxPostLight> {
+        if !laser_brush_trace_allows(trace.startsolid) {
+            return None;
+        }
+        let end_t = laser_post_light_end_t(
+            trace.fraction,
+            self.range,
+            settings.end_nudge,
+            extra,
+            trace.contents,
+        );
+        let radius = laser_radius_from_dist(settings.width, view_dist);
+        self.post_light(true, settings.enabled, settings.begin_pad, end_t, radius)
+    }
 }

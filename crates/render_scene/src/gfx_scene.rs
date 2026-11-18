@@ -386,22 +386,20 @@ impl GfxScene {
         quat: Option<[f32; 4]>,
     ) {
         let i = entnum as usize;
-        if let Some(&slot) = self.scene_dobj_index.get(i) {
-            if slot != SCENE_INDEX_EMPTY {
-                if let Some(dobj) = self.scene_dobjs.get_mut(usize::from(slot)) {
-                    dobj.origin = origin;
-                    dobj.quat = quat;
-                    return;
-                }
-            }
+        if let Some(&slot) = self.scene_dobj_index.get(i)
+            && slot != SCENE_INDEX_EMPTY
+            && let Some(dobj) = self.scene_dobjs.get_mut(usize::from(slot))
+        {
+            dobj.origin = origin;
+            dobj.quat = quat;
+            return;
         }
-        if let Some(&slot) = self.scene_model_index.get(i) {
-            if slot != SCENE_INDEX_EMPTY {
-                if let Some(model) = self.scene_models.get_mut(usize::from(slot)) {
-                    model.origin = origin;
-                    model.quat = quat;
-                }
-            }
+        if let Some(&slot) = self.scene_model_index.get(i)
+            && slot != SCENE_INDEX_EMPTY
+            && let Some(model) = self.scene_models.get_mut(usize::from(slot))
+        {
+            model.origin = origin;
+            model.quat = quat;
         }
     }
 
@@ -463,20 +461,18 @@ impl GfxScene {
 
     pub fn store_posed_bounds(&mut self, entnum: u32, bounds: dpvs_iw4::Bounds) {
         let i = entnum as usize;
-        if let Some(&slot) = self.scene_dobj_index.get(i) {
-            if slot != SCENE_INDEX_EMPTY {
-                if let Some(dobj) = self.scene_dobjs.get_mut(usize::from(slot)) {
-                    dobj.posed_bounds = Some(bounds);
-                    return;
-                }
-            }
+        if let Some(&slot) = self.scene_dobj_index.get(i)
+            && slot != SCENE_INDEX_EMPTY
+            && let Some(dobj) = self.scene_dobjs.get_mut(usize::from(slot))
+        {
+            dobj.posed_bounds = Some(bounds);
+            return;
         }
-        if let Some(&slot) = self.scene_model_index.get(i) {
-            if slot != SCENE_INDEX_EMPTY {
-                if let Some(model) = self.scene_models.get_mut(usize::from(slot)) {
-                    model.posed_bounds = Some(bounds);
-                }
-            }
+        if let Some(&slot) = self.scene_model_index.get(i)
+            && slot != SCENE_INDEX_EMPTY
+            && let Some(model) = self.scene_models.get_mut(usize::from(slot))
+        {
+            model.posed_bounds = Some(bounds);
         }
     }
 }

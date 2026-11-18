@@ -5,6 +5,14 @@ use std::sync::{Arc, Mutex};
 use crate::transport::protocol::{ConnectionId, MAX_PACKET_BYTES};
 use crate::transport::wire::{WireError, WireReader, WireWriter};
 
+type WorkerControlQueue = Mutex<
+    VecDeque<(
+        Option<master_protocol::MemberId>,
+        Vec<u8>,
+        std::time::Instant,
+    )>,
+>;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BootstrapTransaction {
     pub epoch: u32,
@@ -225,13 +233,7 @@ pub struct BootstrapAck {
 
 pub struct BootstrapLane {
     pub(super) host_map_ready: Mutex<HashSet<master_protocol::MemberId>>,
-    to_worker: Mutex<
-        VecDeque<(
-            Option<master_protocol::MemberId>,
-            Vec<u8>,
-            std::time::Instant,
-        )>,
-    >,
+    to_worker: WorkerControlQueue,
     from_worker: Mutex<VecDeque<(BootstrapIngress, std::time::Instant)>>,
     fault: Mutex<Option<&'static str>>,
     acks: Mutex<VecDeque<BootstrapAck>>,

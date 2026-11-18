@@ -14,12 +14,8 @@ pub struct FxModelAssetDraw {
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct FxModelGeometry {
-    pub(crate) vertices: Vec<SmodelVertex>,
-    pub(crate) indices: Vec<u32>,
-    pub(crate) surface_ranges: Vec<(u32, u32)>,
-    pub(crate) materials: Vec<SmodelPassMaterial>,
+    pub(crate) rows: render_anim::MergedModelRows,
     pub(crate) assets: Vec<FxModelAssetDraw>,
-    pub(crate) packed_vertices: asset_world::PackedVertexPayload,
 }
 
 #[derive(Resource, Default)]
@@ -67,29 +63,29 @@ impl FxModelDrawPlan {
     }
 
     pub fn materials(&self) -> &[SmodelPassMaterial] {
-        &self.geometry.materials
+        self.geometry.rows.materials()
     }
 
     pub fn vertices(&self) -> &[SmodelVertex] {
-        &self.geometry.vertices
+        self.geometry.rows.vertices()
     }
 
     pub fn indices(&self) -> &[u32] {
-        &self.geometry.indices
+        self.geometry.rows.indices()
     }
 
     pub fn surface_ranges(&self) -> &[(u32, u32)] {
-        &self.geometry.surface_ranges
+        self.geometry.rows.surface_ranges()
     }
 
     pub fn packed_vertices(&self) -> &asset_world::PackedVertexPayload {
-        &self.geometry.packed_vertices
+        self.geometry.rows.packed_vertices()
     }
 
     pub fn packed_exact(&self) -> bool {
         matches!(
-            &self.geometry.packed_vertices,
-            asset_world::PackedVertexPayload::Iw4(rows) if rows.len() == self.geometry.vertices.len()
+            self.geometry.rows.packed_vertices(),
+            asset_world::PackedVertexPayload::Iw4(rows) if rows.len() == self.geometry.rows.vertices().len()
         )
     }
 
@@ -115,11 +111,7 @@ impl FxModelDrawPlan {
         let geometry = !Arc::ptr_eq(&self.geometry, &staged.geometry);
         if geometry {
             self.geometry = Arc::clone(&staged.geometry);
-            self.revisions.set_topology_from(
-                &self.geometry.indices,
-                &self.geometry.surface_ranges,
-                self.geometry.vertices.len(),
-            );
+            self.revisions.topology = self.geometry.rows.topology();
             self.revisions.bump_packed_write(&mut self.revision);
         }
         if render_frame::publish_rows(&mut self.draws, &mut staged.draws) || geometry {

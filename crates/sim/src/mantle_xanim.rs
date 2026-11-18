@@ -80,10 +80,10 @@ impl MantleXAnimBind {
 
 impl MantleXAnimLength for MantleXAnimBind {
     fn length_msec(&self, fast_mantle: bool, anim_index: i32) -> i32 {
-        if let Some(leaf) = self.leaf(fast_mantle, anim_index) {
-            if leaf.length_msec > 0 {
-                return leaf.length_msec;
-            }
+        if let Some(leaf) = self.leaf(fast_mantle, anim_index)
+            && leaf.length_msec > 0
+        {
+            return leaf.length_msec;
         }
         FlatMantleAnimLength::default().length_msec(fast_mantle, anim_index)
     }
@@ -91,13 +91,13 @@ impl MantleXAnimLength for MantleXAnimBind {
 
 impl MantleRootDelta for MantleXAnimBind {
     fn abs_delta(&self, fast_mantle: bool, anim_index: i32, frac: f32) -> [f32; 3] {
-        if let Some(leaf) = self.leaf(fast_mantle, anim_index) {
-            if let Some(clip) = leaf.clip.as_ref() {
-                if clip.has_delta() {
-                    return clip.abs_delta_trans(frac);
-                }
-                return [0.0; 3];
+        if let Some(leaf) = self.leaf(fast_mantle, anim_index)
+            && let Some(clip) = leaf.clip.as_ref()
+        {
+            if clip.has_delta() {
+                return clip.abs_delta_trans(frac);
             }
+            return [0.0; 3];
         }
         CreateAnimsMantleRootDelta.abs_delta(fast_mantle, anim_index, frac)
     }

@@ -14,7 +14,7 @@ cargo run --profile play -p launcher -- map iw5:mp_overwatch --cmds '…'
 binary `--cmds`. The colon is a GNU make pattern, so `make map iw5:…` fails —
 write `make map ZONE=iw5:mp_overwatch` or use `cargo run`. Recipes: `make
 scenario`, `chaos`, `bench` ([`BENCH.md`](BENCH.md)), `bench-live`, `lifecycle-*`
-(`*_CMDS` in the `Makefile`). Live recipes use `[profile.play]`; LTO is `PROFILE=release`.
+(`*_CMDS` in the `Makefile`). Live recipes use `[profile.play]`.
 
 Linux startup creates `iw4`, `iw5`, `t5` and `t6` symlinks in `IW4L_GAMES` for missing games with exactly one valid Steam installation. Existing entries are preserved.
 
@@ -22,6 +22,17 @@ Linux startup creates `iw4`, `iw5`, `t5` and `t6` symlinks in `IW4L_GAMES` for m
 in the background. Opening Classes before it is ready shows Loading Classes;
 Escape returns to the menu, and readiness opens the editor for unlocked accounts. In `--cmds`,
 `wait progression` holds until then.
+
+The top `SINGLEPLAYER (WIP)` menu groups campaign, Spec Ops, Survival and Zombies
+by game, with mission/map lists in the middle and previews on the right. Only the IW4 campaign launches missions;
+the other modes show `Unavailable` and allow browsing their lists. Leave any
+multiplayer lobby before starting a campaign mission.
+Start a mission directly with `make map ZONE=iw4:trainer` (S.S.D.D.),
+`make map ZONE=iw4:roadkill` (Team Player), or
+`make map ZONE=iw4:cliffhanger` (Cliffhanger).
+Map names are exact: `iw4:favela` loads the campaign mission;
+`iw4:mp_favela` loads the multiplayer map. No `mp_` prefix is added.
+`skipvideo` skips the current briefing or cinematic and reports when none is playing.
 
 **Cheats are on by default.** The host accepts the debug
 actions: `move`, `look`, `tp`, `nudge`, `god`, `kill`, `damage`, `force_spawn`,
@@ -35,16 +46,24 @@ Wait for the loaded mode's countdown, or use the debug command:
 `wait world; spawn 0; force_match_start; wait 1s; …`.
 Firing, hit and decal probes must start after the countdown releases the player.
 
+For a scripted FFA ending, `wait finalkillcam` waits for the local actor's real
+final killcam to finish before dumping receipts and stopping the recording.
+It requires an installed input program and times out if no final killcam occurs.
+`wait take <milliseconds>` waits for authority time since the input program
+started, so diagnostic screenshots stay aligned with the take despite load time.
+
 **Sync by default.** Ritual `wait`s are unnecessary: a command holds the FIFO
 until its own fact — `map`/`demo`/`play` until the swap plus GPU-ready
 `WorldScene::spawned`, `spawn` until `AppScreen::InGame`, `move`/`look`/`tp`
 until a matching presented pose, `force_match_start` until `Playing`,
-`disconnect` until the hold is torn down. `wait Ns` remains, for pacing and
-observation windows. The `&` suffix is a loud refusal to wait (`map mp_rust &`),
+`disconnect` until the hold is torn down. `wait Ns` uses real elapsed time for
+pacing and observation windows, including slow frames and paused simulation.
+The `&` suffix is a loud refusal to wait (`map mp_rust &`),
 `!` jumps the queue (in bash write `disconnect !`, or history expansion bites).
 The 120 s gate timeout aborts the rest with an echo; parsing is
 `crates/console/src/`. Hand-typed `dump`/`clip`/`screenshot` pass through any
 wait while preserving the queue, which inside `--cmds` takes an explicit `!`.
+A hand-typed `skipvideo` also passes through a wait without releasing it.
 A hand-typed `quit`/`exit`/`disconnect` goes further: it jumps **every** hold,
 `wait 60s` included, and releases it. A `quit` written into `--cmds` does not —
 it is part of the script and waits its turn.
@@ -70,8 +89,17 @@ with no map installed. `bot` is
 `add | dummy | hold | tp | give | fire`; `dump [name]` writes the current snapshot into
 `dumps/`. `clip` writes the last available 45 s into `clips/<ULID>/` (demo + dump)
 on host and clients — the host records authority, a client the snapshots it
-received plus its own presented state; `demo LATEST` plays it back.
+received plus its own presented state; `demo LATEST` plays it back. Each clip also
+writes `usercmds.json`: recent locally generated commands (all UserCmd fields and
+canonical bytes), shot-sample provenance and snapshot ACK anchors. Commands run
+from just after the first acknowledged demo snapshot through the last snapshot
+ACK; the sidecar identifies that baseline tick in the demo. `complete` reports whether this sequence range
+is fully retained. This is a local input reference, not proof that authority
+consumed each command. Dedicated hosts and replay without local input report
+`no_local_commands`. The window is still 45 seconds; save overlapping clips during
+a longer route to retain all inputs.
 
+* `noclip` toggles player flight through walls: WASD moves in the view direction, jump rises, crouch/prone descends, sprint speeds up. Repeat to restore gravity and collision. Requires a live player and cheats.
 * `god` toggles invincibility for a live player; repeat it to turn protection off. It blocks damage while cheats are enabled; `kill` still forces death.
 * ADS is `hold +speed_throw`, not `+speed`;
 * Hold Shift (`+breath_sprint`) or bind `+holdbreath` to steady eligible sights
@@ -97,7 +125,7 @@ received plus its own presented state; `demo LATEST` plays it back.
   presets supported by the loaded weapons, attachments and equipment.
 
 In the class editor, choose Camouflage for the primary or secondary weapon.
-MW3 weapons use their installed camo names and previews, including Gold, Marine
+IW5 weapons use their installed camo names and previews, including Gold, Marine
 and Winter where models are available. The selection is saved with the class and
 applies to first-person and world weapons. Console equip also accepts
 `give weapon/iw5:acr reflex camo=gold`.

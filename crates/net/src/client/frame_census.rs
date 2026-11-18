@@ -1,104 +1,57 @@
-use std::fmt::Write as _;
 use std::time::Instant;
 
 use bevy::prelude::*;
 
 use crate::schedule::ClientSet;
-use frame::{CLIENT_TOC, ClientEdge, client_set_name};
+use frame::ClientEdge;
 
-#[derive(Resource, Debug, Clone, Default)]
-pub struct ClientPhaseCensus {
-    pub n: [Option<u64>; CLIENT_TOC.len()],
-
-    pub bytes: [Option<u64>; CLIENT_TOC.len()],
-    seam_n: Option<u64>,
-    seam_bytes: Option<u64>,
-}
-
-impl ClientPhaseCensus {
-    pub fn alloc_n(&self) -> Option<String> {
-        format_toc_u64(&self.n)
+fn stamp_client_edge<const EDGE: u8>() {
+    if EDGE > 2 {
+        client_toc_span(EDGE as usize - 1).end();
     }
-
-    pub fn alloc_bytes(&self) -> Option<String> {
-        format_toc_u64(&self.bytes)
+    if EDGE == 2 {
+        perf::span!("Update", "iw4l.sim", begin);
     }
-
-    pub fn alloc_sum_n(&self) -> Option<u64> {
-        sum_named(&self.n)
-    }
-
-    pub fn alloc_sum_bytes(&self) -> Option<u64> {
-        sum_named(&self.bytes)
-    }
-}
-
-fn format_toc_u64(values: &[Option<u64>; CLIENT_TOC.len()]) -> Option<String> {
-    let mut out = String::new();
-    for (index, phase) in CLIENT_TOC.iter().enumerate() {
-        let Some(n) = values[index] else { continue };
-        if !out.is_empty() {
-            out.push(',');
-        }
-        let _ = write!(out, "{}:{n}", client_set_name(phase));
-    }
-    (!out.is_empty()).then_some(out)
-}
-
-fn sum_named(values: &[Option<u64>; CLIENT_TOC.len()]) -> Option<u64> {
-    let mut sum = 0u64;
-    let mut any = false;
-    for slot in values {
-        let Some(n) = slot else { continue };
-        sum += *n;
-        any = true;
-    }
-    any.then_some(sum)
-}
-
-fn stamp_client_edge<const EDGE: u8>(mut census: ResMut<ClientPhaseCensus>) {
-    let alloc = diag::process_allocations();
-    if EDGE > 0 {
-        let slot = EDGE as usize - 1;
-        client_toc_span(slot).end();
-        if let Some(n0) = census.seam_n {
-            census.n[slot] = Some(alloc.process_allocations.saturating_sub(n0));
-        }
-        if let Some(b0) = census.seam_bytes {
-            census.bytes[slot] = Some(alloc.process_allocation_bytes.saturating_sub(b0));
-        }
-    }
-    if EDGE == 0 {
-        perf::Span::FramesUpdateMs.begin();
-    }
-    if (EDGE as usize) < CLIENT_TOC.len() {
+    if (EDGE as usize) < 10 {
         client_toc_span(EDGE as usize).begin();
     }
-    if EDGE as usize == CLIENT_TOC.len() {
-        perf::Span::FramesUpdateMs.end();
+    if EDGE as usize == 10 {
+        perf::span!("Update", "iw4l.sim", end);
     }
-    census.seam_n = Some(alloc.process_allocations);
-    census.seam_bytes = Some(alloc.process_allocation_bytes);
+}
+
+fn stamp_preupdate_edge<const EDGE: u8>() {
+    if EDGE == 0 {
+        perf::span!("PreUpdate", "iw4l.sim", begin);
+    }
+    if EDGE > 0 {
+        client_toc_span(EDGE as usize - 1).end();
+    }
+    if EDGE < 2 {
+        client_toc_span(EDGE as usize).begin();
+    }
+    if EDGE == 2 {
+        perf::span!("PreUpdate", "iw4l.sim", end);
+    }
 }
 
 fn client_toc_span(slot: usize) -> perf::Span {
     match slot {
-        0 => perf::Span::TocLoad,
-        1 => perf::Span::TocReceive,
-        2 => perf::Span::TocReconcile,
-        3 => perf::Span::TocInput,
-        4 => perf::Span::FramesPredictMs,
-        5 => perf::Span::TocSend,
-        6 => perf::Span::FramesPresentMs,
-        7 => perf::Span::TocUi,
-        8 => perf::Span::FramesEffectsMs,
-        9 => perf::Span::FramesDiagMs,
-        _ => unreachable!("CLIENT_TOC slot {slot}"),
+        0 => perf::span!("Load", "iw4l.sim", handle),
+        1 => perf::span!("Receive", "iw4l.sim", handle),
+        2 => perf::span!("Reconcile", "iw4l.sim", handle),
+        3 => perf::span!("Input", "iw4l.sim", handle),
+        4 => perf::span!("Predict", "iw4l.sim", handle),
+        5 => perf::span!("Send", "iw4l.sim", handle),
+        6 => perf::span!("Present", "iw4l.sim", handle),
+        7 => perf::span!("Ui", "iw4l.sim", handle),
+        8 => perf::span!("Effects", "iw4l.sim", handle),
+        9 => perf::span!("Diag", "iw4l.sim", handle),
+        _ => unreachable!("client phase slot {slot}"),
     }
 }
 
 fn register_phase_census(app: &mut App) {
-    app.init_resource::<ClientPhaseCensus>();
     macro_rules! seams {
         ($($edge:literal),* $(,)?) => {$(
             app.add_systems(
@@ -107,7 +60,16 @@ fn register_phase_census(app: &mut App) {
             );
         )*};
     }
-    seams!(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
+    seams!(2, 3, 4, 5, 6, 7, 8, 9, 10);
+    app.add_systems(
+        PreUpdate,
+        (
+            stamp_preupdate_edge::<0>.in_set(ClientEdge(0)),
+            stamp_preupdate_edge::<1>.in_set(ClientEdge(1)),
+            stamp_preupdate_edge::<2>.in_set(ClientEdge(2)),
+            begin_update_census.before(ClientSet::Load),
+        ),
+    );
 }
 
 pub const HUD_STAGE_N: usize = 9;
@@ -184,11 +146,20 @@ fn publish_present_census(census: Res<UpdatePhaseCensus>) {
             counter.emit(f64::from(ms));
         }
     };
-    emit(perf::Counter::PresentPublishMs, census.publish_presented_ms);
-    emit(perf::Counter::HudSurfacesScheduleMs, census.hud_surfaces_ms);
-    emit(perf::Counter::HudTessBodyMs, census.hud_tess_body_ms);
+    emit(
+        perf::counter!("present_publish", "iw4l.render", handle),
+        census.publish_presented_ms,
+    );
+    emit(
+        perf::counter!("hud_surfaces_schedule_interval", "iw4l.frame", handle),
+        census.hud_surfaces_ms,
+    );
+    emit(
+        perf::counter!("hud_tess_body", "iw4l.frame", handle),
+        census.hud_tess_body_ms,
+    );
     if let Some(jobs) = census.hud_tess_jobs {
-        perf::Counter::HudTessJobs.emit(f64::from(jobs));
+        perf::counter!("hud_tess_jobs", "iw4l.frame", f64::from(jobs));
     }
     // Which of the nine, not only how big: a maximum with no index says a HUD
     // stage is most of the frame and leaves the next reader to bisect for it.
@@ -202,15 +173,29 @@ fn publish_present_census(census: Res<UpdatePhaseCensus>) {
             _ => Some((at, ms)),
         });
     if let Some((at, ms)) = worst {
-        perf::Counter::HudStageMaxScheduleMs.emit(f64::from(ms));
-        perf::Counter::HudStageMaxScheduleAt.emit(at as f64);
+        perf::counter!(
+            "hud_stage_max_schedule_interval",
+            "iw4l.frame",
+            f64::from(ms)
+        );
+        perf::counter!(
+            "hud_stage_max_schedule_interval_at",
+            "iw4l.frame",
+            at as f64
+        );
     }
-    emit(perf::Counter::UiHudSetupMs, census.hud_root_setup_ms);
     emit(
-        perf::Counter::UiApplyDeferredMs,
+        perf::counter!("ui_hud_setup", "iw4l.render", handle),
+        census.hud_root_setup_ms,
+    );
+    emit(
+        perf::counter!("ui_apply_deferred", "iw4l.render", handle),
         census.present_apply_deferred_ms,
     );
-    emit(perf::Counter::UiHudVisibilityMs, census.hud_visibility_ms);
+    emit(
+        perf::counter!("ui_hud_visibility", "iw4l.render", handle),
+        census.hud_visibility_ms,
+    );
 }
 
 pub fn register_update_phase_census(app: &mut App) {
@@ -218,7 +203,6 @@ pub fn register_update_phase_census(app: &mut App) {
     app.init_resource::<UpdatePhaseCensus>().add_systems(
         Update,
         (
-            begin_update_census.before(ClientSet::Load),
             begin_present_census.in_set(ClientSet::Send),
             // After both phases it measures — `Ui` runs after `Present`, and
             // `Diag` after `Ui` — and before the next frame's reset.

@@ -226,6 +226,14 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    pub fn turret_weapon(&self, number: i32) -> Option<u32> {
+        let mover = self.meta.script_movers.iter().find(|m| {
+            m.state.number == number
+                && m.killcam_camera == Some(playerstate_iw4::KillCamMode::Mode6Turret)
+        })?;
+        u32::try_from(mover.state.index).ok().filter(|w| *w != 0)
+    }
+
     pub fn view_tick(&self, viewer: ClientId) -> Tick {
         let archived = self
             .meta
@@ -242,14 +250,5 @@ impl Snapshot {
             0
         };
         Tick(self.tick.0.saturating_sub(offset))
-    }
-
-    pub fn unpublished(tick: Tick) -> Self {
-        Self {
-            tick,
-            players: Vec::new(),
-            projectiles: Vec::new(),
-            meta: SnapshotMeta::default(),
-        }
     }
 }

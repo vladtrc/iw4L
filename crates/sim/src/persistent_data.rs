@@ -103,25 +103,31 @@ impl PersistentDataStore {
         if self.accounts.contains_key(&snapshot.account) {
             return Err(PersistentDataError::AccountInUse);
         }
+        let account = snapshot.account;
+        let record = self.record_from_snapshot(snapshot)?;
+        self.accounts.insert(account, record);
+        Ok(())
+    }
+
+    fn record_from_snapshot(
+        &self,
+        snapshot: AccountSnapshot,
+    ) -> Result<AccountRecord, PersistentDataError> {
         let set = self
             .schemas
             .get(PLAYER_SCHEMA)
             .ok_or(PersistentDataError::MissingSchema)?;
         let definition = select_definition(set, snapshot.version, snapshot.checksum)?;
         validate_buffer(definition, &snapshot.bytes)?;
-        self.accounts.insert(
-            snapshot.account,
-            AccountRecord {
-                definition: Arc::new(definition.clone()),
-                bytes: snapshot.bytes,
-                dirty: vec![0; PLAYER_DATA_BUFFER_BYTES.div_ceil(8)],
-                revision: snapshot.revision,
-                saved_revision: Some(snapshot.revision),
-                temporary: false,
-                skills: snapshot.skills,
-            },
-        );
-        Ok(())
+        Ok(AccountRecord {
+            definition: Arc::new(definition.clone()),
+            bytes: snapshot.bytes,
+            dirty: vec![0; PLAYER_DATA_BUFFER_BYTES.div_ceil(8)],
+            revision: snapshot.revision,
+            saved_revision: Some(snapshot.revision),
+            temporary: false,
+            skills: snapshot.skills,
+        })
     }
 
     pub fn replace_unbound(
@@ -135,10 +141,10 @@ impl PersistentDataStore {
         {
             return Err(PersistentDataError::AccountInUse);
         }
-        let mut updated = self.clone();
-        updated.accounts.remove(&snapshot.account);
-        updated.import(snapshot)?;
-        *self = updated;
+        validate_identity(snapshot.account)?;
+        let account = snapshot.account;
+        let record = self.record_from_snapshot(snapshot)?;
+        self.accounts.insert(account, record);
         Ok(())
     }
 
@@ -332,9 +338,17 @@ impl PersistentDataStore {
     }
 
     pub fn for_new_match(&self) -> Self {
-        let mut store = self.clone();
-        store.clear_bindings();
-        store
+        Self {
+            schemas: self.schemas.clone(),
+            accounts: self
+                .accounts
+                .iter()
+                .filter(|(_, record)| !record.temporary)
+                .map(|(&account, record)| (account, record.clone()))
+                .collect(),
+            clients: BTreeMap::new(),
+            defaults: self.defaults.clone(),
+        }
     }
 
     pub fn read<'a>(

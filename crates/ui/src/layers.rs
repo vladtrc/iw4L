@@ -179,10 +179,10 @@ fn apply_ui_layers(
                 *visibility = want;
             }
         }
-        if let Some(mut camera) = camera {
-            if camera.is_active != visible {
-                camera.is_active = visible;
-            }
+        if let Some(mut camera) = camera
+            && camera.is_active != visible
+        {
+            camera.is_active = visible;
         }
     }
 }

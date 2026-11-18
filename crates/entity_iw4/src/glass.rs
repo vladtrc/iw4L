@@ -173,6 +173,7 @@ pub use asset_core::GlassPaneBasis;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(C)]
+#[derive(Default)]
 pub struct ServerGlassPiece {
     pub damage: u16,
 
@@ -185,19 +186,6 @@ pub struct ServerGlassPiece {
     pub impact_pos: [u8; 2],
 
     _gap_0b: u8,
-}
-
-impl Default for ServerGlassPiece {
-    fn default() -> Self {
-        Self {
-            damage: 0,
-            collapse_time: 0,
-            last_state_change_time: 0,
-            impact_dir: 0,
-            impact_pos: [0; 2],
-            _gap_0b: 0,
-        }
-    }
 }
 
 impl ServerGlassPiece {
@@ -266,11 +254,11 @@ pub fn glass_apply_damage(
 
 pub fn glass_blast_cone_keeps(cone_dir: [f32; 3], cone_cos: f32, offset: [f32; 3]) -> bool {
     let clen2 = cone_dir[0] * cone_dir[0] + cone_dir[1] * cone_dir[1] + cone_dir[2] * cone_dir[2];
-    if !(clen2 > 0.0) {
+    if clen2 <= 0.0 || clen2.is_nan() {
         return true;
     }
     let olen2 = offset[0] * offset[0] + offset[1] * offset[1] + offset[2] * offset[2];
-    if !(olen2 > 0.0) {
+    if olen2 <= 0.0 || olen2.is_nan() {
         return true;
     }
     let inv_c = 1.0 / libm::sqrtf(clen2);
@@ -287,7 +275,7 @@ pub fn glass_blast_integer_damage(inner: i32, outer: i32, radius: f32, distance:
     } else {
         radius
     };
-    if !(r > 0.0) || distance > r {
+    if (r <= 0.0 || r.is_nan()) || distance > r {
         return 0;
     }
     let f = (1.0 - distance / r).clamp(0.0, 1.0);

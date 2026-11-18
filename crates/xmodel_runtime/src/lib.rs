@@ -1,8 +1,13 @@
+mod actor_gaze;
+pub use actor_gaze::{ActorGazeController, ActorGazeError, ActorGazePose};
+mod performance;
+pub use performance::{NativePerformance, PerformanceAction};
 mod destructible;
 mod dobj;
-mod dobj_runtime;
+mod dobj_reuse;
 mod player_body;
 mod retained;
+mod retarget;
 mod semantic;
 mod xanim_clip;
 mod xanim_tree;
@@ -16,12 +21,12 @@ pub use dobj::{
     player_controller_tag_origin, set_angles, set_control_tag_angles, set_local_tag,
     tp_head_attach_tag, tp_weapon_attach_tag, yaw_bone,
 };
-pub use dobj_runtime::{DObjAnimRuntime, DObjReuseKey, model_token, reuse_matches};
+pub use dobj_reuse::{DObjReuseKey, model_token, reuse_matches};
 pub use retained::{
     BoneCollision, CollSurfCollision, CollTri, CollisionBone, DObjPoseRequest, MaterializeError,
-    ModelMovementBrush, RetainedModelCapability, TagRotation, collision_bone_from_local_box,
-    collision_dobj_with_controller, collision_models, collision_models_with_controller, pose_dobj,
-    pose_dobj_with_controller,
+    ModelMovementBrush, RetainedModelCapability, RootBonePose, TagRotation,
+    collision_bone_from_local_box, collision_dobj_with_controller, collision_models,
+    collision_models_with_controller, pose_dobj, pose_dobj_with_controller,
 };
 pub use semantic::{
     DObjCompositionDescriptor, DObjModelDescriptor, DObjSemanticState, SemanticResolveError,
@@ -29,16 +34,16 @@ pub use semantic::{
 };
 pub use xanim_clip::{
     AnimClip, ClipError, ClipNotify, FrameIndices, Keyed, RawDeltaQuat, RawDeltaTrans,
-    RawXAnimParts, Rotation, SampledTrack, Track, Translation,
+    RawXAnimParts, RootMotionDelta, RootMotionPose, Rotation, SampledTrack, Track, Translation,
 };
 pub use xanim_tree::{
-    XAnimNodeDefinition, XAnimNodeId, XAnimNodeKind, XAnimNodeState, XAnimTreeDefinition,
-    XAnimTreeError, XAnimTreeRuntime,
+    XAnimNodeDefinition, XAnimNodeId, XAnimNodeKind, XAnimNodeState, XAnimSyncTree,
+    XAnimTreeDefinition, XAnimTreeError, XAnimTreeRuntime,
 };
 
 pub use destructible::{T5DestructibleDef, T5DestructiblePiece, T5DestructibleStage};
 
 pub use player_body::{
-    ClientAnimSample, PlayerAnimProperties, PlayerBodyBranches, apply_player_anim_goals,
-    apply_player_anim_rates, overlay_legs_clip,
+    ClientAnimSample, PlayerAnimProperties, PlayerAnimTransition, PlayerBodyBranches,
+    apply_player_anim_goals, apply_player_anim_rates, overlay_legs_clip,
 };

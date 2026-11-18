@@ -61,20 +61,32 @@ pub struct AppliedRect {
     pub h: f32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DisplayGeometry {
+    pub size: [f32; 2],
+    pub pixel_aspect: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SafeArea {
+    pub horizontal: f32,
+    pub vertical: f32,
+}
+
 impl ScreenPlacement {
     pub fn setup(
-        viewport_x: f32,
-        viewport_y: f32,
-        viewport_w: f32,
-        viewport_h: f32,
-        display_w: f32,
-        display_h: f32,
-        safe_horz: f32,
-        safe_vert: f32,
-        adj_horz: f32,
-        adj_vert: f32,
-        aspect_pixel: f32,
+        viewport: AppliedRect,
+        display: DisplayGeometry,
+        safe: SafeArea,
+        adjustable: SafeArea,
     ) -> Self {
+        let AppliedRect {
+            x: viewport_x,
+            y: viewport_y,
+            w: viewport_w,
+            h: viewport_h,
+        } = viewport;
+        let aspect_pixel = display.pixel_aspect;
         if aspect_pixel == 0.0 {
             panic!("ScrPlace: display pixel aspect is 0; video init has not written it");
         }
@@ -84,33 +96,13 @@ impl ScreenPlacement {
         }
         let horz_aspect_scale = viewport_w / sub_w;
         let (real_viewable_min, real_viewable_max, virtual_viewable_min, virtual_viewable_max) =
-            setup_viewable(
-                viewport_x,
-                viewport_y,
-                viewport_w,
-                viewport_h,
-                horz_aspect_scale,
-                safe_horz,
-                safe_vert,
-                display_w,
-                display_h,
-            );
+            setup_viewable(viewport, horz_aspect_scale, safe, display.size);
         let (
             real_adjustable_min,
             real_adjustable_max,
             virtual_adjustable_min,
             virtual_adjustable_max,
-        ) = setup_viewable(
-            viewport_x,
-            viewport_y,
-            viewport_w,
-            viewport_h,
-            horz_aspect_scale,
-            adj_horz,
-            adj_vert,
-            display_w,
-            display_h,
-        );
+        ) = setup_viewable(viewport, horz_aspect_scale, adjustable, display.size);
         Self {
             scale_virtual_to_real: [
                 sub_w / SCRPLACE_VIRTUAL_WIDTH,
@@ -140,17 +132,24 @@ impl ScreenPlacement {
 
     pub fn setup_fullscreen(width: f32, height: f32, aspect_pixel: f32) -> Self {
         Self::setup(
-            0.0,
-            0.0,
-            width,
-            height,
-            width,
-            height,
-            SAFE_AREA_DEFAULT,
-            SAFE_AREA_DEFAULT,
-            SAFE_AREA_ADJUSTED_DEFAULT,
-            SAFE_AREA_ADJUSTED_DEFAULT,
-            aspect_pixel,
+            AppliedRect {
+                x: 0.0,
+                y: 0.0,
+                w: width,
+                h: height,
+            },
+            DisplayGeometry {
+                size: [width, height],
+                pixel_aspect: aspect_pixel,
+            },
+            SafeArea {
+                horizontal: SAFE_AREA_DEFAULT,
+                vertical: SAFE_AREA_DEFAULT,
+            },
+            SafeArea {
+                horizontal: SAFE_AREA_ADJUSTED_DEFAULT,
+                vertical: SAFE_AREA_ADJUSTED_DEFAULT,
+            },
         )
     }
 
@@ -258,16 +257,22 @@ impl ScreenPlacement {
 }
 
 fn setup_viewable(
-    viewport_x: f32,
-    viewport_y: f32,
-    viewport_w: f32,
-    viewport_h: f32,
+    viewport: AppliedRect,
     horz_aspect_scale: f32,
-    safe_horz: f32,
-    safe_vert: f32,
-    display_w: f32,
-    display_h: f32,
+    safe: SafeArea,
+    display_size: [f32; 2],
 ) -> ([f32; 2], [f32; 2], [f32; 2], [f32; 2]) {
+    let AppliedRect {
+        x: viewport_x,
+        y: viewport_y,
+        w: viewport_w,
+        h: viewport_h,
+    } = viewport;
+    let SafeArea {
+        horizontal: safe_horz,
+        vertical: safe_vert,
+    } = safe;
+    let [display_w, display_h] = display_size;
     let mut inset_x = libm::floorf(HALF + display_w * (1.0 - safe_horz) * HALF);
     let mut inset_y = libm::floorf(HALF + display_h * (1.0 - safe_vert) * HALF);
     let mut right = display_w - inset_x;

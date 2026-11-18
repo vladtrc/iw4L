@@ -111,7 +111,7 @@ struct SavedScreenCopy {
 }
 
 #[derive(Resource, Default)]
-struct SavedScreenGpu {
+pub(super) struct SavedScreenGpu {
     copy: Option<SavedScreenCopy>,
     sequence: u64,
     captured: bool,
@@ -140,10 +140,9 @@ impl SpecializedRenderPipeline for IwTessPipeline {
             dst_factor: BlendFactor::OneMinusSrcAlpha,
             operation: BlendOperation::Add,
         };
-        let state = key.state.map(|bits| {
-            crate::GfxPassState::from_prepared(bits)
-                .apply_change_state_0_host(AlphaMode::Blend, false)
-        });
+        let state = key
+            .state
+            .map(|bits| crate::GfxPassState::from_prepared(bits).apply_change_state_0_host(false));
         RenderPipelineDescriptor {
             label: Some("iw_tess_stretchpic".into()),
             layout: vec![self.modulate_layout.clone()],
@@ -391,7 +390,7 @@ fn prepare_iw_tess(
             meta.cpu_ib_indices.fill(0);
         }
         let index_append = meta.cpu_ib.set_index_data(tri_count);
-        if index_append.lock_byte_offset % 4 != 0 {
+        if !index_append.lock_byte_offset.is_multiple_of(4) {
             continue;
         }
         copy_u16_indices_into_ring(&mut meta.cpu_ib_indices, index_append.base_index, indices);
@@ -435,200 +434,243 @@ fn prepare_iw_tess(
     queue.write_buffer(&pipeline.params, 0, bytemuck::bytes_of(&coeffs));
 }
 
+#[derive(bevy::ecs::system::SystemParam)]
+struct IwTessResources<'w> {
+    device: Res<'w, RenderDevice>,
+    queue: Res<'w, RenderQueue>,
+    cache: Res<'w, PipelineCache>,
+    images: Res<'w, RenderAssets<GpuImage>>,
+}
+
+#[derive(bevy::ecs::system::SystemParam)]
+struct IwTessRecorder<'w> {
+    pipeline: Res<'w, IwTessPipeline>,
+    specialized: ResMut<'w, SpecializedRenderPipelines<IwTessPipeline>>,
+    texture_table: ResMut<'w, super::texture_table::ExactTextureTable>,
+    blood: ResMut<'w, HudBloodGpu>,
+    saved: ResMut<'w, SavedScreenGpu>,
+    temporal: ResMut<'w, super::shellshock_screen::TemporalScreenGpu>,
+    temporal_pipeline: ResMut<'w, super::shellshock_screen::TemporalScreenPipeline>,
+}
+
+impl IwTessResources<'_> {
+    fn image(&self, handle: &Handle<Image>) -> Option<&GpuImage> {
+        self.images.get(handle)
+    }
+}
+
+impl IwTessRecorder<'_> {
+    fn record(
+        mut self,
+        view: ViewQuery<(&ViewTarget, &ExtractedView)>,
+        extracted: Res<ExtractedIwTess>,
+        meta: Res<IwTessMeta>,
+        resources: IwTessResources,
+        mut context: RenderContext,
+        stages: Option<Res<SharedRenderStagesSlot>>,
+    ) {
+        let (target, _extracted_view) = view.into_inner();
+        let format = target.main_texture_format();
+        let scene_size = target.main_texture().size();
+        self.temporal
+            .draw(super::shellshock_screen::TemporalScreenDraw {
+                frame: extracted.0.shellshock_screen,
+                texture: target.main_texture(),
+                view: target.main_texture_view(),
+                format,
+                device: &resources.device,
+                queue: &resources.queue,
+                cache: &resources.cache,
+                pipeline: &mut self.temporal_pipeline,
+                context: &mut context,
+            });
+        if extracted.0.saved_screen_sequence != self.saved.sequence {
+            self.saved.captured = false;
+            if let Some(copy) = self
+                .saved
+                .copy
+                .as_ref()
+                .filter(|copy| copy.format == format && copy.size == scene_size)
+            {
+                context.command_encoder().copy_texture_to_texture(
+                    target.main_texture().as_image_copy(),
+                    copy.texture.as_image_copy(),
+                    scene_size,
+                );
+                self.saved.sequence = extracted.0.saved_screen_sequence;
+                self.saved.captured = true;
+            }
+        }
+        if !extracted.0.visible {
+            return;
+        }
+        if meta.draws.is_empty() {
+            if let Some(slot) = stages.as_ref()
+                && let Ok(mut guard) = slot.0.lock()
+            {
+                guard.tess_stream_bind_n = Some(0);
+                guard.tess_stream_skip_n = Some(0);
+            }
+            return;
+        }
+        let samples = 1;
+        let saved_copy =
+            self.saved.copy.as_ref().filter(|copy| {
+                self.saved.captured && copy.format == format && copy.size == scene_size
+            });
+        let blood_ready = self.blood.uploaded;
+        let mut prepared = Vec::with_capacity(meta.draws.len());
+        for geom in &meta.draws {
+            let Some(batch) = extracted.0.batches.get(geom.batch_i) else {
+                continue;
+            };
+            let Some(gpu_image) = resources.image(&batch.image) else {
+                continue;
+            };
+            let (id, bind, textures) = match batch.technique {
+                HudTessTechnique::Modulate => {
+                    let id = self.specialized.specialize(
+                        &resources.cache,
+                        &self.pipeline,
+                        IwTessPipelineKey {
+                            target: format,
+                            samples,
+                            state: batch.state,
+                        },
+                    );
+                    let layout = resources
+                        .cache
+                        .get_bind_group_layout(&self.pipeline.modulate_layout);
+                    let bind = resources.device.create_bind_group(
+                        "iw_tess_modulate",
+                        &layout,
+                        &BindGroupEntries::sequential((
+                            self.pipeline.params.as_entire_buffer_binding(),
+                            &gpu_image.texture_view,
+                            &gpu_image.sampler,
+                        )),
+                    );
+                    (id, bind, None)
+                }
+                HudTessTechnique::SavedScreen => {
+                    let Some(copy) = saved_copy else {
+                        continue;
+                    };
+                    let id = self.specialized.specialize(
+                        &resources.cache,
+                        &self.pipeline,
+                        IwTessPipelineKey {
+                            target: format,
+                            samples,
+                            state: batch.state,
+                        },
+                    );
+                    let layout = resources
+                        .cache
+                        .get_bind_group_layout(&self.pipeline.modulate_layout);
+                    let bind = resources.device.create_bind_group(
+                        "iw_tess_saved_screen",
+                        &layout,
+                        &BindGroupEntries::sequential((
+                            self.pipeline.params.as_entire_buffer_binding(),
+                            &copy.view,
+                            &copy.sampler,
+                        )),
+                    );
+                    (id, bind, None)
+                }
+                HudTessTechnique::SplatterAlt => {
+                    let Some(gpu_mask) = batch.mask.as_ref().and_then(|mask| resources.image(mask))
+                    else {
+                        continue;
+                    };
+                    let Some(port) = self.blood.port.as_mut().filter(|_| blood_ready) else {
+                        continue;
+                    };
+                    let textures = port.textures(
+                        &mut self.texture_table,
+                        &resources.device,
+                        &resources.cache,
+                        gpu_image,
+                        gpu_mask,
+                    );
+                    (port.pipeline, port.constants.clone(), Some(textures))
+                }
+            };
+            if resources.cache.get_render_pipeline(id).is_none() {
+                continue;
+            }
+            prepared.push((id, bind, textures, geom));
+        }
+        if prepared.is_empty() {
+            if let Some(slot) = stages.as_ref()
+                && let Ok(mut guard) = slot.0.lock()
+            {
+                guard.tess_stream_bind_n = Some(0);
+                guard.tess_stream_skip_n = Some(0);
+            }
+            return;
+        }
+        let attachments = [Some(target.get_unsampled_color_attachment())];
+        let mut pass = context.begin_tracked_render_pass(
+            bevy::render::render_resource::RenderPassDescriptor {
+                label: Some("iw_tess_stretchpic_pass"),
+                color_attachments: &attachments,
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            },
+        );
+        let mut streams = GfxCmdBufStreams::default();
+        let mut bind_n = 0u32;
+        let mut skip_n = 0u32;
+        for (id, bind, textures, geom) in &prepared {
+            let Some(gpu_pipeline) = resources.cache.get_render_pipeline(*id) else {
+                continue;
+            };
+            pass.set_render_pipeline(gpu_pipeline);
+            pass.set_bind_group(0, bind, &[]);
+            if let Some(textures) = textures {
+                pass.set_bind_group(1, textures, &[]);
+            }
+            let action = set_stream_source(
+                &mut streams,
+                geom.stream.buffer,
+                geom.stream.offset,
+                geom.stream.stride,
+            );
+            if action.bind_stream0 {
+                pass.set_vertex_buffer(0, geom.vb.slice(u64::from(geom.stream.offset)..));
+                bind_n = bind_n.saturating_add(1);
+            } else {
+                skip_n = skip_n.saturating_add(1);
+            }
+            pass.set_index_buffer(geom.ib.slice(..), IndexFormat::Uint16);
+            let start = geom.first_index;
+            let end = start.saturating_add(geom.index_count);
+            pass.draw_indexed(start..end, 0, 0..1);
+        }
+        drop(pass);
+        if let Some(slot) = stages.as_ref()
+            && let Ok(mut guard) = slot.0.lock()
+        {
+            guard.tess_stream_bind_n = Some(bind_n);
+            guard.tess_stream_skip_n = Some(skip_n);
+        }
+    }
+}
+
 fn draw_iw_tess(
     view: ViewQuery<(&ViewTarget, &ExtractedView)>,
     extracted: Res<ExtractedIwTess>,
     meta: Res<IwTessMeta>,
-    pipeline: Res<IwTessPipeline>,
-    mut specialized: ResMut<SpecializedRenderPipelines<IwTessPipeline>>,
-    cache: Res<PipelineCache>,
-    device: Res<RenderDevice>,
-    images: Res<RenderAssets<GpuImage>>,
-    mut texture_table: ResMut<super::texture_table::ExactTextureTable>,
-    mut blood: ResMut<HudBloodGpu>,
-    mut saved: ResMut<SavedScreenGpu>,
-    mut temporal: ResMut<super::shellshock_screen::TemporalScreenGpu>,
-    mut temporal_pipeline: ResMut<super::shellshock_screen::TemporalScreenPipeline>,
-    queue: Res<RenderQueue>,
-    mut context: RenderContext,
+    resources: IwTessResources,
+    context: RenderContext,
     stages: Option<Res<SharedRenderStagesSlot>>,
+    recorder: IwTessRecorder,
 ) {
-    let (target, _extracted_view) = view.into_inner();
-    let format = target.main_texture_format();
-    let scene_size = target.main_texture().size();
-    temporal.draw(super::shellshock_screen::TemporalScreenDraw {
-        frame: extracted.0.shellshock_screen,
-        texture: target.main_texture(),
-        view: target.main_texture_view(),
-        format,
-        device: &device,
-        queue: &queue,
-        cache: &cache,
-        pipeline: &mut temporal_pipeline,
-        context: &mut context,
-    });
-    if extracted.0.saved_screen_sequence != saved.sequence {
-        saved.captured = false;
-        if let Some(copy) = saved
-            .copy
-            .as_ref()
-            .filter(|copy| copy.format == format && copy.size == scene_size)
-        {
-            context.command_encoder().copy_texture_to_texture(
-                target.main_texture().as_image_copy(),
-                copy.texture.as_image_copy(),
-                scene_size,
-            );
-            saved.sequence = extracted.0.saved_screen_sequence;
-            saved.captured = true;
-        }
-    }
-    if !extracted.0.visible {
-        return;
-    }
-    if meta.draws.is_empty() {
-        if let Some(slot) = stages.as_ref()
-            && let Ok(mut guard) = slot.0.lock()
-        {
-            guard.tess_stream_bind_n = Some(0);
-            guard.tess_stream_skip_n = Some(0);
-        }
-        return;
-    }
-    let samples = 1;
-    let saved_copy = saved
-        .copy
-        .as_ref()
-        .filter(|copy| saved.captured && copy.format == format && copy.size == scene_size);
-    let blood_ready = blood.uploaded;
-    let mut prepared = Vec::with_capacity(meta.draws.len());
-    for geom in &meta.draws {
-        let Some(batch) = extracted.0.batches.get(geom.batch_i) else {
-            continue;
-        };
-        let Some(gpu_image) = images.get(&batch.image) else {
-            continue;
-        };
-        let (id, bind, textures) = match batch.technique {
-            HudTessTechnique::Modulate => {
-                let id = specialized.specialize(
-                    &cache,
-                    &pipeline,
-                    IwTessPipelineKey {
-                        target: format,
-                        samples,
-                        state: batch.state,
-                    },
-                );
-                let layout = cache.get_bind_group_layout(&pipeline.modulate_layout);
-                let bind = device.create_bind_group(
-                    "iw_tess_modulate",
-                    &layout,
-                    &BindGroupEntries::sequential((
-                        pipeline.params.as_entire_buffer_binding(),
-                        &gpu_image.texture_view,
-                        &gpu_image.sampler,
-                    )),
-                );
-                (id, bind, None)
-            }
-            HudTessTechnique::SavedScreen => {
-                let Some(copy) = saved_copy else {
-                    continue;
-                };
-                let id = specialized.specialize(
-                    &cache,
-                    &pipeline,
-                    IwTessPipelineKey {
-                        target: format,
-                        samples,
-                        state: batch.state,
-                    },
-                );
-                let layout = cache.get_bind_group_layout(&pipeline.modulate_layout);
-                let bind = device.create_bind_group(
-                    "iw_tess_saved_screen",
-                    &layout,
-                    &BindGroupEntries::sequential((
-                        pipeline.params.as_entire_buffer_binding(),
-                        &copy.view,
-                        &copy.sampler,
-                    )),
-                );
-                (id, bind, None)
-            }
-            HudTessTechnique::SplatterAlt => {
-                let Some(gpu_mask) = batch.mask.as_ref().and_then(|mask| images.get(mask)) else {
-                    continue;
-                };
-                let Some(port) = blood.port.as_mut().filter(|_| blood_ready) else {
-                    continue;
-                };
-                let textures =
-                    port.textures(&mut texture_table, &device, &cache, gpu_image, gpu_mask);
-                (port.pipeline, port.constants.clone(), Some(textures))
-            }
-        };
-        if cache.get_render_pipeline(id).is_none() {
-            continue;
-        }
-        prepared.push((id, bind, textures, geom));
-    }
-    if prepared.is_empty() {
-        if let Some(slot) = stages.as_ref()
-            && let Ok(mut guard) = slot.0.lock()
-        {
-            guard.tess_stream_bind_n = Some(0);
-            guard.tess_stream_skip_n = Some(0);
-        }
-        return;
-    }
-    let attachments = [Some(target.get_unsampled_color_attachment())];
-    let mut pass =
-        context.begin_tracked_render_pass(bevy::render::render_resource::RenderPassDescriptor {
-            label: Some("iw_tess_stretchpic_pass"),
-            color_attachments: &attachments,
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-    let mut streams = GfxCmdBufStreams::default();
-    let mut bind_n = 0u32;
-    let mut skip_n = 0u32;
-    for (id, bind, textures, geom) in &prepared {
-        let Some(gpu_pipeline) = cache.get_render_pipeline(*id) else {
-            continue;
-        };
-        pass.set_render_pipeline(gpu_pipeline);
-        pass.set_bind_group(0, bind, &[]);
-        if let Some(textures) = textures {
-            pass.set_bind_group(1, textures, &[]);
-        }
-        let action = set_stream_source(
-            &mut streams,
-            geom.stream.buffer,
-            geom.stream.offset,
-            geom.stream.stride,
-        );
-        if action.bind_stream0 {
-            pass.set_vertex_buffer(0, geom.vb.slice(u64::from(geom.stream.offset)..));
-            bind_n = bind_n.saturating_add(1);
-        } else {
-            skip_n = skip_n.saturating_add(1);
-        }
-        pass.set_index_buffer(geom.ib.slice(..), IndexFormat::Uint16);
-        let start = geom.first_index;
-        let end = start.saturating_add(geom.index_count);
-        pass.draw_indexed(start..end, 0, 0..1);
-    }
-    drop(pass);
-    if let Some(slot) = stages.as_ref()
-        && let Ok(mut guard) = slot.0.lock()
-    {
-        guard.tess_stream_bind_n = Some(bind_n);
-        guard.tess_stream_skip_n = Some(skip_n);
-    }
+    recorder.record(view, extracted, meta, resources, context, stages);
 }
 
 #[derive(Resource, Default)]

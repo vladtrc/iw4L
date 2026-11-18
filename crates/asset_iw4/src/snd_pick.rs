@@ -16,13 +16,7 @@ pub fn unit_random(state: &mut u32) -> f32 {
 pub fn lerp_range(min: f32, max: f32, t: f32) -> f32 {
     let lo = if min < max { min } else { max };
     let hi = if min < max { max } else { min };
-    let t = if t < 0.0 {
-        0.0
-    } else if t > 1.0 {
-        1.0
-    } else {
-        t
-    };
+    let t = t.clamp(0.0, 1.0);
     lo + (hi - lo) * t
 }
 

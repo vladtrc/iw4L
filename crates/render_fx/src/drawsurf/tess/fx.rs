@@ -9,7 +9,6 @@ use fx_iw4::{
 
 use render_frame::{
     GfxMeshData, reserve_code_mesh, reserve_code_mesh_indices, reserve_code_mesh_verts,
-    shrink_code_mesh_verts,
 };
 
 use render_frame::PackedVertexRefusal;
@@ -109,15 +108,10 @@ impl FxCodeMeshPlan {
         color_rgba: [u8; 4],
         uv: FxSpriteAtlasUv,
     ) -> bool {
-        let Some(base) = reserve_code_mesh_verts(&mut self.mesh, 4) else {
+        let Some((base, _, _)) = reserve_code_mesh(&mut self.mesh, 4, 6, 0) else {
             self.overflow_n = self.overflow_n.saturating_add(1);
             return false;
         };
-        if reserve_code_mesh_indices(&mut self.mesh, 6).is_none() {
-            shrink_code_mesh_verts(&mut self.mesh, 4);
-            self.overflow_n = self.overflow_n.saturating_add(1);
-            return false;
-        }
         let tangent = axis_or(transform.rotation * Vec3::X, Vec3::X);
         let normal = axis_or(transform.rotation * Vec3::Z, Vec3::Z);
         let texcoord = |u: f32, v: f32| trail_pack_texcoord(u, v);
@@ -185,7 +179,11 @@ impl FxCodeMeshPlan {
     }
 
     pub fn extend_indices(&mut self, inds: &[u32]) -> bool {
-        if reserve_code_mesh_indices(&mut self.mesh, inds.len() as u32).is_none() {
+        let count = u32::try_from(inds.len()).ok();
+        if count
+            .and_then(|count| reserve_code_mesh_indices(&mut self.mesh, count))
+            .is_none()
+        {
             self.overflow_n = self.overflow_n.saturating_add(1);
             return false;
         }
@@ -194,13 +192,20 @@ impl FxCodeMeshPlan {
     }
 
     pub fn shrink_verts_to(&mut self, vert_used: u32) {
-        let n = self.mesh.vert_used.wrapping_sub(vert_used);
-        shrink_code_mesh_verts(&mut self.mesh, n);
+        assert!(
+            vert_used <= self.mesh.vert_used,
+            "vertex rollback must not grow the mesh"
+        );
+        self.mesh.vert_used = vert_used;
         let vert_used = self.mesh.vert_used as usize;
         self.verts_mut().truncate(vert_used);
     }
 
     pub fn shrink_indices_to(&mut self, index_used: u32) {
+        assert!(
+            index_used <= self.mesh.index_used,
+            "index rollback must not grow the mesh"
+        );
         self.mesh.index_used = index_used;
         self.inds_mut().truncate(index_used as usize);
     }

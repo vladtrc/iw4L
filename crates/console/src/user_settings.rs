@@ -55,16 +55,60 @@ pub(crate) fn load_user_settings(
     }
 }
 
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct MenuBindingInputs<'w, 's> {
+    keys: Res<'w, ButtonInput<KeyCode>>,
+    mouse: Res<'w, ButtonInput<MouseButton>>,
+    wheel: MessageReader<'w, 's, MouseWheel>,
+    gamepad: crate::gamepad::ActiveGamepad<'w, 's>,
+}
+
+impl MenuBindingInputs<'_, '_> {
+    fn take_wheel(&mut self) -> Option<BindButton> {
+        self.wheel
+            .read()
+            .fold(None, |first, event| first.or_else(|| wheel_button(event.y)))
+    }
+
+    fn next_button(&self, wheel_direction: Option<BindButton>) -> Option<BindButton> {
+        let pad = self.gamepad.get();
+        let pad_start =
+            pad.is_some_and(|pad| pad.just_pressed(bevy::input::gamepad::GamepadButton::Start));
+        let pad_button = pad.and_then(|pad| {
+            pad.get_just_pressed()
+                .copied()
+                .filter_map(crate::PadButton::from_gamepad_button)
+                .find(|button| *button != crate::PadButton::Start)
+        });
+        if let Some(button) = pad_button.filter(|_| !pad_start) {
+            return Some(BindButton::Pad(button));
+        }
+        if self.keys.just_pressed(KeyCode::Escape) {
+            return Some(BindButton::Key(KeyCode::Escape));
+        }
+        if pad_start {
+            return Some(BindButton::Pad(crate::PadButton::Start));
+        }
+        self.keys
+            .get_just_pressed()
+            .copied()
+            .map(BindButton::Key)
+            .next()
+            .or_else(|| {
+                self.mouse
+                    .get_just_pressed()
+                    .copied()
+                    .map(BindButton::Mouse)
+                    .next()
+            })
+            .or(wheel_direction)
+    }
+}
+
 pub(crate) fn consume_menu_binding(
     mut intents: MessageReader<frame::UiBindRequest>,
-    keys: Res<ButtonInput<KeyCode>>,
-    mouse: Res<ButtonInput<MouseButton>>,
-    mut wheel: MessageReader<MouseWheel>,
-    (gamepads, active, mut settings): (
-        Query<&bevy::input::gamepad::Gamepad>,
-        Res<frame::ActivePad>,
-        ResMut<frame::GameSettings>,
-    ),
+    mut input: MenuBindingInputs,
+    mut settings: ResMut<frame::GameSettings>,
     mut pending: ResMut<PendingMenuBinding>,
     mut capture: ResMut<frame::UiBindingCapture>,
     mut binds: ResMut<KeyBinds>,
@@ -75,9 +119,7 @@ pub(crate) fn consume_menu_binding(
         pending.id = None;
         view.listening = None;
     }
-    let wheel_direction = wheel
-        .read()
-        .fold(None, |first, event| first.or_else(|| wheel_button(event.y)));
+    let wheel_direction = input.take_wheel();
     let mut began = false;
     for intent in intents.read() {
         if let Some(id) = input_iw4::command_id_lookup(&intent.command) {
@@ -98,16 +140,10 @@ pub(crate) fn consume_menu_binding(
         pending.armed = true;
         return;
     }
-    let pad = active.0.and_then(|entity| gamepads.get(entity).ok());
-    let pad_start =
-        pad.is_some_and(|pad| pad.just_pressed(bevy::input::gamepad::GamepadButton::Start));
-    let pad_button = pad.and_then(|pad| {
-        pad.get_just_pressed()
-            .copied()
-            .filter_map(crate::PadButton::from_gamepad_button)
-            .find(|button| *button != crate::PadButton::Start)
-    });
-    if let Some(button) = pad_button.filter(|_| !pad_start) {
+    let button = input.next_button(wheel_direction);
+    if let Some(BindButton::Pad(button)) = button
+        && button != crate::PadButton::Start
+    {
         capture.command = None;
         capture.consumed_input = true;
         binds.clear_command_on(id, true);
@@ -122,7 +158,10 @@ pub(crate) fn consume_menu_binding(
         view.revision = view.revision.wrapping_add(1);
         return;
     }
-    if keys.just_pressed(KeyCode::Escape) || pad_start {
+    if matches!(
+        button,
+        Some(BindButton::Key(KeyCode::Escape) | BindButton::Pad(crate::PadButton::Start))
+    ) {
         capture.command = None;
         capture.consumed_input = true;
         pending.id = None;
@@ -131,19 +170,6 @@ pub(crate) fn consume_menu_binding(
         view.revision = view.revision.wrapping_add(1);
         return;
     }
-    let button = keys
-        .get_just_pressed()
-        .copied()
-        .map(BindButton::Key)
-        .next()
-        .or_else(|| {
-            mouse
-                .get_just_pressed()
-                .copied()
-                .map(BindButton::Mouse)
-                .next()
-        })
-        .or(wheel_direction);
     let Some(button) = button else { return };
     capture.command = None;
     capture.consumed_input = true;
@@ -203,19 +229,19 @@ pub(crate) fn apply_master_volume(
     }
 }
 
+#[derive(Resource, Default)]
+pub(crate) struct SentPlayerName(Option<(sim::ClientId, [u8; 16])>);
+
 pub(crate) fn sync_player_name(
     settings: Res<frame::GameSettings>,
-    generation: Res<frame::WorldGeneration>,
-    has_world: Res<State<frame::MatchScope>>,
     role: Res<frame::RuntimeRole>,
     local: Option<Res<net::LocalPresentClient>>,
     link: Option<Res<net::UdpClientLink>>,
     mut inbox: Option<ResMut<net::ClientActionInbox>>,
-    mut seq: ResMut<net::ActionRequestIds>,
-    mut sent: Local<Option<(frame::WorldStamp, sim::ClientId, [u8; 16])>>,
+    mut sent: ResMut<SentPlayerName>,
 ) {
-    if !(*has_world.get() == frame::MatchScope::Live) || *role == frame::RuntimeRole::Replay {
-        *sent = None;
+    if *role == frame::RuntimeRole::Replay {
+        sent.0 = None;
         return;
     }
     let (Some(local), Some(inbox)) = (local, inbox.as_deref_mut()) else {
@@ -226,22 +252,18 @@ pub(crate) fn sync_player_name(
             || link.assigned_client != Some(local.0)
             || !link.has_entered_match())
     {
-        *sent = None;
+        sent.0 = None;
         return;
     }
     let name = entity_iw4::pack_client_state_name(&settings.player_name);
-    let next = (generation.stamp(), local.0, name);
-    if sent.as_ref() == Some(&next) {
+    let next = (local.0, name);
+    if sent.0.as_ref() == Some(&next) {
         return;
     }
-    let request_id = seq.allocate();
-    if let Err(error) = inbox.push(local.0, sim::ClientAction::SetName { request_id, name }) {
-        diag::warn!(
-            Console,
-            "name: request_id={request_id} not queued — {error}"
-        );
+    if let Err(error) = inbox.push(local.0, sim::ClientAction::SetName { name }) {
+        diag::warn!(Console, "name: not queued — {error}");
     } else {
-        *sent = Some(next);
+        sent.0 = Some(next);
     }
 }
 

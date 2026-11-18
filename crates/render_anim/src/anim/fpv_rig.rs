@@ -68,12 +68,6 @@ impl FpvMaterialAdmission {
             .find(|(index, _)| *index == surface)
             .map(|(_, verdict)| verdict)
     }
-
-    pub fn verdicts_of(&self, catalog_entry: usize) -> &[(usize, FpvSurfaceVerdict)] {
-        self.verdicts
-            .get(&catalog_entry)
-            .map_or(&[], |verdicts| verdicts.as_slice())
-    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -183,7 +177,7 @@ impl PreparedFpvModel {
                     model: skel.name.clone(),
                     surface,
                     material: material.clone(),
-                    cause: *cause,
+                    cause,
                 });
                 break;
             }
@@ -566,7 +560,7 @@ impl PreparedFpvRig {
         hand: usize,
         anims: &[PosedClip<'_>],
         offset: Vec3,
-    ) -> Option<FpvHandPose> {
+    ) -> Result<FpvHandPose, String> {
         self.pose_clips(hand, anims, &[], offset)
     }
 
@@ -588,7 +582,7 @@ impl PreparedFpvRig {
         &self,
         right: &[PosedClip<'_>],
         left: &[PosedClip<'_>],
-    ) -> Option<FpvHandPose> {
+    ) -> Result<FpvHandPose, String> {
         self.pose_clips(0, right, left, Vec3::ZERO)
     }
 
@@ -598,14 +592,21 @@ impl PreparedFpvRig {
         anims: &[PosedClip<'_>],
         left: &[PosedClip<'_>],
         offset: Vec3,
-    ) -> Option<FpvHandPose> {
+    ) -> Result<FpvHandPose, String> {
         if hand >= 2 || anims.is_empty() {
-            return None;
+            return Err("no active clips for requested hand".into());
         }
-        if !anims.iter().all(|anim| self.owns_clip(hand, anim))
-            || !left.iter().all(|anim| self.owns_clip(1, anim))
+        for (source, anim) in anims
+            .iter()
+            .map(|anim| (hand, anim))
+            .chain(left.iter().map(|anim| (1, anim)))
         {
-            return None;
+            if !self.owns_clip(source, anim) {
+                return Err(format!(
+                    "hand {source} slot {} clip `{}` differs from prepared rig",
+                    anim.node, anim.clip.name
+                ));
+            }
         }
         let bound: Vec<(&PosedClip<'_>, Vec<Option<usize>>, usize)> = anims
             .iter()
@@ -624,7 +625,7 @@ impl PreparedFpvRig {
             .iter()
             .any(|(_, bones, _)| bones.iter().any(Option::is_some))
         {
-            return None;
+            return Err("active clips have no bound skeleton tracks".into());
         }
         let full_body = |anim: &PosedClip<'_>| {
             anim.node != asset_game::WeaponAnimSlot::AdsUp.index()
@@ -697,7 +698,7 @@ impl PreparedFpvRig {
                 }
             })
             .collect();
-        Some(FpvHandPose {
+        Ok(FpvHandPose {
             generation: self.generation,
             skin,
             eye_from_world,

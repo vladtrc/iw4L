@@ -18,6 +18,9 @@ pub fn refresh(
     });
     frame.viewmodel_clip_from_world = res.viewmodel_clip_from_world;
     frame.viewmodel_near = res.viewmodel_near;
+    frame.portal.clone_from(&res.portal);
+    frame.world_cameras.clone_from(&res.world_cameras);
+    frame.world_fog_colors.clone_from(&res.world_fog_colors);
     frame.primary_lights.clear();
     frame.attenuation.clear();
     frame.local_light_bindings.clear();
@@ -26,9 +29,12 @@ pub fn refresh(
     let Some(inputs) = inputs else {
         frame.inv_image_height = None;
         frame.smodel_lighting_sh = Default::default();
+        frame.xmodel_lighting_sh = Default::default();
         return;
     };
     frame.smodel_lighting_sh = inputs.smodel_lighting_sh.clone();
+    frame.xmodel_lighting_base = inputs.xmodel_lighting_base;
+    frame.xmodel_lighting_sh = inputs.xmodel_lighting_sh.clone();
     frame.inv_image_height = inputs.inv_image_height;
     frame
         .primary_lights

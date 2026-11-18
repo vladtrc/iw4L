@@ -6,14 +6,6 @@ pub const CODE_MESH_ARGS_CAP: u32 = 0x100;
 
 pub const CODE_MESH_VERT_STRIDE: u32 = 0x20;
 
-pub const CODE_MESH_ARGS_STRIDE: u32 = 0x10;
-
-pub const CODE_MESH_WARN_VERTS: u32 = 0x24;
-
-pub const CODE_MESH_WARN_INDS: u32 = 0x23;
-
-pub const CODE_MESH_WARN_ARGS: u32 = 0x25;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GfxMeshData {
     pub vert_used: u32,
@@ -27,12 +19,6 @@ pub struct GfxMeshData {
     pub index_cap: u32,
 
     pub args_cap: u32,
-
-    pub warn_verts: u32,
-
-    pub warn_inds: u32,
-
-    pub warn_args: u32,
 }
 
 impl GfxMeshData {
@@ -41,12 +27,9 @@ impl GfxMeshData {
             vert_used: 0,
             index_used: 0,
             args_used: 0,
-            vert_cap: 0x4000,
-            index_cap: 0x6000,
-            args_cap: 0x100,
-            warn_verts: 0x24,
-            warn_inds: 0x23,
-            warn_args: 0x25,
+            vert_cap: CODE_MESH_VERT_CAP,
+            index_cap: CODE_MESH_INDEX_CAP,
+            args_cap: CODE_MESH_ARGS_CAP,
         }
     }
 }
@@ -57,19 +40,22 @@ impl Default for GfxMeshData {
     }
 }
 
+// Keep the whole reservation in the address space of its u16 vertex base.
+fn next_vertex(mesh: &GfxMeshData, count: u32) -> Option<(u16, u32)> {
+    let base = u16::try_from(mesh.vert_used).ok()?;
+    let next = mesh.vert_used.checked_add(count)?;
+    (next <= mesh.vert_cap && next <= u32::from(u16::MAX) + 1).then_some((base, next))
+}
+
 pub fn reserve_code_mesh_verts(mesh: &mut GfxMeshData, count: u32) -> Option<u16> {
-    let next = mesh.vert_used.wrapping_add(count);
-    if mesh.vert_cap < next {
-        return None;
-    }
-    let base = mesh.vert_used as u16;
+    let (base, next) = next_vertex(mesh, count)?;
     mesh.vert_used = next;
     Some(base)
 }
 
 pub fn reserve_code_mesh_indices(mesh: &mut GfxMeshData, count: u32) -> Option<u32> {
-    let next = mesh.index_used.wrapping_add(count);
-    if mesh.index_cap < next {
+    let next = mesh.index_used.checked_add(count)?;
+    if next > mesh.index_cap {
         return None;
     }
     let base = mesh.index_used;
@@ -77,43 +63,23 @@ pub fn reserve_code_mesh_indices(mesh: &mut GfxMeshData, count: u32) -> Option<u
     Some(base)
 }
 
-pub fn shrink_code_mesh_verts(mesh: &mut GfxMeshData, count: u32) {
-    mesh.vert_used = mesh.vert_used.wrapping_sub(count);
-}
-
-pub fn get_code_mesh_verts(verts_base: usize, base_vertex: u16) -> usize {
-    verts_base.wrapping_add(usize::from(base_vertex).wrapping_mul(0x20))
-}
-
-pub fn get_code_mesh_args(args_base: usize, slot: u32) -> usize {
-    (slot as usize).wrapping_mul(0x10).wrapping_add(args_base)
-}
-
+/// Reserves all three ranges together, leaving counters unchanged on refusal.
 pub fn reserve_code_mesh(
     mesh: &mut GfxMeshData,
     verts: u32,
     inds: u32,
     args: u32,
 ) -> Option<(u16, u32, Option<u32>)> {
-    if mesh.vert_cap < mesh.vert_used.wrapping_add(verts) {
+    let (vert_base, vert_next) = next_vertex(mesh, verts)?;
+    let index_next = mesh.index_used.checked_add(inds)?;
+    let args_next = mesh.args_used.checked_add(args)?;
+    if index_next > mesh.index_cap || args_next > mesh.args_cap {
         return None;
     }
-    if mesh.index_cap < mesh.index_used.wrapping_add(inds) {
-        return None;
-    }
-    if args != 0 && mesh.args_cap < mesh.args_used.wrapping_add(args) {
-        return None;
-    }
-    let vert_base = mesh.vert_used as u16;
     let index_base = mesh.index_used;
-    mesh.vert_used = mesh.vert_used.wrapping_add(verts);
-    mesh.index_used = mesh.index_used.wrapping_add(inds);
-    let arg_base = if args != 0 {
-        let base = mesh.args_used;
-        mesh.args_used = mesh.args_used.wrapping_add(args);
-        Some(base)
-    } else {
-        None
-    };
+    let arg_base = (args != 0).then_some(mesh.args_used);
+    mesh.vert_used = vert_next;
+    mesh.index_used = index_next;
+    mesh.args_used = args_next;
     Some((vert_base, index_base, arg_base))
 }

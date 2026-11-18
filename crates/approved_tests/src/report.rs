@@ -668,6 +668,15 @@ pub fn finish(run_dir: &Path, manifest: &mut Value, phases: &[Phase], outcome: &
         manifest["process"].clone(),
     );
 
+    let pressure_ticks = mark(marks, "a.audio_pressure.begin")
+        .and_then(|m| m.num("tick"))
+        .zip(mark(marks, "a.audio_pressure.end").and_then(|m| m.num("tick")))
+        .map(|(before, after)| after - before);
+    asserts.check(
+        "audio.pressure.schedule_advanced",
+        pressure_ticks.is_some_and(|ticks| ticks >= 4.0),
+        json!({ "ticks": pressure_ticks }),
+    );
     let mut captures = serde_json::Map::new();
     for capture in phases.iter().filter_map(|p| p.capture) {
         let png = child
@@ -683,7 +692,7 @@ pub fn finish(run_dir: &Path, manifest: &mut Value, phases: &[Phase], outcome: &
             png_ok,
             png_to.display().to_string(),
         );
-        let lifetime_text = std::fs::read_to_string(&dump_to).unwrap_or_default();
+        let lifetime_text = std::fs::read_to_string(&dump_to).unwrap_or(String::new());
         let lifetimes: BTreeMap<_, _> = lifetime_text
             .lines()
             .filter_map(|line| line.split_once(" = "))
@@ -732,16 +741,59 @@ pub fn finish(run_dir: &Path, manifest: &mut Value, phases: &[Phase], outcome: &
                 );
             }
         }
+        let index_upload = lifetime_text
+            .lines()
+            .find_map(|line| line.strip_prefix("smodel_index_upload "))
+            .and_then(|line| serde_json::from_str::<Value>(line).ok());
+        let pressure_refusals = lifetime_text
+            .lines()
+            .find_map(|line| line.strip_prefix("pressure_refusals = "))
+            .and_then(|value| value.parse::<u64>().ok());
+        if matches!(capture, "01_overgrown_gameplay" | "03_second_map_gameplay") {
+            asserts.check(
+                &format!("gpu.{capture}.index_owner"),
+                index_upload.as_ref().is_some_and(|upload| {
+                    upload["scene_owner"]
+                        .as_u64()
+                        .is_some_and(|owner| owner != 0)
+                        && upload["scene_owner"] == upload["uploaded_owner"]
+                        && upload["revision"]
+                            .as_u64()
+                            .is_some_and(|revision| revision > 0)
+                        && upload["words"].as_u64().is_some_and(|words| words > 0)
+                }),
+                json!(index_upload),
+            );
+        }
         captures.insert(
             capture.to_owned(),
             json!({
                 "screenshot": png_ok.then(|| png_to.display().to_string()),
                 "dump": dump_ok.then(|| dump_to.display().to_string()),
                 "lifetimes": lifetimes,
+                "index_upload": index_upload,
+                "pressure_refusals": pressure_refusals,
                 "scope_rows": lifetime_text.lines().filter(|line| line.starts_with("resource = ")).collect::<Vec<_>>(),
             }),
         );
     }
+
+    let first_owner = captures["01_overgrown_gameplay"]["index_upload"]["scene_owner"].as_u64();
+    let second_owner = captures["03_second_map_gameplay"]["index_upload"]["scene_owner"].as_u64();
+    asserts.check(
+        "gpu.map_change.replaces_index_owner",
+        first_owner.zip(second_owner).is_some_and(|(a, b)| a != b),
+        json!({ "a": first_owner, "b": second_owner }),
+    );
+    let before_pressure = captures["01c_after_round_restart"]["pressure_refusals"].as_u64();
+    let after_pressure = captures["01d_audio_pressure"]["pressure_refusals"].as_u64();
+    asserts.check(
+        "audio.pressure.explicit_refusal",
+        before_pressure
+            .zip(after_pressure)
+            .is_some_and(|(a, b)| b > a),
+        json!({ "before": before_pressure, "after": after_pressure }),
+    );
 
     manifest["artifacts"] = json!({
         "captures": captures,

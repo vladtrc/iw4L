@@ -79,10 +79,10 @@ pub enum MarkGenerateAddEntity {
 }
 
 #[inline]
-pub fn impact_mark_material<'a>(
-    materials: [Option<&'a str>; 2],
+pub fn impact_mark_material(
+    materials: [Option<&str>; 2],
     against: MarkFragmentsAgainst,
-) -> Option<&'a str> {
+) -> Option<&str> {
     match against {
         MarkFragmentsAgainst::WorldBrushes => materials[1],
         MarkFragmentsAgainst::Models => materials[0],

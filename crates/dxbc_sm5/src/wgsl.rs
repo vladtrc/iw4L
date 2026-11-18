@@ -112,6 +112,9 @@ pub struct PassAbi {
     pub textures: Vec<TextureSlot>,
     pub sample_adapters: Vec<SampleAdapter>,
     pub alpha_tests: Vec<(String, String)>,
+    /// The sun caster writes its depth into the R32F atlas; T6's null pixel
+    /// shader writes a constant there instead.
+    pub depth_to_colour: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -975,7 +978,23 @@ fn varying_locations(vertex: &Shader) -> BTreeMap<u32, u32> {
         .collect()
 }
 
+/// Portal exit plane in clip coordinates, shared by all programs of a view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExitClipMode {
+    ClipDistance,
+    FragmentDiscard,
+}
+
 pub fn lower_pass(abi: &PassAbi, vertex: &Shader, pixel: &Shader) -> Result<String, WgslError> {
+    lower_pass_with_exit_clip(abi, vertex, pixel, None)
+}
+
+pub fn lower_pass_with_exit_clip(
+    abi: &PassAbi,
+    vertex: &Shader,
+    pixel: &Shader,
+    exit_clip: Option<ExitClipMode>,
+) -> Result<String, WgslError> {
     if vertex.kind != ProgramKind::Vertex {
         return Err(WgslError::WrongStage {
             expected: ProgramKind::Vertex,
@@ -999,7 +1018,13 @@ pub fn lower_pass(abi: &PassAbi, vertex: &Shader, pixel: &Shader) -> Result<Stri
     let flat_location = locations.len();
 
     let mut out = String::from("enable wgpu_binding_array;\n");
+    if exit_clip == Some(ExitClipMode::ClipDistance) {
+        out.push_str("enable clip_distances;\n");
+    }
     out.push_str("diagnostic(off, derivative_uniformity);\n\n");
+    if exit_clip.is_some() {
+        out.push_str("@group(2) @binding(0) var<uniform> sm3_clip_planes: array<vec4<f32>, 7>;\n");
+    }
     out.push_str("struct Sm3ConstantArena { c: array<vec4<f32>> }\n");
     out.push_str("@group(0) @binding(0) var<storage, read> sm3_constants: Sm3ConstantArena;\n");
     texture_tables(&mut out, &abi.textures);
@@ -1020,10 +1045,38 @@ pub fn lower_pass(abi: &PassAbi, vertex: &Shader, pixel: &Shader) -> Result<Stri
     }
     writeln!(
         out,
-        "    @interpolate(flat) @location({flat_location}) sm3_constant_base: u32,\n}}\n"
+        "    @interpolate(flat) @location({flat_location}) sm3_constant_base: u32,"
     )
     .unwrap();
+    if exit_clip.is_some() {
+        writeln!(out, "    @location({}) sm3_exit_distance: vec2<f32>,\n    @location({}) sm3_aperture_distance: vec4<f32>,\n    @interpolate(flat) @location({}) sm3_clip_options: vec2<f32>,", flat_location + 1, flat_location + 2, flat_location + 3).unwrap();
+    }
+    out.push_str("}\n");
+    // A clip-distance builtin is legal only on the vertex output, never on
+    // the fragment input. Keep identical user locations in both structures.
+    if exit_clip == Some(ExitClipMode::ClipDistance) {
+        out.push_str(
+            "struct DxVertexOut {\n    @builtin(position) @invariant position: vec4<f32>,\n",
+        );
+        for location in locations.values() {
+            writeln!(
+                out,
+                "    @location({location}) varying_{location}: vec4<f32>,"
+            )
+            .unwrap();
+        }
+        writeln!(
+            out,
+            "    @interpolate(flat) @location({flat_location}) sm3_constant_base: u32,"
+        )
+        .unwrap();
+        writeln!(out, "    @location({}) sm3_exit_distance: vec2<f32>,\n    @location({}) sm3_aperture_distance: vec4<f32>,\n    @interpolate(flat) @location({}) sm3_clip_options: vec2<f32>,", flat_location + 1, flat_location + 2, flat_location + 3).unwrap();
+        out.push_str("    @builtin(clip_distances) sm3_hardware_clip: array<f32, 2>,\n}\n");
+    }
 
+    if exit_clip.is_some() {
+        out.push_str("\nfn sm3_portal_discard(v: DxVaryings) -> bool {\n    if v.sm3_exit_distance.x < 0.0 { return true; }\n    let inside = all(v.sm3_aperture_distance >= vec4<f32>(0.0));\n    if v.sm3_clip_options.x == 1.0 {\n        return inside && (v.sm3_clip_options.y > 0.5 || v.sm3_exit_distance.y < 0.0);\n    }\n    return v.sm3_exit_distance.y < 0.0 ||\n        (v.sm3_clip_options.x == 2.0 && (!inside || v.sm3_clip_options.y > 0.5));\n}\n");
+    }
     writeln!(out, "@vertex\nfn {VERTEX_ENTRY}(").unwrap();
     for input in &abi.vertex_inputs {
         writeln!(
@@ -1033,7 +1086,17 @@ pub fn lower_pass(abi: &PassAbi, vertex: &Shader, pixel: &Shader) -> Result<Stri
         )
         .unwrap();
     }
-    out.push_str("    @builtin(instance_index) sm3_constant_base: u32,\n) -> DxVaryings {\n");
+
+    let vertex_output = if exit_clip == Some(ExitClipMode::ClipDistance) {
+        "DxVertexOut"
+    } else {
+        "DxVaryings"
+    };
+    writeln!(
+        out,
+        "    @builtin(instance_index) sm3_constant_base: u32,\n) -> {vertex_output} {{"
+    )
+    .unwrap();
     let mut prologue = String::new();
     for register in input_registers(vertex) {
         let expression = abi
@@ -1050,11 +1113,24 @@ pub fn lower_pass(abi: &PassAbi, vertex: &Shader, pixel: &Shader) -> Result<Stri
         )
         .unwrap();
     }
-    let mut epilogue = format!("return DxVaryings(bitcast<vec4<f32>>(o{position})");
+    let mut epilogue = format!("return {vertex_output}(bitcast<vec4<f32>>(o{position})");
     for register in locations.keys() {
         write!(epilogue, ", bitcast<vec4<f32>>(o{register})").unwrap();
     }
-    epilogue.push_str(", sm3_constant_base);");
+    epilogue.push_str(", sm3_constant_base");
+    if let Some(mode) = exit_clip {
+        let pos = format!("bitcast<vec4<f32>>(o{position})");
+        write!(
+            epilogue,
+            ", vec2<f32>(dot({pos}, sm3_clip_planes[0]), dot({pos}, sm3_clip_planes[1]))"
+        )
+        .unwrap();
+        write!(epilogue, ", vec4<f32>(dot({pos}, sm3_clip_planes[2]), dot({pos}, sm3_clip_planes[3]), dot({pos}, sm3_clip_planes[4]), dot({pos}, sm3_clip_planes[5])), sm3_clip_planes[6].xy").unwrap();
+        if mode == ExitClipMode::ClipDistance {
+            write!(epilogue, ", array<f32, 2>(dot({pos}, sm3_clip_planes[0]), select(dot({pos}, sm3_clip_planes[1]), 1.0, sm3_clip_planes[6].x == 1.0))").unwrap();
+        }
+    }
+    epilogue.push_str(");");
     out.push_str(&stage_body(
         vertex,
         Stage::Vertex,
@@ -1101,15 +1177,48 @@ pub fn lower_pass(abi: &PassAbi, vertex: &Shader, pixel: &Shader) -> Result<Stri
     };
     let entries = core::iter::once((FRAGMENT_ENTRY.to_string(), String::new()))
         .chain(abi.alpha_tests.iter().cloned());
+    out.push_str(
+        "\nstruct DxColourDepth { @location(0) colour: vec4<f32>, @location(1) depth: f32 }\n",
+    );
     for (entry, test) in entries {
-        writeln!(
-            out,
-            "\n@fragment\nfn {entry}(varyings: DxVaryings) -> @location(0) vec4<f32> {{"
-        )
-        .unwrap();
-        let epilogue = format!("{{ let dx_colour = {colour}; {test} return dx_colour; }}");
-        out.push_str(&stage_body(pixel, Stage::Pixel, abi, epilogue, &prologue)?);
-        out.push_str("}\n");
+        for effect_depth in [false, true] {
+            let name = if effect_depth {
+                format!("{entry}_effect_depth")
+            } else {
+                entry.clone()
+            };
+            let result = if effect_depth {
+                "DxColourDepth"
+            } else {
+                "@location(0) vec4<f32>"
+            };
+            writeln!(
+                out,
+                "\n@fragment\nfn {name}(varyings: DxVaryings) -> {result} {{"
+            )
+            .unwrap();
+            let output = if abi.depth_to_colour {
+                "vec4<f32>(varyings.position.z)"
+            } else {
+                "dx_colour"
+            };
+            let clip_test = if exit_clip.is_some() {
+                "if sm3_portal_discard(varyings) { discard; }"
+            } else {
+                ""
+            };
+            let returned = if effect_depth {
+                format!(
+                    "let linear_depth = 1.0 / max(varyings.position.w, 1.0e-7); return DxColourDepth({output}, select(linear_depth, -linear_depth, varyings.position.z > 0.984375));"
+                )
+            } else {
+                format!("return {output};")
+            };
+            let epilogue = format!("{{ let dx_colour = {colour}; {test} {clip_test} {returned} }}");
+            out.push_str(&stage_body(pixel, Stage::Pixel, abi, epilogue, &prologue)?);
+            out.push_str("}\n");
+        }
     }
+
     Ok(out)
 }

@@ -58,7 +58,8 @@ pub use at_rest::{
     get_at_rest_fraction, msec_for_sampling_axis,
 };
 pub use atlas::{
-    FX_ELEM_ATLAS_OFF, FX_ELEM_ATLAS_SIZE, FxSpriteAtlasUv, sprite_atlas_cell, sprite_atlas_uv,
+    FX_ELEM_ATLAS_OFF, FX_ELEM_ATLAS_SIZE, FxAtlasUvRect, FxSpriteAtlasUv, sprite_atlas_cell,
+    sprite_atlas_uv,
 };
 pub use beam::{
     FX_BEAM_ADD_CAP, FX_BEAM_CLIP_DZ_AND, FX_BEAM_CLIP_PLANE_Z1, FX_BEAM_CLIP_T_MAX,
@@ -73,13 +74,13 @@ pub use beam::{
     matrix_for_viewer,
 };
 pub use bolt::{
-    BoneOrientationRefuse, FX_BOLT_BONE_MASK, FX_BOLT_BONE_SHIFT, FX_BOLT_CENTITY_LIMIT,
-    FX_BOLT_CENTITY_STRIDE, FX_BOLT_CENTITY_TELEPORT_MASK, FX_BOLT_DOBJ_MASK, FX_BOLT_FREE_NONE,
-    FX_BOLT_HANDLE_NONE, FX_BOLT_INIT_LAST, FX_BOLT_LOST_OR, FX_BOLT_PARENT_DWORDS,
-    FX_BOLT_PARENT_IDENTITY_QUAT, FX_BOLT_RECORD_CAPACITY, FX_BOLT_RECORD_OFF_PACKED,
-    FX_BOLT_RECORD_OFF_PARENT, FX_BOLT_RECORD_STRIDE, FX_BOLT_TELEPORT_SHIFT,
-    FX_BOLT_VIEWMODEL_DOBJ_BASE, FX_QUAT_TRANSFORM_SCALE, FxGetBoneOrientationRoute,
-    FxUpdateEffectBolt, begin_iterating_over_effects_exclusive, bolt_alloc, bolt_bone,
+    FX_BOLT_BONE_MASK, FX_BOLT_BONE_SHIFT, FX_BOLT_CENTITY_LIMIT, FX_BOLT_CENTITY_STRIDE,
+    FX_BOLT_CENTITY_TELEPORT_MASK, FX_BOLT_DOBJ_MASK, FX_BOLT_FREE_NONE, FX_BOLT_HANDLE_NONE,
+    FX_BOLT_INIT_LAST, FX_BOLT_LOST_OR, FX_BOLT_PARENT_DWORDS, FX_BOLT_PARENT_IDENTITY_QUAT,
+    FX_BOLT_RECORD_CAPACITY, FX_BOLT_RECORD_OFF_PACKED, FX_BOLT_RECORD_OFF_PARENT,
+    FX_BOLT_RECORD_STRIDE, FX_BOLT_TELEPORT_SHIFT, FX_BOLT_VIEWMODEL_DOBJ_BASE,
+    FX_QUAT_TRANSFORM_SCALE, FxGetBoneOrientationRoute, FxUpdateEffectBolt,
+    begin_iterating_over_effects_exclusive, bolt_alloc, bolt_bone,
     bolt_centity_teleport_for_compare, bolt_compose_orientation, bolt_dobj, bolt_handle_is_none,
     bolt_init_next_index, bolt_init_parent_orientation, bolt_mark_lost, bolt_pack,
     bolt_record_index_from_byte_delta, bolt_spawn_teleport_bit, bolt_teleport_bit,
@@ -95,8 +96,8 @@ pub use collide::{
     trace_mask,
 };
 pub use cull::{
-    FX_ELEM_FLAG_CULL_DRAW_5_PLANES, cull_cloud, cull_cloud_plane_count, cull_cloud_radius,
-    cull_elem_for_spawn_allows, cull_elem_light, cull_sphere, elem_light_color_rgb,
+    FX_ELEM_FLAG_CULL_DRAW_5_PLANES, cull_cloud_plane_count, cull_cloud_radius,
+    cull_elem_for_spawn_allows, cull_elem_sphere, cull_sphere, elem_light_color_rgb,
 };
 pub use draw::{FX_DRAW_ELEM_HANDLER_PRESENT, FxElemType, draw_elem_handler_present};
 pub use effect_def::FxEffectDef;
@@ -105,8 +106,8 @@ pub use elem_def::FxElemDef;
 pub use emit::{
     FX_ELEM_EMIT_ORIENT_AXIS, FX_EMIT_CRT_RAND_SCALE, FX_EMIT_DIST_TO_RESIDUAL,
     FX_EMIT_RESIDUAL_ROUND_BIAS, FX_EMIT_RESIDUAL_TO_DIST, FX_EMIT_SPAWN_CAP, FxEmitSchedule,
-    FxEmitSpawn, emit_dist_range, emit_lerp_origin, emit_pack_residual, emit_unpack_residual_start,
-    process_emitting_schedule,
+    FxEmitSegment, FxEmitSpawn, emit_dist_range, emit_lerp_origin, emit_pack_residual,
+    emit_unpack_residual_start,
 };
 pub use flags::{
     FX_ELEM_DIE_ON_TOUCH, FX_ELEM_RUN_MASK, FX_ELEM_RUN_RELATIVE_TO_EFFECT,
@@ -128,7 +129,7 @@ pub use glass::{
     FX_GLASS_STATE_FAN_DATA_COUNT, FX_GLASS_STATE_FLAGS, FX_GLASS_STATE_GEO_DATA_START,
     FX_GLASS_STATE_HOLE_DATA_COUNT, FX_GLASS_STATE_INIT_INDEX, FX_GLASS_STATE_SUPPORT_MASK,
     FX_GLASS_STATE_VERT_COUNT, FX_GLASS_TRACE_INTERVAL_MSEC, FX_GLASS_VERT_SCALE,
-    FxGlassIntactVert, FxGlassResetPiece, FxGlassSlabVert, FxGlassVertXform, glass_alloc_piece,
+    FxGlassIntactVert, FxGlassResetPiece, FxGlassSlabVert, FxGlassVertXform,
     glass_ballistic_origin, glass_clear_in_use, glass_def_color_rgba, glass_def_tex_vecs,
     glass_dynamics_avel, glass_dynamics_fall_time, glass_dynamics_init_row,
     glass_dynamics_phys_obj, glass_dynamics_software_launch, glass_dynamics_vel, glass_emit_slab,
@@ -195,9 +196,8 @@ pub use laser::{
     FX_LASER_POST_LIGHT_COLOR, FX_LASER_POST_LIGHT_HALF, FX_LASER_POST_LIGHT_MATERIAL,
     FX_LASER_POST_LIGHT_MIN_SPAN, FX_LASER_POST_LIGHT_PAD, FX_LASER_RADIUS_DIST_BIAS,
     FX_LASER_RADIUS_DIST_SCALE, FX_LASER_SURF_EXTRA_END, FX_LASER_TAG, FX_LASER_TRACE_BOUNDS,
-    laser_brush_trace_allows, laser_from_brush_trace, laser_from_tag_orientation,
-    laser_point_on_ray, laser_post_light, laser_post_light_allows, laser_post_light_end_t,
-    laser_post_light_span, laser_radius_from_dist,
+    FxLaserLightSettings, FxLaserRay, FxLaserTrace, laser_brush_trace_allows, laser_point_on_ray,
+    laser_post_light_allows, laser_post_light_end_t, laser_post_light_span, laser_radius_from_dist,
 };
 pub use life::{
     life_span_range_from_bytes, sample_life_span_msec, trail_elem_base_vel_z_pack, trail_elem_keep,
@@ -213,7 +213,7 @@ pub use orientation::{
 };
 pub use origin::{
     FX_ELEM_SPAWN_OFFSET_CYLINDER, FX_ELEM_SPAWN_OFFSET_MASK, FX_ELEM_SPAWN_OFFSET_SPHERE,
-    FX_ELEM_SPAWN_RELATIVE, FX_TWO_PI, FxSpawnOffsetMode, apply_spawn_origin,
+    FX_ELEM_SPAWN_RELATIVE, FX_TWO_PI, FxSpawnOffset, FxSpawnOffsetMode, apply_spawn_origin,
     elem_spawn_offset_mode, elem_spawn_relative, offset_spawn_origin, random_dir,
     sample_float_range, sample_spawn_origin_offset, spawn_origin_world, world_delta_to_local,
 };
@@ -230,17 +230,17 @@ pub use particle_cloud::{
     FX_PARTICLE_SPARK_PRIMS_PER_CELL, FX_PARTICLE_SPARK_UV, FX_PARTICLE_SPARK_VERTS_PER_CELL,
     FX_SPARK_CLOUD_HANDLE_NONE, FX_SPARK_CLOUD_HISTORY_CAPACITY, FX_SPARK_CLOUD_HISTORY_STRIDE,
     FX_SPARK_CLOUD_SAMPLE_MASK, FX_SPARK_CLOUD_SAMPLE_RING, FX_SPARKCLOUD_HISTORY_MIN_DT_MS,
-    FX_SPARKCLOUD_UV_V_1_3, FX_SPARKCLOUD_UV_V_2_3, FxSparkCloudHistory, GFX_PARTICLE_CLOUD_STRIDE,
-    GFX_POS_TEX_VERTEX_STRIDE, GfxParticleCloud, GfxPosTexVertex, MSVCRT_HOLDRAND_DEFAULT,
-    build_cloud, empty_particle_cloud, gfx_pos_tex_vertex_bytes, msvcrt_rand, msvcrt_rand01,
-    pack_gfx_color, particle_cloud_cell_indices, particle_cloud_cell_radius_sq,
-    particle_cloud_cell_verts, particle_cloud_cell_xyz, particle_cloud_color_const,
-    particle_cloud_compare_cell_radius, particle_cloud_draw_cell_count, particle_cloud_draw_counts,
-    particle_cloud_matrix_diag, particle_cloud_particle_id, particle_fountain_parm0,
-    particle_spark_cell_indices, particle_spark_cell_verts, spark_cloud_addr,
-    spark_cloud_handle_for_slot, spark_cloud_handle_from_ptr_delta, sparkcloud_build_triplet,
-    sparkcloud_fill_sample, sparkcloud_history_advance, sparkcloud_history_should_advance,
-    sparkcloud_lerp_sample, sparkcloud_tent_weights,
+    FX_SPARKCLOUD_UV_V_1_3, FX_SPARKCLOUD_UV_V_2_3, FxCloudShape, FxSparkCloudHistory,
+    GFX_PARTICLE_CLOUD_STRIDE, GFX_POS_TEX_VERTEX_STRIDE, GfxParticleCloud, GfxPosTexVertex,
+    MSVCRT_HOLDRAND_DEFAULT, build_cloud, empty_particle_cloud, gfx_pos_tex_vertex_bytes,
+    msvcrt_rand, msvcrt_rand01, pack_gfx_color, particle_cloud_cell_indices,
+    particle_cloud_cell_radius_sq, particle_cloud_cell_verts, particle_cloud_cell_xyz,
+    particle_cloud_color_const, particle_cloud_compare_cell_radius, particle_cloud_draw_cell_count,
+    particle_cloud_draw_counts, particle_cloud_matrix_diag, particle_cloud_particle_id,
+    particle_fountain_parm0, particle_spark_cell_indices, particle_spark_cell_verts,
+    spark_cloud_addr, spark_cloud_handle_for_slot, spark_cloud_handle_from_ptr_delta,
+    sparkcloud_build_triplet, sparkcloud_fill_sample, sparkcloud_history_advance,
+    sparkcloud_history_should_advance, sparkcloud_lerp_sample, sparkcloud_tent_weights,
 };
 pub use pool::{
     FX_BUFFERS_OFF_EFFECTS, FX_BUFFERS_OFF_ELEMS, FX_BUFFERS_OFF_SPARK_CLOUD,
@@ -342,9 +342,7 @@ pub use vec::{
     FX_PERP_VECTOR_UNIT, effect_orient_arc, perpendicular_vector, vec3_distance, vec3_length_sq,
     vec3_normalize, vector_vectors,
 };
-pub use velocity::{
-    FX_VEL_AT_TIME_SCALE, elem_launch_velocity, get_velocity_at_time, get_velocity_at_time_sampled,
-};
+pub use velocity::{FX_VEL_AT_TIME_SCALE, FxVelocityField};
 pub use view::{
     FX_EFFECT_DEF_SIZE, FX_ELEM_DEF_STRIDE, FxEffectDefView, FxElemDefView, effect_def_view,
     elem_def_gravity_accel_z, elem_def_view, elem_def_view_x64,
@@ -353,9 +351,9 @@ pub use vis_blocker::{
     FX_CLIENT_VISIBILITY_THRESHOLD, FX_DISTANCE_FADE_BIAS, FX_DISTANCE_FADE_SCALE,
     FX_ELEM_FLAG_VIS_BLOCKER, FX_VIS_BLOCKER_BYTE_TO_UNIT, FX_VIS_BLOCKER_PARAM3_SCALE,
     FX_VIS_BLOCKER_PARAM4_INV_SCALE, FX_VIS_BLOCKER_REC_STRIDE, FX_VIS_BLOCKER_SLOT_CAP,
-    FX_VIS_MIN_TRACE_DIST_DEFAULT, FxVisBlockerBuf, FxVisBlockerRec, distance_fade_range,
-    evaluate_distance_fade, get_client_visibility, vis_blocker_add, vis_blocker_add_prepared,
-    vis_blocker_generate_verts, vis_blocker_param4,
+    FX_VIS_MIN_TRACE_DIST_DEFAULT, FxDistanceFade, FxVisBlockerBuf, FxVisBlockerRec,
+    distance_fade_range, get_client_visibility, vis_blocker_add, vis_blocker_generate_verts,
+    vis_blocker_param4,
 };
 pub use visual::{
     FX_ELEM_VIS_STATE_SAMPLE_SIZE, FX_ELEM_VISUAL_STATE_SIZE, FX_VIS_COLOR_OFF,

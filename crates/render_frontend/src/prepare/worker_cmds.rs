@@ -442,6 +442,10 @@ impl WorkerCmdQueues {
         }
     }
 
+    #[expect(
+        clippy::type_complexity,
+        reason = "The borrowed callback retains its call-site lifetime and in-place output contract."
+    )]
     pub fn process(
         &mut self,
         typ: u8,
@@ -544,7 +548,7 @@ fn eval_busy(
 
 fn init_cmds(init: WorkerCmdInit) -> WorkerCmds {
     debug_assert!(init.data_size > 0);
-    debug_assert!(init.buf_size % init.data_size == 0);
+    debug_assert!(init.buf_size.is_multiple_of(init.data_size));
     debug_assert!(init.data_size as usize <= WORKER_CMD_MAX_DATA_SIZE);
     let mut cmds = WorkerCmds {
         start_pos: 0,

@@ -1,10 +1,9 @@
 use bevy::prelude::*;
+use frame::ScopeApp;
 
-/// What the ADS autofocus sweep is allowed to focus on: the same solid-world
-/// contents the sight trace uses. Every `sweep_box` caller names its mask.
 const AUTOFOCUS_CLIPMASK: u32 = 0x0080_6c31;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq)]
 pub struct DepthOfField {
     pub view_model_start: f32,
     pub view_model_end: f32,
@@ -106,6 +105,7 @@ pub fn register(app: &mut App) {
     app.init_resource::<DofDvars>()
         .init_resource::<GlowDvars>()
         .init_resource::<DofFrame>()
+        .scoped::<DepthOfField>(frame::Timeline::Live)
         .add_systems(
             Update,
             update_dof
@@ -126,6 +126,10 @@ fn approach(current: f32, target: f32, max_change: f32, dt: f32) -> f32 {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 fn update_dof(
     view: Res<crate::prepare::scene::view_parms::PreparedSceneView>,
     znear: Res<crate::prepare::scene::view_parms::RZnearDvar>,
@@ -135,23 +139,13 @@ fn update_dof(
     weapons: Option<Res<assets::PreparedWeapons>>,
     clock: Res<net::FrameClock>,
     mut frame: ResMut<DofFrame>,
-    mut scene: Local<DepthOfField>,
-    clip: Res<crate::adapters::anim::dyn_ent::DynEntPhysClip>,
-    context: (Res<frame::InstalledMatch>, Res<net::EntityEventCursor>),
+    mut scene: ResMut<DepthOfField>,
+    collision: Res<net::ClientCollision>,
     view_settings: (Res<frame::ViewSubject>, Res<frame::GameSettings>),
     camera: Option<Res<render_anim::occupancy::view_kick::SessionViewKick>>,
-    mut generation: Local<Option<frame::PresentationContext>>,
 ) {
     let (subject, settings) = view_settings;
     *frame = DofFrame::default();
-    let current = Some(frame::PresentationContext::new(
-        context.0.load_key,
-        context.1.timeline(),
-    ));
-    if *generation != current {
-        *generation = current;
-        *scene = DepthOfField::default();
-    }
     let Some(ps) = presented.player(local.0).filter(|_| view.ready) else {
         *scene = DepthOfField::default();
         return;
@@ -167,23 +161,17 @@ fn update_dof(
         ..Default::default()
     };
     if ads != 0.0 || ps.pm_type >= 8 {
-        if let Some(clip) = clip.0.as_ref() {
-            let hit = clip
-                .sweep_box(
-                    view.eye.to_array(),
-                    (view.eye + view.forward * 8192.0).to_array(),
-                    [0.0; 3],
-                    [0.0; 3],
-                    AUTOFOCUS_CLIPMASK,
-                )
-                .fraction
-                * 8192.0;
-            if hit < target.near_end {
-                target.near_end = (hit - 30.0).max(1.0);
-            }
-            target.far_start = target.far_start.max(hit);
-            target.far_end = target.far_start * 4.0;
+        let hit = collision.0.trace_sight_distance(
+            view.eye.to_array(),
+            (view.eye + view.forward * 8192.0).to_array(),
+            AUTOFOCUS_CLIPMASK,
+        );
+        perf::counter!("dof_focus_distance", "iw4l.render", f64::from(hit));
+        if hit < target.near_end {
+            target.near_end = (hit - 30.0).max(1.0);
         }
+        target.far_start = target.far_start.max(hit);
+        target.far_end = target.far_start * 4.0;
     }
     if ads < 1.0 && ps.pm_type < 8 {
         scene.near_start = ads;
@@ -209,22 +197,17 @@ fn update_dof(
         local.0,
         subject.in_killcam(),
         settings.third_person,
-    ) {
-        if let Some(range) = weapons
-            .as_ref()
-            .and_then(|w| {
-                w.snapshot_weapon(
-                    presented.weapon_epoch(),
-                    weapon_iw4::get_viewmodel_weapon_index(ps),
-                )
+    ) && let Some(range) = weapons
+        .as_ref()
+        .and_then(|w| {
+            w.snapshot_weapon(weapon_iw4::get_viewmodel_weapon_index(ps))
                 .ok()
                 .and_then(|weapon| weapon.hud_facts())
-            })
-            .and_then(|w| w.ads_dof)
-        {
-            scene.view_model_start = range[0] * ads;
-            scene.view_model_end = range[1] * ads;
-        }
+        })
+        .and_then(|w| w.ads_dof)
+    {
+        scene.view_model_start = range[0] * ads;
+        scene.view_model_end = range[1] * ads;
     }
     if let Some(distance) = camera.as_ref().and_then(|c| c.killcam_focus_distance) {
         *scene = DepthOfField {
@@ -261,49 +244,49 @@ fn update_dof(
         DepthOfField::default()
     };
     let mut bias = dvars.bias;
-    if let Some(snapshot) = presented.snapshot() {
-        if let Some(meta) = snapshot.meta.for_client(local.0) {
-            if snapshot
-                .meta
-                .objectives
-                .server_info
-                .iter()
-                .chain(meta.client_dvars.iter())
-                .any(|(name, _)| name.to_ascii_lowercase().starts_with("r_dof"))
-            {
-                dof = *scene;
+    if let Some(snapshot) = presented.snapshot()
+        && let Some(meta) = snapshot.meta.for_client(local.0)
+    {
+        if snapshot
+            .meta
+            .objectives
+            .server_info
+            .iter()
+            .chain(meta.client_dvars.iter())
+            .any(|(name, _)| name.to_ascii_lowercase().starts_with("r_dof"))
+        {
+            dof = *scene;
+        }
+        let mut enabled = true;
+        for (name, value) in snapshot
+            .meta
+            .objectives
+            .server_info
+            .iter()
+            .chain(meta.client_dvars.iter())
+        {
+            let Ok(v) = value.parse::<f32>() else {
+                continue;
+            };
+            if !v.is_finite() {
+                continue;
             }
-            let mut enabled = true;
-            for (name, value) in snapshot
-                .meta
-                .objectives
-                .server_info
-                .iter()
-                .chain(meta.client_dvars.iter())
-            {
-                let Ok(v) = value.parse::<f32>() else {
-                    continue;
-                };
-                if !v.is_finite() {
-                    continue;
-                }
-                match name.to_ascii_lowercase().as_str() {
-                    "r_dof_enable" => enabled = v != 0.0,
-                    "r_dof_viewmodelstart" => dof.view_model_start = v,
-                    "r_dof_viewmodelend" => dof.view_model_end = v,
-                    "r_dof_nearstart" => dof.near_start = v,
-                    "r_dof_nearend" => dof.near_end = v,
-                    "r_dof_farstart" => dof.far_start = v,
-                    "r_dof_farend" => dof.far_end = v,
-                    "r_dof_nearblur" => dof.near_blur = v,
-                    "r_dof_farblur" => dof.far_blur = v,
-                    "r_dof_bias" => bias = v,
-                    _ => {}
-                }
+            match name.to_ascii_lowercase().as_str() {
+                "r_dof_enable" => enabled = v != 0.0,
+                "r_dof_viewmodelstart" => dof.view_model_start = v,
+                "r_dof_viewmodelend" => dof.view_model_end = v,
+                "r_dof_nearstart" => dof.near_start = v,
+                "r_dof_nearend" => dof.near_end = v,
+                "r_dof_farstart" => dof.far_start = v,
+                "r_dof_farend" => dof.far_end = v,
+                "r_dof_nearblur" => dof.near_blur = v,
+                "r_dof_farblur" => dof.far_blur = v,
+                "r_dof_bias" => bias = v,
+                _ => {}
             }
-            if !enabled {
-                dof = DepthOfField::default();
-            }
+        }
+        if !enabled {
+            dof = DepthOfField::default();
         }
     }
     *frame = DofFrame {

@@ -1,12 +1,16 @@
-use super::args::{float, optional, string};
+pub(crate) mod waits;
+
+use super::args::{float, int, optional, string};
 use crate::script::{Namespace, NativeRegistry, RoundScript, Value};
 use bevy_ecs::prelude::World;
 
 fn change(world: &mut World, args: &[Value], stop: bool, ac130: bool) -> Result<Value, String> {
+    let sp_ambient =
+        !ac130 && world.resource::<RoundScript>().profile == asset_core::RuntimeProfile::Campaign;
     if if stop {
         args.len() > 1
     } else {
-        !(1..=3).contains(&args.len())
+        !(1..=if sp_ambient { 3 } else { 2 }).contains(&args.len())
     } {
         return Err("wrong number of ambient arguments".into());
     }
@@ -20,11 +24,22 @@ fn change(world: &mut World, args: &[Value], stop: bool, ac130: bool) -> Result<
         Some(name)
     };
     let seconds = optional(args, usize::from(!stop), float)?.unwrap_or(0.0);
+    let rate = if sp_ambient && !stop {
+        optional(args, 2, float)?.unwrap_or(1.0)
+    } else {
+        1.0
+    };
+    if !rate.is_finite() {
+        return Err("ambient playback rate must be finite".into());
+    }
+    let rate_percent = (rate * 100.0 + 0.5).floor().clamp(0.0, 100.0) as u8;
     let duration = (seconds * 1000.0 + 0.5).floor();
     if !duration.is_finite() || duration < 0.0 || f64::from(duration) > f64::from(i32::MAX) {
         return Err("ambient fade time must be finite, nonnegative and fit the level clock".into());
     }
-    let now = crate::level_time_ms(world.resource::<crate::step::StepRequest>().tick);
+    let now = world
+        .get_resource::<crate::step::StepRequest>()
+        .map_or(0, |request| crate::level_time_ms(request.tick));
     let end = now
         .checked_add(duration as i32)
         .ok_or("ambient fade exceeds the level clock")?;
@@ -32,6 +47,7 @@ fn change(world: &mut World, args: &[Value], stop: bool, ac130: bool) -> Result<
         alias,
         start_ms: now,
         end_ms: end,
+        rate_percent,
     };
     let mut runtime = world.resource_mut::<RoundScript>();
     if ac130 {
@@ -90,7 +106,11 @@ fn sound_fade(world: &mut World, args: &[Value]) -> Result<Value, String> {
     Ok(Value::Undefined)
 }
 
-fn stop_entity_sounds(world: &mut World, receiver: &Value) -> Result<Value, String> {
+fn stop_entity_sounds(
+    world: &mut World,
+    receiver: &Value,
+    channel: Option<u8>,
+) -> Result<Value, String> {
     let id = super::natives::engine::entity_id(world, receiver)?;
     let number = world.resource::<RoundScript>().entities[&id].number;
     let origin = match super::players::entity_field(world, id, "origin") {
@@ -104,6 +124,7 @@ fn stop_entity_sounds(world: &mut World, receiver: &Value) -> Result<Value, Stri
         entity_iw4::EntityEventKind::STOPSOUNDS,
         crate::EntityEventPayload {
             number,
+            event_parm: channel.map_or(0, |channel| i32::from(channel) + 1),
             origin,
             ..Default::default()
         },
@@ -170,71 +191,269 @@ fn channel_volumes(
     Ok(Value::Undefined)
 }
 
-fn stop_entity_sound_channel(
+fn reverb(
     world: &mut World,
     receiver: &Value,
     args: &[Value],
+    deactivate: bool,
 ) -> Result<Value, String> {
-    let _channel = optional(args, 0, string)?;
-    stop_entity_sounds(world, receiver)
-}
-
-fn set_reverb(world: &mut World, receiver: &Value, args: &[Value]) -> Result<Value, String> {
-    let _entity = super::natives::engine::entity_id(world, receiver)?;
-    let _priority = string(args, 0)?;
-    let _roomtype = string(args, 1)?;
-    let _drylevel = float(args, 2)?;
-    let _wetlevel = float(args, 3)?;
-    let _fadetime = optional(args, 4, float)?.unwrap_or(0.0);
+    let client = crate::ClientId(super::natives::player::player(world, receiver)?);
+    let count = if deactivate { 1..=2 } else { 2..=5 };
+    if !count.contains(&args.len()) {
+        return Err("wrong number of reverb arguments".into());
+    }
+    let priority = match string(args, 0)?.as_str() {
+        "snd_enveffectsprio_level" => 1,
+        "snd_enveffectsprio_shellshock" => 2,
+        _ => return Err("invalid reverb priority".into()),
+    };
+    let seconds = optional(args, if deactivate { 1 } else { 4 }, float)?.unwrap_or(0.0);
+    let duration = (seconds * 1000.0 + 0.5).floor().max(0.0);
+    if !seconds.is_finite() || f64::from(duration) > f64::from(i32::MAX) {
+        return Err("reverb fade must be finite and fit the audio clock".into());
+    }
+    let command = if deactivate {
+        crate::ScriptAudioCommand::DeactivateReverb {
+            client,
+            priority,
+            fade_ms: duration as i32,
+        }
+    } else {
+        crate::ScriptAudioCommand::Reverb {
+            client,
+            priority,
+            room: string(args, 1)?,
+            dry: optional(args, 2, float)?.unwrap_or(1.0),
+            wet: optional(args, 3, float)?.unwrap_or(0.5),
+            fade_ms: duration as i32,
+        }
+    };
+    if !command.valid() {
+        return Err("reverb needs finite dry/wet levels and a bounded room name".into());
+    }
+    crate::frame::FrameWorld::from_world(world).push_script_audio(command);
     Ok(Value::Undefined)
 }
 
-fn deactivate_reverb(world: &mut World, receiver: &Value, args: &[Value]) -> Result<Value, String> {
-    let _entity = super::natives::engine::entity_id(world, receiver)?;
-    let _priority = string(args, 0)?;
-    let _fadetime = optional(args, 1, float)?.unwrap_or(0.0);
-    Ok(Value::Undefined)
+fn eq_index(args: &[Value], index: usize, limit: i32) -> Result<u8, String> {
+    let value = int(args, index)?;
+    if !(0..limit).contains(&value) {
+        return Err("EQ index out of range".into());
+    }
+    Ok(value as u8)
 }
 
-fn set_eq(world: &mut World, receiver: &Value, args: &[Value]) -> Result<Value, String> {
-    let _entity = super::natives::engine::entity_id(world, receiver)?;
-    if args.is_empty() {
-        return Err("seteq expects arguments".into());
+fn eq_band(args: &[Value], index: usize) -> Result<crate::ScriptEqBand, String> {
+    let kind = match string(args, index)?.to_ascii_lowercase().as_str() {
+        "lowpass" => 0,
+        "highpass" => 1,
+        "lowshelf" => 2,
+        "highshelf" => 3,
+        "bell" => 4,
+        _ => return Err("unknown EQ filter type".into()),
+    };
+    let band = crate::ScriptEqBand {
+        kind,
+        gain_db: float(args, index + 1)?,
+        frequency: float(args, index + 2)?,
+        q: float(args, index + 3)?,
+    };
+    if !band.valid() {
+        return Err("EQ needs finite gain, frequency in 0..20000 and positive Q".into());
+    }
+    Ok(band)
+}
+
+fn eq(world: &mut World, receiver: &Value, args: &[Value], operation: u8) -> Result<Value, String> {
+    let client = crate::ClientId(super::natives::player::player(world, receiver)?);
+    let mut commands = Vec::new();
+    match operation {
+        0 | 1 => {
+            if (operation == 0 && args.len() != 7)
+                || (operation == 1 && ![6, 10, 14].contains(&args.len()))
+            {
+                return Err("wrong number of EQ arguments".into());
+            }
+            let channel = string(args, 0)?;
+            let track = eq_index(args, 1, 2)?;
+            if operation == 0 {
+                commands.push(crate::ScriptAudioCommand::Eq {
+                    client,
+                    channel,
+                    track,
+                    band: eq_index(args, 2, 3)?,
+                    filter: eq_band(args, 3)?,
+                });
+            } else {
+                let filters = (0..((args.len() - 2) / 4))
+                    .map(|band| eq_band(args, 2 + band * 4))
+                    .collect::<Result<Vec<_>, _>>()?;
+                commands.push(crate::ScriptAudioCommand::EqBands {
+                    client,
+                    channel,
+                    track,
+                    filters,
+                });
+            }
+        }
+        2 => {
+            if !(1..=3).contains(&args.len()) {
+                return Err("DeactivateEq takes track, optional channel and band".into());
+            }
+            commands.push(crate::ScriptAudioCommand::DeactivateEq {
+                client,
+                track: eq_index(args, 0, 2)?,
+                channel: optional(args, 1, string)?,
+                band: if args.len() == 3 {
+                    Some(eq_index(args, 2, 3)?)
+                } else {
+                    None
+                },
+            });
+        }
+        _ => {
+            if !(1..=2).contains(&args.len()) {
+                return Err("SetEqLerp takes fraction and optional track".into());
+            }
+            let fraction = float(args, 0)?;
+            let track = if args.len() == 2 {
+                eq_index(args, 1, 2)?
+            } else {
+                0
+            };
+            if !fraction.is_finite() || !(0.0..=1.0).contains(&fraction) {
+                return Err("EQ fraction must be in 0..1".into());
+            }
+            commands.push(crate::ScriptAudioCommand::EqLerp {
+                client,
+                fraction: if track == 1 { 1.0 - fraction } else { fraction },
+            });
+        }
+    }
+    if commands.iter().any(|command| !command.valid()) {
+        return Err("invalid EQ command".into());
+    }
+    let mut frame = crate::frame::FrameWorld::from_world(world);
+    for command in commands {
+        frame.push_script_audio(command);
     }
     Ok(Value::Undefined)
 }
 
-fn set_eq_bands(world: &mut World, receiver: &Value, args: &[Value]) -> Result<Value, String> {
-    let _entity = super::natives::engine::entity_id(world, receiver)?;
-    if args.is_empty() {
-        return Err("seteqbands expects arguments".into());
-    }
-    Ok(Value::Undefined)
-}
-
-fn deactivate_eq(world: &mut World, receiver: &Value, args: &[Value]) -> Result<Value, String> {
-    let _entity = super::natives::engine::entity_id(world, receiver)?;
-    if args.is_empty() {
-        return Err("deactivateeq expects arguments".into());
-    }
-    Ok(Value::Undefined)
-}
-
-fn set_eq_lerp(world: &mut World, receiver: &Value, args: &[Value]) -> Result<Value, String> {
-    let _entity = super::natives::engine::entity_id(world, receiver)?;
-    let _progress = float(args, 0)?;
-    Ok(Value::Undefined)
-}
-
-fn eq_toggle(world: &mut World, receiver: &Value, on: bool) -> Result<Value, String> {
+fn entity_eq(world: &mut World, receiver: &Value, disabled: bool) -> Result<Value, String> {
     let id = super::natives::engine::entity_id(world, receiver)?;
-    world
-        .resource_mut::<RoundScript>()
-        .set_object_field(id, "eq_active", Value::Int(on.into()));
+    let client = world.resource::<RoundScript>().player_client(id);
+    if let Some(client) = client {
+        let mut frame = crate::frame::FrameWorld::from_world(world);
+        let ps = frame
+            .player_mut(crate::ClientId(client))
+            .ok_or("player has no physical state")?;
+        if disabled {
+            ps.e_flags |= playerstate_iw4::eflags::SP_EQ_DISABLED;
+        } else {
+            ps.e_flags &= !playerstate_iw4::eflags::SP_EQ_DISABLED;
+        }
+    } else {
+        world
+            .resource_mut::<RoundScript>()
+            .entities
+            .get_mut(&id)
+            .unwrap()
+            .eq_disabled = disabled;
+    }
     Ok(Value::Undefined)
+}
+
+pub(crate) fn eq_disabled_entities(world: &World) -> Vec<u16> {
+    let Some(runtime) = world.get_resource::<RoundScript>() else {
+        return Vec::new();
+    };
+    runtime
+        .entities
+        .iter()
+        .filter(|(id, entity)| {
+            if let Some(client) = runtime.player_client(**id) {
+                runtime.profile == asset_core::RuntimeProfile::Campaign
+                    && crate::frame::player_ref(world, crate::ClientId(client))
+                        .is_some_and(|ps| ps.e_flags & playerstate_iw4::eflags::SP_EQ_DISABLED != 0)
+            } else {
+                entity.eq_disabled
+            }
+        })
+        .filter_map(|(_, entity)| {
+            u16::try_from(entity.number)
+                .ok()
+                .filter(|number| *number < 2048)
+        })
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 pub(crate) fn register(registry: &mut NativeRegistry) {
+    registry.register(
+        Namespace::Function,
+        "soundsettimescalefactor",
+        |world, _, args| {
+            if args.len() != 2 {
+                return Err("usage: SoundSetTimeScaleFactor(channel, factor)".into());
+            }
+            let command = crate::ScriptAudioCommand::TimeScaleFactor {
+                channel: string(args, 0)?,
+                factor: float(args, 1)?,
+            };
+            if !command.valid() {
+                return Err("sound timescale needs a channel and a finite factor in [0, 1]".into());
+            }
+            crate::frame::FrameWorld::from_world(world).push_script_audio(command);
+            Ok(Value::Undefined)
+        },
+    );
+    registry.register(Namespace::Function, "soundresettimescale", |world, _, _| {
+        crate::frame::FrameWorld::from_world(world)
+            .push_script_audio(crate::ScriptAudioCommand::ResetTimeScale);
+        Ok(Value::Undefined)
+    });
+    registry.register(
+        Namespace::Method,
+        "iswaitingonsound",
+        |world, receiver, _| {
+            let id = super::natives::engine::entity_id(world, receiver)?;
+            Ok(Value::Int(i32::from(
+                world.resource::<RoundScript>().entities[&id]
+                    .sound_wait
+                    .is_some(),
+            )))
+        },
+    );
+    registry.register(Namespace::Method, "eqoff", |world, receiver, _| {
+        entity_eq(world, receiver, true)
+    });
+    registry.register(Namespace::Method, "eqon", |world, receiver, _| {
+        entity_eq(world, receiver, false)
+    });
+    registry.register(Namespace::Method, "seteq", |world, receiver, args| {
+        eq(world, receiver, args, 0)
+    });
+    registry.register(Namespace::Method, "seteqbands", |world, receiver, args| {
+        eq(world, receiver, args, 1)
+    });
+    registry.register(
+        Namespace::Method,
+        "deactivateeq",
+        |world, receiver, args| eq(world, receiver, args, 2),
+    );
+    registry.register(Namespace::Method, "seteqlerp", |world, receiver, args| {
+        eq(world, receiver, args, 3)
+    });
+    registry.register(Namespace::Method, "setreverb", |world, receiver, args| {
+        reverb(world, receiver, args, false)
+    });
+    registry.register(
+        Namespace::Method,
+        "deactivatereverb",
+        |world, receiver, args| reverb(world, receiver, args, true),
+    );
     registry.register(
         Namespace::Method,
         "setchannelvolumes",
@@ -245,25 +464,19 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         "deactivatechannelvolumes",
         |world, receiver, args| channel_volumes(world, receiver, args, true),
     );
-    registry.register(Namespace::Method, "stopsounds", |world, receiver, _| {
-        stop_entity_sounds(world, receiver)
-    });
     registry.register(
         Namespace::Method,
         "stopsoundchannel",
-        |world, receiver, args| stop_entity_sound_channel(world, receiver, args),
+        |world, receiver, args| {
+            let name = string(args, 0)?;
+            let channel = crate::frame::FrameWorld::from_world(world)
+                .script_sound_channel(&name)?
+                .ok_or_else(|| format!("unknown sound channel '{name}'"))?;
+            stop_entity_sounds(world, receiver, Some(channel))
+        },
     );
-    registry.register(Namespace::Method, "setreverb", set_reverb);
-    registry.register(Namespace::Method, "deactivatereverb", deactivate_reverb);
-    registry.register(Namespace::Method, "seteq", set_eq);
-    registry.register(Namespace::Method, "seteqbands", set_eq_bands);
-    registry.register(Namespace::Method, "deactivateeq", deactivate_eq);
-    registry.register(Namespace::Method, "seteqlerp", set_eq_lerp);
-    registry.register(Namespace::Method, "eqon", |world, receiver, _| {
-        eq_toggle(world, receiver, true)
-    });
-    registry.register(Namespace::Method, "eqoff", |world, receiver, _| {
-        eq_toggle(world, receiver, false)
+    registry.register(Namespace::Method, "stopsounds", |world, receiver, _| {
+        stop_entity_sounds(world, receiver, None)
     });
     registry.register(Namespace::Function, "soundfade", |world, _, args| {
         sound_fade(world, args)

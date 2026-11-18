@@ -14,9 +14,7 @@ pub const SCREEN_BLEND_NONE: i32 = 2;
 #[must_use]
 pub fn is_flashbanged(cg_time: i32, start_time: i32, duration: i32, screen_type: i32) -> i32 {
     let remaining = start_time.wrapping_sub(cg_time).wrapping_add(duration);
-    if remaining < 1 {
-        0
-    } else if screen_type != SCREEN_BLEND_FLASHED {
+    if remaining < 1 || screen_type != SCREEN_BLEND_FLASHED {
         0
     } else {
         remaining

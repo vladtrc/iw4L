@@ -8,6 +8,13 @@ use bevy_ecs::prelude::World;
 
 #[derive(Clone)]
 pub(crate) struct RestartPlan {
+    pub anim_trees: Arc<BTreeMap<String, super::animations::ScriptAnimTree>>,
+    pub profile: asset_core::RuntimeProfile,
+    pub campaign_player: Option<crate::ClientId>,
+    // Delivery IDs remain shared across checkpoint restores and round reinstalls.
+    pub presentation_requests: Arc<std::sync::atomic::AtomicU64>,
+    pub path_nodes: Arc<[asset_core::PathNode]>,
+    pub path_visibility: Arc<[u8]>,
     pub absent_effects: std::collections::BTreeSet<String>,
     pub natives: NativeRegistry,
     pub entities: Arc<Vec<Vec<(String, String)>>>,
@@ -16,10 +23,6 @@ pub(crate) struct RestartPlan {
     pub entries: Vec<String>,
     pub schemas: BTreeMap<String, Arc<structured_data_iw4::DefinitionSet>>,
     pub player_data_defaults: Option<Arc<crate::PlayerDataDefaults>>,
-    pub videos: Arc<BTreeMap<String, i32>>,
-    pub turret_ai_scripts: Arc<BTreeMap<String, String>>,
-    pub anim: Arc<super::script_anim::AnimLibrary>,
-    pub path_nodes: Arc<Vec<asset_core::PathNode>>,
 }
 
 impl std::fmt::Debug for RestartPlan {
@@ -68,7 +71,7 @@ pub(crate) fn attach(runtime: &mut RoundScript, value: Detached) -> Result<Value
             }
             let id = runtime.next_object;
             runtime.next_object = id.checked_add(1).ok_or("object identifier exhausted")?;
-            runtime.arrays.insert(id, array);
+            runtime.arrays.insert(id, array.into());
             Ok(Value::Array(id))
         }
     }
@@ -94,16 +97,6 @@ fn field(runtime: &RoundScript, object: u64, name: &str) -> Option<Value> {
     runtime.objects.get(&object)?.get(id).cloned()
 }
 
-pub(crate) fn detach_game(runtime: &RoundScript) -> Vec<(Arc<str>, Detached)> {
-    runtime
-        .objects
-        .get(&1)
-        .into_iter()
-        .flatten()
-        .filter_map(|(id, value)| Some((symbol_name(runtime, *id)?, detach(runtime, value, 0)?)))
-        .collect()
-}
-
 pub(crate) fn restart_level(world: &mut World, tick: crate::Tick) {
     let runtime = world.resource::<RoundScript>();
     let Some(persist) = runtime.pending_restart else {
@@ -115,7 +108,13 @@ pub(crate) fn restart_level(world: &mut World, tick: crate::Tick) {
     let (Some(program), Some(plan)) = (runtime.program.clone(), runtime.restart.clone()) else {
         return;
     };
-    let game = detach_game(runtime);
+    let game: Vec<(Arc<str>, Detached)> = runtime
+        .objects
+        .get(&1)
+        .into_iter()
+        .flatten()
+        .filter_map(|(id, value)| Some((symbol_name(runtime, *id)?, detach(runtime, value, 0)?)))
+        .collect();
     let pers: BTreeMap<u32, Detached> = runtime
         .players
         .iter()
@@ -134,10 +133,16 @@ pub(crate) fn restart_level(world: &mut World, tick: crate::Tick) {
         .filter(|e| {
             matches!(
                 e.kind,
-                EntityKind::Spawned | EntityKind::Vehicle | EntityKind::Actor
+                EntityKind::Spawned | EntityKind::Drone | EntityKind::Actor | EntityKind::Vehicle
             )
         })
         .filter_map(|e| e.presence)
+        .collect();
+
+    let animated: Vec<_> = runtime
+        .animators
+        .keys()
+        .filter_map(|id| runtime.entities.get(id)?.presence)
         .collect();
 
     for id in huds {
@@ -148,6 +153,14 @@ pub(crate) fn restart_level(world: &mut World, tick: crate::Tick) {
     }
     {
         let mut frame = FrameWorld::from_world(world);
+        for presence in animated {
+            if let Some(dobj) = frame
+                .collision_owner_mut(presence)
+                .and_then(|row| row.dobj.as_mut())
+            {
+                dobj.clear_script_animation_tree();
+            }
+        }
         for mover in crate::frame::collect_script_movers(frame.ecs()) {
             if spawned.contains(&mover.id) {
                 frame.remove_script_mover_by_number(mover.state.number);
@@ -159,7 +172,7 @@ pub(crate) fn restart_level(world: &mut World, tick: crate::Tick) {
         for number in frame.dropped_item_numbers_sorted() {
             frame.despawn_dropped_item(number);
         }
-        crate::t5_destructible::restart(&mut frame);
+        crate::model_behaviors::restart(&mut frame);
         frame.restart_level_phase();
         for id in frame.client_ids_sorted() {
             let (origin, angles) = frame
@@ -199,7 +212,7 @@ pub(crate) fn restart_level(world: &mut World, tick: crate::Tick) {
             }
         }
     }
-    drop(runtime);
+
     for entry in &plan.entries {
         if let Err(fault) = run_now(
             world,
@@ -211,5 +224,17 @@ pub(crate) fn restart_level(world: &mut World, tick: crate::Tick) {
             world.resource_mut::<RoundScript>().fault = Some(fault);
             return;
         }
+    }
+}
+
+impl RestartPlan {
+    pub(crate) fn next_presentation_request(&self) -> Result<u64, String> {
+        use std::sync::atomic::Ordering;
+        self.presentation_requests
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                value.checked_add(1)
+            })
+            .map(|value| value + 1)
+            .map_err(|_| "presentation request identity exhausted".into())
     }
 }

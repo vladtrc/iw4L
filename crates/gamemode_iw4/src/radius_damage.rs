@@ -19,7 +19,11 @@ pub fn radius_damage_area_half_extent(radius: f32) -> f32 {
 
 pub fn radius_damage_amount(inner: f32, outer: f32, radius: f32, dist: f32, vis_scale: f32) -> i32 {
     let radius = if radius < 1.0 { 1.0 } else { radius };
-    if !(dist * dist < radius * radius) || vis_scale <= 0.0 {
+    if !matches!(
+        (dist * dist).partial_cmp(&(radius * radius)),
+        Some(core::cmp::Ordering::Less)
+    ) || vis_scale <= 0.0
+    {
         return 0;
     }
     let falloff = outer + (1.0 - dist / radius) * (inner - outer);

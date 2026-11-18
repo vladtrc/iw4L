@@ -1,15 +1,19 @@
-pub(crate) mod actors;
+pub(crate) mod ai_events;
 pub mod args;
 pub mod arrays;
 pub mod client_effects;
+pub(crate) mod commands;
 pub mod controls;
 pub mod entities;
 pub mod entity_damage;
+pub(crate) mod entity_links;
 pub mod guidance;
 pub mod hud;
 pub(crate) mod iw4_gametype;
+pub(crate) mod look_at;
 pub mod mechanics;
-pub(crate) mod mission;
+pub(crate) mod model_parts;
+pub(crate) mod model_state;
 pub mod natives;
 pub mod objectives;
 pub mod physics;
@@ -17,7 +21,6 @@ pub mod players;
 pub mod presence;
 pub mod registry;
 pub mod restart;
-pub mod script_anim;
 mod sentry_placement;
 pub mod spectators;
 pub mod tables;
@@ -33,3 +36,14 @@ pub(crate) mod rumble;
 pub(crate) mod trace;
 
 pub(crate) mod match_data;
+
+pub(crate) mod path_nodes;
+
+pub(crate) mod spawners;
+
+pub(crate) mod drones;
+pub(crate) mod sentients;
+
+pub(crate) mod animations;
+
+pub(crate) mod actors;

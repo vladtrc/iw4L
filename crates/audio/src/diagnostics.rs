@@ -126,5 +126,7 @@ pub(crate) fn thread(name: &str) {
             .find(|line| line.starts_with("Cpus_allowed_list:"))
             .unwrap_or("unknown");
         emit(format!("audio diag: thread={name} {affinity}"));
+        return;
     }
+    emit(format!("audio diag: thread={name}"));
 }

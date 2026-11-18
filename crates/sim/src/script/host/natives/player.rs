@@ -3,13 +3,13 @@ use super::super::arrays::new_array;
 use super::super::players::{LinkView, PlayerLink};
 use super::super::tables::perk_slot_code;
 use crate::frame::FrameWorld;
-use crate::script::Namespace::{Function, Method};
+use crate::script::Namespace::Method;
 use crate::script::{Arc, NativeRegistry, RoundScript, Value, runtime};
 use crate::script_player;
 use crate::world::ClientId;
 use bevy_ecs::prelude::World;
 
-pub(crate) fn player(world: &World, receiver: &Value) -> Result<u32, String> {
+pub fn player(world: &World, receiver: &Value) -> Result<u32, String> {
     match receiver {
         Value::Object(id) => world
             .resource::<RoundScript>()
@@ -19,10 +19,7 @@ pub(crate) fn player(world: &World, receiver: &Value) -> Result<u32, String> {
     }
 }
 
-fn slot<'w>(
-    world: &'w mut World,
-    client: u32,
-) -> Result<&'w mut super::super::players::PlayerSlot, String> {
+fn slot(world: &mut World, client: u32) -> Result<&mut super::super::players::PlayerSlot, String> {
     world
         .resource_mut::<RoundScript>()
         .into_inner()
@@ -31,7 +28,7 @@ fn slot<'w>(
         .ok_or_else(|| "player has disconnected".into())
 }
 
-pub(crate) fn present(
+pub fn present(
     world: &mut World,
     receiver: &Value,
     key: &'static str,
@@ -49,7 +46,7 @@ pub(crate) fn text(value: &Value) -> Result<Arc<str>, String> {
         Value::Int(n) => Ok(n.to_string().into()),
         Value::Vector(v) => Ok(format!("{} {} {}", v[0], v[1], v[2]).into()),
         Value::Float(f) => Ok(runtime::to_text(&Value::Float(*f))
-            .unwrap_or_default()
+            .unwrap_or(String::new())
             .into()),
         other => Err(format!("{} is not a string", kind(other))),
     }
@@ -255,6 +252,18 @@ pub(crate) fn write_class_data(
 }
 
 pub(crate) fn register(registry: &mut NativeRegistry) {
+    registry.register(Method, "getnormalizedmovement", |world, receiver, _| {
+        let client = player(world, receiver)?;
+        let axes = slot(world, client)?.movement_input;
+        let scale = i8::MAX as f32;
+        Ok(Value::Vector([
+            f32::from(axes[0]) / scale,
+            f32::from(axes[1]) / scale,
+            0.0,
+        ]))
+    });
+    super::super::players::campaign_damage::register(registry);
+    super::super::players::links::register(registry);
     registry.register(Method, "ishost", |world, receiver, _| {
         let client = player(world, receiver)?;
         Ok(Value::Int((client == 0).into()))
@@ -417,6 +426,9 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
     });
     registry.register(Method, "notifyonplayercommand", |world, receiver, args| {
         let client = player(world, receiver)?;
+        if world.resource::<RoundScript>().profile == asset_core::RuntimeProfile::Campaign {
+            return super::super::commands::register(world, Some(client), args);
+        }
         let notify: Arc<str> = super::super::args::byte_string(args, 0)?.symbol_key();
         let command: Arc<str> = string(args, 1)?.to_ascii_lowercase().into();
         let slot = slot(world, client)?;
@@ -476,18 +488,39 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         "setweaponhudiconoverride",
         "pingplayer",
         "kc_regweaponforfxremoval",
-        "setviewmodel",
         "forceusehinton",
         "forceusehintoff",
         "predictstreampos",
     );
-    registry.register(Method, "getviewmodel", |world, receiver, _| {
-        let client = player(world, receiver)?;
-        Ok(slot(world, client)?
+    registry.register(Method, "getviewmodel", |world, receiver, args| {
+        if !args.is_empty() {
+            return Err("getviewmodel expects no arguments".into());
+        }
+        let client = client_of(world, receiver)?;
+        if world.resource::<RoundScript>().profile == asset_core::RuntimeProfile::Campaign {
+            return Ok(FrameWorld::from_world(world)
+                .client_meta(client)
+                .and_then(|meta| meta.viewmodel.as_deref())
+                .map_or(Value::Undefined, Value::string));
+        }
+        Ok(slot(world, client.0)?
             .presented
             .get("setviewmodel")
-            .and_then(|args| args.first().cloned())
+            .and_then(|args| args.first())
+            .cloned()
             .unwrap_or(Value::Undefined))
+    });
+    registry.register(Method, "setviewmodel", |world, receiver, args| {
+        if world.resource::<RoundScript>().profile != asset_core::RuntimeProfile::Campaign {
+            return present(world, receiver, "setviewmodel", args);
+        }
+        let client = client_of(world, receiver)?;
+        let name = string(args, 0)?.to_ascii_lowercase();
+        if name.is_empty() {
+            return Err("setviewmodel requires a nonempty model name".into());
+        }
+        FrameWorld::from_world(world).set_script_viewmodel(client, name)?;
+        Ok(Value::Undefined)
     });
     registry.register(Method, "isitemunlocked", |world, receiver, args| {
         let client = data_client(world, player(world, receiver)?)?;
@@ -609,7 +642,7 @@ fn entity_kind(
         .map(|e| (*id, e.kind.clone()))
 }
 
-pub(crate) fn corpse_anim(world: &World, receiver: &Value) -> Result<Option<Arc<str>>, String> {
+pub fn corpse_anim(world: &World, receiver: &Value) -> Result<Option<Arc<str>>, String> {
     match entity_kind(world, receiver) {
         Some((_, super::super::entities::EntityKind::Corpse { anim, .. })) => Ok(anim),
         _ => Err("receiver is not a corpse".into()),
@@ -627,18 +660,45 @@ fn item_number(world: &World, receiver: &Value) -> Result<i32, String> {
     }
 }
 
+pub(crate) fn animation_clip_or_branch(
+    world: &mut World,
+    args: &[Value],
+    index: usize,
+) -> Result<Option<Arc<xmodel_runtime::AnimClip>>, String> {
+    let name = match arg(args, index)? {
+        Value::Animation { tree, name } => {
+            let runtime = world.resource::<RoundScript>();
+            if let Some(definition) = runtime.anim_trees.get(&**tree) {
+                let node = definition
+                    .names
+                    .iter()
+                    .position(|node| node == &**name)
+                    .ok_or_else(|| format!("animation '{name}' is not in tree '{tree}'"))?;
+                return match &definition.definition.nodes()[node].kind {
+                    xmodel_runtime::XAnimNodeKind::Leaf { clip, .. } => Ok(Some(clip.clone())),
+                    _ => Ok(None),
+                };
+            }
+            if runtime.profile == asset_core::RuntimeProfile::Campaign {
+                return Err(format!("animation tree '{tree}' is not loaded"));
+            }
+            name.clone()
+        }
+        other => return Err(format!("{} is not an animation", kind(other))),
+    };
+    FrameWorld::from_world(world)
+        .player_anim_clip_named(&name)
+        .map(Some)
+        .ok_or_else(|| format!("animation '{name}' is not loaded in the simulation"))
+}
+
 fn anim_clip(
     world: &mut World,
     args: &[Value],
     index: usize,
 ) -> Result<Arc<xmodel_runtime::AnimClip>, String> {
-    let name = match arg(args, index)? {
-        Value::Animation { name, .. } => name.clone(),
-        other => return Err(format!("{} is not an animation", kind(other))),
-    };
-    FrameWorld::from_world(world)
-        .player_anim_clip_named(&name)
-        .ok_or_else(|| format!("animation '{name}' is not loaded in the simulation"))
+    animation_clip_or_branch(world, args, index)?
+        .ok_or_else(|| "animation is not a primitive".into())
 }
 
 pub(crate) const SCAVENGER_ITEM_CLASS: &str = "scavenger_item";
@@ -653,6 +713,7 @@ pub(crate) fn new_item_entity(
         .map_or([0.0; 3], |i| i.origin);
     let mut runtime = world.resource_mut::<RoundScript>();
     let id = runtime.create_entity(super::super::entities::EntityKind::Item(number), classname)?;
+    runtime.entities.get_mut(&id).unwrap().number = number;
     runtime.set_object_field(id, "origin", Value::Vector(origin));
     Ok(Value::Object(id))
 }
@@ -773,13 +834,24 @@ fn register_death(registry: &mut NativeRegistry) {
         let Some(slot) = script_player::clone_corpse(&mut frame, tick, id) else {
             return Ok(Value::Undefined);
         };
+        let corpse = frame.corpses().slots[usize::from(slot)];
+        let generation = frame
+            .entity_kernel()
+            .reserved_generation(corpse.entnum)
+            .ok_or("cloned corpse has no reserved entity identity")?;
         let mut runtime = world.resource_mut::<RoundScript>();
         let body = runtime.create_entity(
-            super::super::entities::EntityKind::Corpse { slot, anim },
+            super::super::entities::EntityKind::Corpse {
+                slot,
+                anim,
+                entnum: corpse.entnum,
+                generation,
+            },
             "player_corpse",
         )?;
-        runtime.set_object_field(body, "origin", Value::Vector(ps.origin));
-        runtime.set_object_field(body, "angles", Value::Vector([0.0, ps.viewangles[1], 0.0]));
+        runtime.entities.get_mut(&body).unwrap().number = corpse.entnum;
+        runtime.set_object_field(body, "origin", Value::Vector(corpse.origin));
+        runtime.set_object_field(body, "angles", Value::Vector(corpse.viewangles));
         Ok(Value::Object(body))
     });
     registry.register(Method, "getcorpseanim", |world, receiver, _| {
@@ -790,8 +862,10 @@ fn register_death(registry: &mut NativeRegistry) {
         })
     });
     registry.register(Method, "isragdoll", |world, receiver, _| {
-        corpse_anim(world, receiver)?;
-        Ok(Value::Int(0))
+        let object = super::engine::entity_id(world, receiver)?;
+        Ok(Value::Int(i32::from(super::super::entities::is_ragdoll(
+            world, object,
+        ))))
     });
     registry.register(Method, "startragdoll", |world, receiver, _| {
         corpse_anim(world, receiver)?;
@@ -854,6 +928,9 @@ fn register_death(registry: &mut NativeRegistry) {
     }
     registry.register(Method, "itemweaponsetammo", |world, receiver, args| {
         let number = item_number(world, receiver)?;
+        if world.resource::<RoundScript>().profile == asset_core::RuntimeProfile::Campaign {
+            return super::super::weapons::items::set_ammo(world, number, args);
+        }
         let clip = int(args, 0)?;
         let stock = int(args, 1)?;
         let clip_l = optional(args, 2, int)?;
@@ -904,6 +981,16 @@ pub(crate) fn link_to(
 ) -> Result<Value, String> {
     let client = player(world, receiver)?;
     let parent = super::engine::entity_id(world, arg(args, 0)?)?;
+    if FrameWorld::from_world(world)
+        .player(ClientId(client))
+        .is_some_and(|ps| {
+            let mask = playerstate_iw4::pm_flags::SCRIPT_NO_STAND
+                | playerstate_iw4::pm_flags::SCRIPT_NO_CROUCH;
+            ps.pm_flags & mask == mask
+        })
+    {
+        return Err("cannot link a player with standing and crouching disabled".into());
+    }
     if world.resource::<RoundScript>().player_client(parent) == Some(client) {
         return Err("cannot link an entity to itself".into());
     }
@@ -911,8 +998,8 @@ pub(crate) fn link_to(
         None | Some(Value::Undefined) => None,
         Some(_) => Some(string(args, 1)?),
     }
-    .filter(|tag| !tag.is_empty() && !tag.eq_ignore_ascii_case("tag_origin"))
-    .map(Arc::<str>::from);
+    .filter(|tag| !tag.is_empty())
+    .map(|tag| Arc::<str>::from(tag.to_ascii_lowercase()));
     let arc = |index| -> Result<f32, String> {
         Ok(optional(args, index, float)?
             .unwrap_or(180.0)
@@ -921,16 +1008,26 @@ pub(crate) fn link_to(
     let clamp = (view != LinkView::Absolute && args.len() > 3)
         .then(|| -> Result<[f32; 4], String> { Ok([-arc(5)?, arc(6)?, -arc(3)?, arc(4)?]) })
         .transpose()?;
-    let (base, axis) = super::super::players::link_parent_pose(world, parent, tag.as_deref());
+    let child = world
+        .resource::<RoundScript>()
+        .players
+        .get(&client)
+        .ok_or("player has disconnected")?
+        .object;
+    super::super::players::links::validate_parent(world, child, parent)?;
+    let (base, axis) = super::super::players::link_parent_pose(world, parent, tag.as_deref())?;
+    let reference = world
+        .resource::<RoundScript>()
+        .players
+        .get(&client)
+        .ok_or("player has disconnected")?
+        .ground_reference
+        .axis;
     let origin = FrameWorld::from_world(world)
         .player(ClientId(client))
         .map_or(base, |ps| ps.origin);
     let delta: [f32; 3] = std::array::from_fn(|i| origin[i] - base[i]);
-    let snap = tag.is_some()
-        && (FrameWorld::from_world(world).bootstrap_ref().campaign
-            || FrameWorld::from_world(world).bootstrap_ref().kind
-                == gamemode_iw4::GameModeKind::Campaign);
-    let local = if view == LinkView::WeaponDelta || snap {
+    let local = if view == LinkView::WeaponDelta {
         [0.0; 3]
     } else {
         std::array::from_fn(|i| (0..3).map(|j| delta[j] * axis[i][j]).sum())
@@ -943,6 +1040,11 @@ pub(crate) fn link_to(
                 .map(|ps| ps.viewangles)
         })
         .flatten();
+    let campaign = world.resource::<RoundScript>().profile == asset_core::RuntimeProfile::Campaign;
+    let view_fraction = optional(args, 2, float)?.unwrap_or(if campaign { 0.0 } else { 1.0 });
+    if !view_fraction.is_finite() {
+        return Err("player link view fraction must be finite".into());
+    }
     super::super::players::link_player(
         world,
         client,
@@ -951,10 +1053,11 @@ pub(crate) fn link_to(
             tag,
             origin: local,
             angles: [0.0; 3],
+            use_offset: !campaign,
             view,
             clamp,
-            parent_axis: axis,
-            view_fraction: optional(args, 2, float)?.unwrap_or(1.0).clamp(0.0, 1.0),
+            parent_axis: super::super::players::links::relative(axis, reference),
+            view_fraction: view_fraction.clamp(0.0, 1.0),
             use_tag_angles,
             link_axis: if use_tag_angles {
                 axis
@@ -962,6 +1065,8 @@ pub(crate) fn link_to(
                 math_iw4::angles_to_axis([0.0; 3])
             },
             restore_view,
+            blend: None,
+            clamp_transition: None,
         },
     );
     Ok(Value::Undefined)
@@ -974,6 +1079,86 @@ fn flag(args: &[Value], index: usize) -> Result<bool, String> {
 fn weapon_arg(world: &mut World, args: &[Value], index: usize) -> Result<u32, String> {
     let name = string(args, index)?;
     script_player::weapon_named(&FrameWorld::from_world(world), &name)
+}
+
+fn campaign_weapon_activity(
+    world: &mut World,
+    receiver: &Value,
+    melee: bool,
+) -> Result<Value, String> {
+    if world.resource::<RoundScript>().profile != asset_core::RuntimeProfile::Campaign {
+        return Err("weapon-state query requires the campaign native contract".into());
+    }
+    let client = client_of(world, receiver)?;
+    let active = FrameWorld::from_world(world)
+        .player(client)
+        .is_some_and(|ps| {
+            let is_melee = |state| {
+                (weapon_iw4::WeaponState::MeleeInit as i32
+                    ..=weapon_iw4::WeaponState::MeleeEnd as i32)
+                    .contains(&state)
+            };
+            if melee {
+                is_melee(ps.weaponstate_primary)
+            } else {
+                [ps.weaponstate_primary, ps.weaponstate_secondary]
+                    .into_iter()
+                    .any(|state| {
+                        is_melee(state)
+                            || matches!(
+                                weapon_iw4::WeaponState::from_i32(state),
+                                Ok(weapon_iw4::WeaponState::Firing
+                                    | weapon_iw4::WeaponState::Rechambering)
+                            )
+                    })
+            }
+        });
+    Ok(Value::Int(active.into()))
+}
+
+fn ammo_fraction(
+    world: &mut World,
+    receiver: &Value,
+    args: &[Value],
+    maximum: bool,
+) -> Result<Value, String> {
+    if world.resource::<RoundScript>().profile != asset_core::RuntimeProfile::Campaign {
+        return Err("ammo fraction query requires the campaign native contract".into());
+    }
+    let client = client_of(world, receiver)?;
+    let weapon = player_weapon(world, client, args, 0)?;
+    if weapon == 0 {
+        return Err("unknown weapon 'none'".into());
+    }
+    let frame = FrameWorld::from_world(world);
+    if !script_player::has_weapon(&frame, client, weapon) {
+        return Ok(Value::Float(1.0));
+    }
+    let facts = frame
+        .combat_facts_for(weapon)
+        .ok_or("weapon ammunition facts are unavailable")?;
+    let (amount, denominator) = if maximum && facts.clip_only {
+        (
+            script_player::ammo_clip(&frame, client, weapon),
+            facts.clip_size,
+        )
+    } else {
+        (
+            script_player::ammo_stock(&frame, client, weapon),
+            if maximum {
+                facts.max_ammo
+            } else {
+                facts.start_ammo
+            },
+        )
+    };
+    Ok(Value::Float(if denominator < 1 {
+        1.0
+    } else if amount < 1 {
+        0.0
+    } else {
+        amount as f32 / denominator as f32
+    }))
 }
 
 fn player_weapon(
@@ -1010,6 +1195,50 @@ fn weapon_value(world: &mut World, weapon: u32) -> Value {
     Value::String(script_player::weapon_name(&FrameWorld::from_world(world), weapon).into())
 }
 
+fn inventory_types(args: &[Value]) -> Result<script_player::WeaponList, String> {
+    if args.is_empty() {
+        return Err("expected inventory types; use getweaponslistall for all weapons".into());
+    }
+    let mut types = 0;
+    for (index, value) in args.iter().enumerate() {
+        let Value::String(name) = value else {
+            return Err(format!(
+                "parameter {} is not an inventory type string",
+                index + 1
+            ));
+        };
+        let kind = match name.as_ref() {
+            "primary" => 0,
+            "offhand" => 1,
+            "item" => 2,
+            "altmode" => 3,
+            "exclusive" => 4,
+            "scavenger" => 5,
+            _ => return Err(format!("unknown weapon inventory type '{name}'")),
+        };
+        types |= 1 << kind;
+    }
+    Ok(script_player::WeaponList::InventoryTypes(types))
+}
+
+fn weapon_list_value(
+    world: &mut World,
+    id: ClientId,
+    list: script_player::WeaponList,
+) -> Result<Value, String> {
+    let frame = FrameWorld::from_world(world);
+    frame.player(id).ok_or("player has disconnected")?;
+    let weapons = script_player::weapons(&frame, id, list);
+    let names = weapons
+        .into_iter()
+        .map(|weapon| {
+            let weapon = super::super::players::script_weapon(world, id.0, weapon);
+            weapon_value(world, weapon)
+        })
+        .collect();
+    new_array(world, names)
+}
+
 fn controls(
     world: &mut World,
     receiver: &Value,
@@ -1021,7 +1250,58 @@ fn controls(
     Ok(Value::Undefined)
 }
 
+fn allow_stance<const BIT: u32>(
+    world: &mut World,
+    receiver: &Value,
+    args: &[Value],
+) -> Result<Value, String> {
+    use playerstate_iw4::pm_flags;
+    let id = client_of(world, receiver)?;
+    let allow = int(args, 0)? != 0;
+    let mut frame = FrameWorld::from_world(world);
+    let ps = frame.player_mut(id).ok_or("player has not spawned")?;
+    let flags = if allow {
+        ps.pm_flags & !BIT
+    } else {
+        ps.pm_flags | BIT
+    };
+    if flags & pm_flags::SCRIPT_NO_STANCES == pm_flags::SCRIPT_NO_STANCES {
+        return Err("cannot disable every player stance".into());
+    }
+    let linked_mask = pm_flags::SCRIPT_NO_STAND | pm_flags::SCRIPT_NO_CROUCH;
+    if (ps.pm_type == playerstate_iw4::PM_TYPE_NORMAL_LINKED
+        || ps.e_flags & playerstate_iw4::eflags::SP_LINKED_STANCE != 0)
+        && flags & linked_mask == linked_mask
+    {
+        return Err("cannot disable standing and crouching for a linked player".into());
+    }
+    ps.pm_flags = flags;
+    Ok(Value::Undefined)
+}
+
 fn register_body(registry: &mut NativeRegistry) {
+    use playerstate_iw4::pm_flags;
+    registry.register(
+        Method,
+        "allowstand",
+        allow_stance::<{ pm_flags::SCRIPT_NO_STAND }>,
+    );
+    registry.register(
+        Method,
+        "allowcrouch",
+        allow_stance::<{ pm_flags::SCRIPT_NO_CROUCH }>,
+    );
+    registry.register(
+        Method,
+        "allowprone",
+        allow_stance::<{ pm_flags::SCRIPT_NO_PRONE }>,
+    );
+    registry.register(Method, "getplayerviewheight", |world, receiver, _| {
+        let id = client_of(world, receiver)?;
+        let frame = FrameWorld::from_world(world);
+        let ps = frame.player(id).ok_or("player has not spawned")?;
+        Ok(Value::Float(ps.view_height_current))
+    });
     registry.register(Method, "spawn", |world, receiver, args| {
         let client = player(world, receiver)?;
         let origin = vector(args, 0)?;
@@ -1078,6 +1358,31 @@ fn register_body(registry: &mut NativeRegistry) {
         }
         Ok(Value::Undefined)
     });
+    registry.register(Method, "allowmelee", |world, receiver, args| {
+        let allow = int(args, 0)? != 0;
+        let client = client_of(world, receiver)?;
+        let mut frame = FrameWorld::from_world(world);
+        let ps = frame.player_mut(client).ok_or("player has not spawned")?;
+        if allow {
+            ps.pm_flags &= !playerstate_iw4::pm_flags::SCRIPT_NO_MELEE;
+        } else {
+            ps.pm_flags |= playerstate_iw4::pm_flags::SCRIPT_NO_MELEE;
+        }
+        Ok(Value::Undefined)
+    });
+    registry.register(Method, "allowlean", |world, receiver, args| {
+        let allow = int(args, 0)? != 0;
+        let client = client_of(world, receiver)?;
+        let mut frame = FrameWorld::from_world(world);
+        let ps = frame.player_mut(client).ok_or("player has not spawned")?;
+        if allow {
+            ps.pm_flags &= !playerstate_iw4::pm_flags::SCRIPT_NO_LEAN;
+        } else {
+            ps.pm_flags |= playerstate_iw4::pm_flags::SCRIPT_NO_LEAN;
+            ps.leanf = 0.;
+        }
+        Ok(Value::Undefined)
+    });
     registry.register(Method, "allowsprint", |world, receiver, args| {
         let allow = flag(args, 0)?;
         let id = client_of(world, receiver)?;
@@ -1105,6 +1410,8 @@ fn register_body(registry: &mut NativeRegistry) {
         )*};
     }
     control!(
+        "hideviewmodel" => viewmodel_hidden = true,
+        "showviewmodel" => viewmodel_hidden = false,
         "disableweapons" => weapons_disabled = true,
         "enableweapons" => weapons_disabled = false,
         "disableoffhandweapons" => offhands_disabled = true,
@@ -1113,8 +1420,6 @@ fn register_body(registry: &mut NativeRegistry) {
         "enableweaponswitch" => switch_disabled = false,
         "disableusability" => usability_disabled = true,
         "enableusability" => usability_disabled = false,
-        "hideviewmodel" => viewmodel_hidden = true,
-        "showviewmodel" => viewmodel_hidden = false,
     );
     registry.register(Method, "setmovespeedscale", |world, receiver, args| {
         let id = client_of(world, receiver)?;
@@ -1151,16 +1456,11 @@ fn register_body(registry: &mut NativeRegistry) {
     registry.register(Method, "setplayerangles", |world, receiver, args| {
         let id = client_of(world, receiver)?;
         let angles = vector(args, 0)?;
-        FrameWorld::from_world(world).set_viewangles(id, angles);
+        if !angles.into_iter().all(f32::is_finite) {
+            return Err("setplayerangles requires finite angles".into());
+        }
+        super::super::players::links::write_view(world, id.0, angles);
         Ok(Value::Undefined)
-    });
-    registry.register(Method, "getplayerviewheight", |world, receiver, _| {
-        let id = client_of(world, receiver)?;
-        Ok(Value::Float(
-            FrameWorld::from_world(world)
-                .player(id)
-                .map_or(0.0, |ps| ps.view_height_current),
-        ))
     });
     registry.register(Method, "getstance", |world, receiver, _| {
         let id = client_of(world, receiver)?;
@@ -1264,12 +1564,6 @@ fn register_body(registry: &mut NativeRegistry) {
     registry.register(Method, "playerlinktoabsolute", |world, receiver, args| {
         link_to(world, receiver, args, LinkView::Absolute)
     });
-    for name in ["playerlinkedoffsetenable", "playerlinkedoffsetdisable"] {
-        registry.register(Method, name, |world, receiver, _| {
-            client_of(world, receiver)?;
-            Ok(Value::Undefined)
-        });
-    }
     registry.register(Method, "setactionslot", |world, receiver, args| {
         let id = client_of(world, receiver)?;
         let index = int(args, 0)?;
@@ -1428,65 +1722,49 @@ fn register_inventory(registry: &mut NativeRegistry) {
         "getweaponhidetags",
         |world, _, args| {
             let weapon = weapon_arg(world, args, 0)?;
-            let tags: Vec<Value> = FrameWorld::from_world(world)
+            let frame = FrameWorld::from_world(world);
+            let tags: Vec<Value> = frame
                 .weapon_world_model(weapon)
-                .map(|(_, tags)| {
+                .and_then(|(model, tags)| {
+                    Some((
+                        frame
+                            .model_capability(&model.to_ascii_lowercase())
+                            .flatten()?,
+                        tags,
+                    ))
+                })
+                .map(|(model, tags)| {
                     tags.iter()
+                        .filter(|tag| {
+                            model
+                                .pose
+                                .bone_names
+                                .iter()
+                                .any(|bone| bone.eq_ignore_ascii_case(tag))
+                        })
                         .map(|t| Value::String(t.as_str().into()))
                         .collect()
                 })
-                .unwrap_or_default();
+                .unwrap_or(Vec::new());
             new_array(world, tags)
         },
     );
-    registry.register(Method, "getplayerweaponmodel", |world, receiver, _| {
-        let id = client_of(world, receiver)?;
-        let frame = FrameWorld::from_world(world);
-        let weapon = frame.player(id).map_or(0, |ps| ps.weapon);
-        if weapon == 0 {
-            return Ok(Value::Undefined);
-        }
-        let model = frame.weapon_world_model(weapon).map_or("", |(m, _)| m);
-        if model.is_empty() {
-            Ok(Value::Undefined)
-        } else {
-            Ok(Value::string(model))
-        }
-    });
-    registry.register(Method, "getplayerknifemodel", |world, receiver, _| {
-        let _id = client_of(world, receiver)?;
-        Ok(Value::Undefined)
-    });
-    registry.register(Method, "hidepart_allinstances", |world, receiver, args| {
-        let _id = client_of(world, receiver)?;
-        let _part = string(args, 0)?;
-        let _model = optional(args, 1, string)?;
-        Ok(Value::Undefined)
-    });
-    registry.register(Method, "hideallparts", |world, receiver, _| {
-        let _ = super::engine::entity_id(world, receiver)?;
-        Ok(Value::Undefined)
-    });
     registry.register(Method, "giveweapon", |world, receiver, args| {
         let id = client_of(world, receiver)?;
         let named = weapon_arg(world, args, 0)?;
         let weapon = player_weapon(world, id, args, 0)?;
-        let t5 = world
-            .resource::<RoundScript>()
-            .program
-            .as_ref()
-            .is_some_and(|program| program.rules() == crate::script::Realm::T5);
-        let model = if t5 {
-            (optional(args, 2, int)?.unwrap_or(0) & 63) as u8
-        } else {
-            optional(args, 1, int)?.unwrap_or(0).clamp(0, 15) as u8
-        };
+        let policy = crate::script::families::policy_for_world(world);
+        let model =
+            (policy.decode_weapon_model)(optional(args, policy.model_argument, int)?.unwrap_or(0));
         let model = if named != weapon {
             super::super::players::selected_camouflage(world, id.0, weapon).unwrap_or(model)
         } else {
             model
         };
-        let akimbo = !t5 && optional(args, 2, int)?.unwrap_or(0) != 0;
+        let akimbo = match policy.akimbo_argument {
+            Some(index) => optional(args, index, int)?.unwrap_or(0) != 0,
+            None => false,
+        };
         script_player::give_weapon(&mut FrameWorld::from_world(world), id, weapon, akimbo)?;
         script_player::set_weapon_model(&mut FrameWorld::from_world(world), id, weapon, model);
         super::super::players::give_carried_insertion(world, id.0, receiver, named)?;
@@ -1542,6 +1820,21 @@ fn register_inventory(registry: &mut NativeRegistry) {
         let weapon = frame.player(id).map_or(0, |ps| ps.weapon);
         Ok(Value::Int(script_player::ammo_clip(&frame, id, weapon)))
     });
+    registry.register(Method, "ismeleeing", |world, receiver, _| {
+        campaign_weapon_activity(world, receiver, true)
+    });
+    registry.register(Method, "isfiring", |world, receiver, _| {
+        campaign_weapon_activity(world, receiver, false)
+    });
+    registry.register(Method, "isthrowinggrenade", |world, receiver, _| {
+        let id = client_of(world, receiver)?;
+        let throwing = FrameWorld::from_world(world).player(id).is_some_and(|ps| {
+            (weapon_iw4::WeaponState::OffhandInit as i32
+                ..=weapon_iw4::WeaponState::OffhandEnd as i32)
+                .contains(&ps.weaponstate_primary)
+        });
+        Ok(Value::Int(i32::from(throwing)))
+    });
     registry.register(Method, "isreloading", |world, receiver, _| {
         let id = client_of(world, receiver)?;
         let frame = FrameWorld::from_world(world);
@@ -1573,11 +1866,29 @@ fn register_inventory(registry: &mut NativeRegistry) {
         });
         Ok(Value::Int(dual.into()))
     });
+    registry.register(Method, "nightvisionforceoff", |world, receiver, _| {
+        let id = client_of(world, receiver)?;
+        FrameWorld::from_world(world)
+            .player_mut(id)
+            .ok_or("player has disconnected")?
+            .weap_flags &= !playerstate_iw4::weap_flags::NIGHT_VISION;
+        Ok(Value::Undefined)
+    });
     registry.register(Method, "getcurrentweapon", |world, receiver, _| {
         let id = client_of(world, receiver)?;
         let weapon = FrameWorld::from_world(world)
             .player(id)
             .map_or(0, |ps| ps.weapon);
+        let weapon = super::super::players::script_weapon(world, id.0, weapon);
+        Ok(weapon_value(world, weapon))
+    });
+    registry.register(Method, "getcurrentoffhand", |world, receiver, _| {
+        let id = client_of(world, receiver)?;
+        let weapon = FrameWorld::from_world(world)
+            .player(id)
+            .ok_or("player has disconnected")?
+            .off_hand_index;
+        let weapon = u32::try_from(weapon).unwrap_or(0);
         let weapon = super::super::players::script_weapon(world, id.0, weapon);
         Ok(weapon_value(world, weapon))
     });
@@ -1594,15 +1905,7 @@ fn register_inventory(registry: &mut NativeRegistry) {
             registry.register(Method, $name, |world, receiver, _| {
                 let id = client_of(world, receiver)?;
                 let list = script_player::WeaponList::$list;
-                let weapons = script_player::weapons(&FrameWorld::from_world(world), id, list);
-                let names = weapons
-                    .into_iter()
-                    .map(|w| {
-                        let w = super::super::players::script_weapon(world, id.0, w);
-                        weapon_value(world, w)
-                    })
-                    .collect();
-                new_array(world, names)
+                weapon_list_value(world, id, list)
             });
         )*};
     }
@@ -1613,6 +1916,10 @@ fn register_inventory(registry: &mut NativeRegistry) {
         "getweaponslistitems" => Items,
         "getweaponslistexclusives" => Exclusives,
     );
+    registry.register(Method, "getweaponslist", |world, receiver, args| {
+        let id = client_of(world, receiver)?;
+        weapon_list_value(world, id, inventory_types(args)?)
+    });
     registry.register(Method, "getweaponammoclip", |world, receiver, args| {
         let id = client_of(world, receiver)?;
         let weapon = player_weapon(world, id, args, 0)?;
@@ -1621,6 +1928,12 @@ fn register_inventory(registry: &mut NativeRegistry) {
             id,
             weapon,
         )))
+    });
+    registry.register(Method, "getfractionstartammo", |world, receiver, args| {
+        ammo_fraction(world, receiver, args, false)
+    });
+    registry.register(Method, "getfractionmaxammo", |world, receiver, args| {
+        ammo_fraction(world, receiver, args, true)
     });
     registry.register(Method, "getammocount", |world, receiver, args| {
         let id = client_of(world, receiver)?;
@@ -1782,98 +2095,4 @@ fn register_inventory(registry: &mut NativeRegistry) {
             _ => "none",
         }))
     });
-    registry.register(Method, "giveachievement", |world, receiver, args| {
-        let name = string(args, 0)?;
-        diag::info!(Sim, "achievement unlocked: {}", name);
-        if let Ok(id) = super::engine::entity_id(world, receiver) {
-            world.resource_mut::<RoundScript>().set_object_field(
-                id,
-                "last_achievement",
-                Value::string(&name),
-            );
-        }
-        Ok(Value::Undefined)
-    });
-    registry.register(Method, "uploadscore", |world, receiver, args| {
-        let lb = string(args, 0)?;
-        let score = int(args, 1)?;
-        diag::info!(Sim, "uploadscore for {}: {}", lb, score);
-        if let Ok(id) = super::engine::entity_id(world, receiver) {
-            world.resource_mut::<RoundScript>().set_object_field(
-                id,
-                "leaderboard_score",
-                Value::Int(score),
-            );
-        }
-        Ok(Value::Undefined)
-    });
-    registry.register(Method, "uploadtime", |world, receiver, args| {
-        let lb = string(args, 0)?;
-        let time = float(args, 1)?;
-        diag::info!(Sim, "uploadtime for {}: {}", lb, time);
-        if let Ok(id) = super::engine::entity_id(world, receiver) {
-            world.resource_mut::<RoundScript>().set_object_field(
-                id,
-                "leaderboard_time",
-                Value::Float(time),
-            );
-        }
-        Ok(Value::Undefined)
-    });
-    registry.register(Method, "playersetstreamorigin", |world, receiver, args| {
-        let id = super::engine::entity_id(world, receiver)?;
-        let origin = vector(args, 0)?;
-        world.resource_mut::<RoundScript>().set_object_field(
-            id,
-            "stream_origin",
-            Value::Vector(origin),
-        );
-        Ok(Value::Undefined)
-    });
-    registry.register(Method, "playerclearstreamorigin", |world, receiver, _| {
-        let id = super::engine::entity_id(world, receiver)?;
-        world
-            .resource_mut::<RoundScript>()
-            .set_object_field(id, "stream_origin", Value::Undefined);
-        Ok(Value::Undefined)
-    });
-    registry.register(
-        Method,
-        "playersetgroundreferenceent",
-        |world, receiver, args| {
-            let id = super::engine::entity_id(world, receiver)?;
-            let ent = args.get(0).cloned().unwrap_or(Value::Undefined);
-            world
-                .resource_mut::<RoundScript>()
-                .set_object_field(id, "groundreferenceent", ent);
-            Ok(Value::Undefined)
-        },
-    );
-    registry.register(Method, "nightvisionforceoff", |world, receiver, _| {
-        let id = super::engine::entity_id(world, receiver)?;
-        world.resource_mut::<RoundScript>().set_object_field(
-            id,
-            "nightvision_active",
-            Value::Int(0),
-        );
-        crate::script::runtime::raise(world, Value::Object(id), "nightvision_off", Vec::new());
-        Ok(Value::Undefined)
-    });
-    registry.register(Function, "precachenightvisioncodeassets", |_, _, _| {
-        Ok(Value::Undefined)
-    });
-    registry.register(Method, "thermaldrawenable", |world, receiver, _| {
-        let id = super::engine::entity_id(world, receiver)?;
-        world.resource_mut::<RoundScript>().set_object_field(
-            id,
-            "thermal_draw_enabled",
-            Value::Int(1),
-        );
-        Ok(Value::Undefined)
-    });
-    registry.register(
-        Method,
-        "forceviewmodelanimation",
-        |_world, _receiver, _args| Ok(Value::Undefined),
-    );
 }

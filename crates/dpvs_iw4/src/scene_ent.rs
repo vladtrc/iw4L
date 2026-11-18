@@ -132,16 +132,9 @@ fn filter_scene_ent_into_cells_offset(
     if planes.nodes.is_empty() || planes.cell_count == 0 {
         return;
     }
-    filter_scene_ent_into_cells_r(
-        planes,
-        0,
-        bounds,
-        bits,
-        ent_id,
-        cell_offset,
-        0,
-        planes.nodes.len(),
-    );
+    scene_ent_cells(planes, bounds, &mut |cell| {
+        add_scene_ent_to_cell_offset(bits, cell_offset, cell as usize, ent_id);
+    });
 }
 
 fn filter_scene_ent_into_all_cells_r(
@@ -187,71 +180,6 @@ fn filter_scene_ent_into_all_cells_r(
     }
 }
 
-fn filter_scene_ent_into_cells_r(
-    planes: &DpvsPlanes<'_>,
-    mut i: usize,
-    bounds: Bounds,
-    bits: &mut [u32],
-    ent_id: u32,
-    cell_offset: usize,
-    depth: usize,
-    max_depth: usize,
-) {
-    if depth > max_depth {
-        return;
-    }
-    let cell_count_plus = planes.cell_count as i32 + 1;
-    for _ in 0..planes.nodes.len() {
-        let Some(&cell_index_u) = planes.nodes.get(i) else {
-            return;
-        };
-        let cell_index = i32::from(cell_index_u);
-        if cell_index - cell_count_plus < 0 {
-            if cell_index > 0 {
-                let cell = (cell_index - 1) as usize;
-                if cell < planes.cell_count as usize {
-                    add_scene_ent_to_cell_offset(bits, cell_offset, cell, ent_id);
-                }
-            }
-            return;
-        }
-        let plane_index = (cell_index - cell_count_plus) as usize;
-        let Some(plane) = planes.planes.get(plane_index) else {
-            return;
-        };
-        let (mid, half) = (bounds.mid(), bounds.half());
-        let d = mid[0] * plane.normal[0] + mid[1] * plane.normal[1] + mid[2] * plane.normal[2]
-            - plane.dist;
-        let r = half[0] * abs(plane.normal[0])
-            + half[1] * abs(plane.normal[1])
-            + half[2] * abs(plane.normal[2]);
-        let Some(&offset) = planes.nodes.get(i + 1) else {
-            return;
-        };
-        let front = i + 2;
-        let back = i + usize::from(offset);
-        if d >= r {
-            i = front;
-        } else if d <= -r {
-            i = back;
-        } else {
-            filter_scene_ent_into_cells_r(
-                planes,
-                front,
-                bounds,
-                bits,
-                ent_id,
-                cell_offset,
-                depth + 1,
-                max_depth,
-            );
-            i = back;
-        }
-    }
-}
-
-/// Must walk exactly as `filter_scene_ent_into_cells_r` does: callers cache
-/// its cells in place of filtering.
 pub fn scene_ent_cells(planes: &DpvsPlanes<'_>, bounds: Bounds, on_cell: &mut impl FnMut(u32)) {
     if planes.nodes.is_empty() || planes.cell_count == 0 {
         return;

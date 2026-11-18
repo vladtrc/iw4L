@@ -1,5 +1,33 @@
 # Transport budgets
 
+Protocol 147 adds the authoritative ToggleNoclip debug action (tag 29).
+Its movement mode travels in the existing playerstate pm_type field; authority
+and prediction both run the same flight movement.
+
+Protocol 146 added script-selected player DObjs to the DObj metadata section.
+Each row carries a real client slot, reserved entity generation, life sequence,
+and optional composed model state. An absent row uses the ordinary player kit;
+a row with no model explicitly clears the body. Rows must be sorted, unique and
+within the reserved player slots. Consumers must match generation and life to the
+current player. DObj semantic poses also carry optional player controller inputs
+(pitch, crouch, prone and lean), which must be finite. Authority and client must
+both use protocol 147.
+
+Per-viewer entity visibility was introduced in protocol 145. The entities
+section carries a sorted list of `(u16 entity number, u64 hidden-viewer mask)`
+after the EQ bypass list. Masks must be nonzero and numbers unique and below 2048.
+This affects drawing for the addressed viewer, preserving authoritative payloads
+and collision. Client and authority must use matching protocol versions.
+
+The projectile owner layout introduced in protocol 144 remains unchanged. The owner
+tag is one byte: `0` is a player (`u32` client and `u32` life sequence), `1` is a
+script entity (`u32` model identity and `i32` entity number), and `2` is the world.
+The payload uses little endian integers. Entity numbers must precede the reserved
+world entity number. Unknown tags and incomplete owners are rejected.
+Client and authority must use the same protocol version; older projectile
+snapshots cannot be decoded with this layout. AI projectiles retain their entity
+identity without requiring a player slot.
+
 Both client and relay validate these environment settings before connecting or accepting work.
 Durations are monotonic milliseconds, limited to 1–600000.
 

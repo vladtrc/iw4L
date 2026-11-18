@@ -1,10 +1,12 @@
-use super::entities::{EntityKind, SPAWNED_PRESENCE_BASE};
+use super::entities::{EntityKind, SPAWNED_PRESENCE_BASE, ScriptEntity};
 use crate::ScriptModelId;
 use crate::bullet_collision::{AuthorityDObjState, EntityCollisionCapabilities};
 use crate::frame::FrameWorld;
 use crate::gentity::ScriptMoverGentity;
 use crate::script::{Arc, BTreeMap, RoundScript, Value};
 use bevy_ecs::prelude::World;
+
+type SpeakingModels = Vec<(ScriptModelId, Arc<str>, [f32; 3], Option<u32>)>;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Shown {
@@ -13,8 +15,13 @@ pub(crate) struct Shown {
     model: Option<Arc<str>>,
     attachments: Vec<(Arc<str>, Arc<str>)>,
     hidden: bool,
+    thermal_draw: bool,
+    hero_lighting: bool,
+    less_frequent_lighting: bool,
+    aim_assist: bool,
     shown_to: u64,
     solid: bool,
+    contents: i32,
     moving: bool,
 }
 
@@ -27,11 +34,14 @@ struct Wanted {
     model: Option<Arc<str>>,
     attachments: Vec<(Arc<str>, Arc<str>)>,
     hidden: bool,
+    thermal_draw: bool,
+    hero_lighting: bool,
+    less_frequent_lighting: bool,
+    aim_assist: bool,
     shown_to: u64,
     solid: bool,
-    part_ops: Vec<(Arc<str>, bool)>,
+    contents: i32,
     anim_op: Option<Option<Arc<str>>>,
-    tree: Option<Option<xmodel_runtime::XAnimTreeSnapshot>>,
 }
 
 fn near(a: [f32; 3], b: [f32; 3]) -> bool {
@@ -104,97 +114,405 @@ pub(crate) fn spawn_presence(world: &mut World, origin: [f32; 3]) -> Result<Scri
 /// The observability boundary for script writes: native collision reads go
 /// through here, so a query sees every pose, solidity and visibility change a
 /// native or field store made earlier in the same tick.
-pub(crate) fn settled(world: &mut World) -> FrameWorld<'_> {
+pub fn settled(world: &mut World) -> FrameWorld<'_> {
     settle_collision(world);
-    settle_models(world);
     FrameWorld::from_world(world)
 }
 
-fn settle_models(world: &mut World) {
-    let mut runtime = world.resource_mut::<RoundScript>();
-    if runtime.new_models.is_empty() {
-        return;
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CollisionPlacement {
+    origin: [f32; 3],
+    angles: [f32; 3],
+    hidden: bool,
+    solid: bool,
+    contents: i32,
+}
+
+// Snapshot-local placement lookup. Sorting by (presence, object) preserves
+// BTreeMap's last-write-wins rule when several script objects alias a presence.
+#[derive(Default)]
+struct CollisionPlacements(Vec<(ScriptModelId, u64, CollisionPlacement)>);
+impl CollisionPlacements {
+    fn sort(&mut self) {
+        self.0
+            .sort_unstable_by_key(|&(presence, object, _)| (presence, object));
     }
-    let placed: Vec<(u64, ScriptModelId)> = std::mem::take(&mut runtime.new_models)
-        .into_iter()
-        .filter_map(|id| Some((id, runtime.entities.get(&id)?.presence?)))
-        .collect();
-    let wanted: Vec<(ScriptModelId, Arc<str>, [f32; 3], [f32; 3])> = placed
-        .into_iter()
-        .filter_map(|(object, presence)| {
-            let model = model_field(&mut runtime, object)?;
-            let origin = vector(&mut runtime, object, "origin");
-            let angles = vector(&mut runtime, object, "angles");
-            Some((presence, model, origin, angles))
+    fn iter(&self) -> impl Iterator<Item = (ScriptModelId, &CollisionPlacement)> {
+        self.0.chunk_by(|a, b| a.0 == b.0).map(|rows| {
+            let (presence, _, placement) = rows.last().unwrap();
+            (*presence, placement)
         })
-        .collect();
-    if wanted.is_empty() {
-        return;
     }
-    let mut frame = FrameWorld::from_world(world);
-    for (presence, model, origin, angles) in wanted {
-        let capability = frame.model_capability(&model).flatten();
-        let Some(row) = frame.collision_owner_mut(presence) else {
-            continue;
+    fn get(&self, id: ScriptModelId) -> Option<&CollisionPlacement> {
+        let end = self.0.partition_point(|&(presence, _, _)| presence <= id);
+        let (presence, _, placement) = self.0.get(end.checked_sub(1)?)?;
+        (*presence == id).then_some(placement)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CollisionInput {
+    object: u64,
+    presence: ScriptModelId,
+    shown: Shown,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+struct CollisionSource<'a> {
+    object: u64,
+    presence: ScriptModelId,
+    origin: [f32; 3],
+    angles: [f32; 3],
+    model: Option<&'a str>,
+    attachments: &'a [(Arc<str>, Arc<str>)],
+    hidden: bool,
+    thermal_draw: bool,
+    hero_lighting: bool,
+    less_frequent_lighting: bool,
+    aim_assist: bool,
+    shown_to: u64,
+    solid: bool,
+    contents: i32,
+    has_operations: bool,
+}
+
+impl CollisionInput {
+    fn from_source(source: CollisionSource<'_>) -> Self {
+        Self {
+            object: source.object,
+            presence: source.presence,
+            shown: Shown {
+                origin: source.origin,
+                angles: source.angles,
+                model: source.model.map(Arc::from),
+                attachments: source.attachments.to_vec(),
+                hidden: source.hidden,
+                thermal_draw: source.thermal_draw,
+                hero_lighting: source.hero_lighting,
+                less_frequent_lighting: source.less_frequent_lighting,
+                aim_assist: source.aim_assist,
+                shown_to: source.shown_to,
+                solid: source.solid,
+                contents: source.contents,
+                moving: false,
+            },
+        }
+    }
+    fn non_reflexive(&self) -> bool {
+        self.shown
+            .origin
+            .iter()
+            .chain(&self.shown.angles)
+            .any(|v| v.is_nan())
+    }
+    fn source(&self) -> CollisionSource<'_> {
+        CollisionSource {
+            object: self.object,
+            presence: self.presence,
+            origin: self.shown.origin,
+            angles: self.shown.angles,
+            model: self.shown.model.as_deref(),
+            attachments: &self.shown.attachments,
+            hidden: self.shown.hidden,
+            thermal_draw: self.shown.thermal_draw,
+            hero_lighting: self.shown.hero_lighting,
+            less_frequent_lighting: self.shown.less_frequent_lighting,
+            aim_assist: self.shown.aim_assist,
+            shown_to: self.shown.shown_to,
+            solid: self.shown.solid,
+            contents: self.shown.contents,
+            has_operations: false,
+        }
+    }
+}
+
+fn presentation_matches(shown: Option<&Shown>, source: CollisionSource<'_>) -> bool {
+    !source.has_operations
+        && shown.is_some_and(|shown| {
+            !shown.moving
+                && shown.hidden == source.hidden
+                && shown.thermal_draw == source.thermal_draw
+                && shown.hero_lighting == source.hero_lighting
+                && shown.less_frequent_lighting == source.less_frequent_lighting
+                && shown.aim_assist == source.aim_assist
+                && shown.shown_to == source.shown_to
+                && shown.solid == source.solid
+                && shown.contents == source.contents
+                && shown.model.as_deref() == source.model
+                && shown.attachments == source.attachments
+                && near(shown.origin, source.origin)
+                && near_angles(shown.angles, source.angles)
+        })
+}
+
+fn collision_sources(
+    runtime: &RoundScript,
+    symbols: [u32; 3],
+) -> impl Iterator<Item = CollisionSource<'_>> {
+    runtime
+        .entities
+        .iter()
+        .filter_map(move |(&object, entity)| collision_source(runtime, symbols, object, entity))
+}
+
+fn collision_source<'a>(
+    runtime: &'a RoundScript,
+    symbols: [u32; 3],
+    object: u64,
+    entity: &'a ScriptEntity,
+) -> Option<CollisionSource<'a>> {
+    let presence = entity.presence?;
+    let fields = runtime.objects.get(&object);
+    let vector = |symbol| match fields.and_then(|fields| fields.get(&symbol)) {
+        Some(Value::Vector(value)) => *value,
+        _ => [0.; 3],
+    };
+    let model = match fields.and_then(|fields| fields.get(&symbols[2])) {
+        Some(Value::String(model)) if !model.is_empty() && !model.starts_with('*') => {
+            Some(&**model)
+        }
+        _ => None,
+    };
+    let actor = runtime.actors.get(&object);
+    Some(CollisionSource {
+        object,
+        presence,
+        origin: vector(symbols[0]),
+        angles: vector(symbols[1]),
+        model,
+        attachments: &entity.attachments,
+        hidden: entity.hidden,
+        thermal_draw: actor.is_some_and(|actor| actor.thermal_draw),
+        hero_lighting: entity.hero_only_lighting || actor.is_some(),
+        less_frequent_lighting: entity.less_frequent_lighting,
+        aim_assist: entity.aim_assist,
+        shown_to: entity.shown_to,
+        solid: entity.solid,
+        contents: entity.contents,
+        has_operations: entity.anim_op.is_some(),
+    })
+}
+
+fn collision_turrets(
+    runtime: &RoundScript,
+    angles: u32,
+) -> Vec<(u64, ScriptModelId, Vec<xmodel_runtime::TagRotation>)> {
+    runtime
+        .engine
+        .turrets
+        .iter()
+        .filter_map(|(&object, turret)| {
+            let presence = runtime.entities.get(&object)?.presence?;
+            let base = match runtime
+                .objects
+                .get(&object)
+                .and_then(|fields| fields.get(&angles))
+            {
+                Some(Value::Vector(value)) => *value,
+                _ => [0.; 3],
+            };
+            Some((object, presence, turret.model_rotations(base)))
+        })
+        .collect()
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct CollisionSettlement {
+    revision: Option<u64>,
+    inputs: Vec<CollisionInput>,
+    turrets: Vec<(u64, ScriptModelId, Vec<xmodel_runtime::TagRotation>)>,
+    checks: u64,
+    reused: u64,
+    source_maps: Option<[Arc<()>; 3]>,
+    source_symbols: Option<[u32; 3]>,
+    non_reflexive: bool,
+    untracked_sources: bool,
+}
+
+impl CollisionSettlement {
+    fn input(&self, object: u64) -> Option<&CollisionInput> {
+        self.inputs
+            .binary_search_by_key(&object, |row| row.object)
+            .ok()
+            .map(|index| &self.inputs[index])
+    }
+
+    fn changes(
+        &self,
+        runtime: &RoundScript,
+        symbols: [u32; 3],
+        revision: u64,
+    ) -> Option<Vec<CollisionInput>> {
+        if self.revision != Some(revision) {
+            return None;
+        }
+        let identities = [
+            runtime.entities.identity(),
+            runtime.objects.identity(),
+            runtime.actors.identity(),
+        ];
+        let same_maps = self
+            .source_maps
+            .as_ref()
+            .is_some_and(|old| old.iter().zip(identities).all(|(a, b)| Arc::ptr_eq(a, b)));
+        if !same_maps
+            || self.source_symbols != Some(symbols)
+            || self.non_reflexive
+            || self.untracked_sources
+        {
+            return self.changes_full(runtime, symbols, revision);
+        }
+        let (Some(entities), Some(objects), Some(actors)) = (
+            runtime.entities.changed(),
+            runtime.objects.changed(),
+            runtime.actors.changed(),
+        ) else {
+            return self.changes_full(runtime, symbols, revision);
         };
-        match row.dobj.as_mut() {
-            Some(dobj) if dobj.current_model == *model => {}
-            Some(dobj) => dobj.replace_model(&model, capability),
-            None => {
-                row.dobj = Some(AuthorityDObjState::at_pose(
-                    &model, capability, origin, angles,
-                ));
-                row.followed_pose = Some((origin, angles));
+        let mut ids = Vec::with_capacity(entities.len() + objects.len() + actors.len());
+        ids.extend(entities);
+        ids.extend(objects);
+        ids.extend(actors);
+        ids.sort_unstable();
+        ids.dedup();
+        let mut changed = Vec::new();
+        for object in ids {
+            let previous = self.input(object);
+            let source = runtime
+                .entities
+                .get(&object)
+                .and_then(|entity| collision_source(runtime, symbols, object, entity));
+            match (previous, source) {
+                (None, None) => {}
+                (Some(previous), Some(source)) if previous.presence == source.presence => {
+                    if source != previous.source() {
+                        changed.push(CollisionInput::from_source(source));
+                    }
+                }
+                _ => return None,
             }
         }
+        Some(changed)
+    }
+
+    fn changes_full(
+        &self,
+        runtime: &RoundScript,
+        symbols: [u32; 3],
+        revision: u64,
+    ) -> Option<Vec<CollisionInput>> {
+        if self.revision != Some(revision) {
+            return None;
+        }
+        let mut old = self.inputs.iter();
+        let mut changed = Vec::new();
+        for source in collision_sources(runtime, symbols) {
+            let previous = old.next()?;
+            if (previous.object, previous.presence) != (source.object, source.presence) {
+                return None;
+            }
+            if source != previous.source() {
+                changed.push(CollisionInput::from_source(source));
+            }
+        }
+        old.next().is_none().then_some(changed)
+    }
+
+    fn capture(
+        &mut self,
+        inputs: Vec<CollisionInput>,
+        turrets: Vec<(u64, ScriptModelId, Vec<xmodel_runtime::TagRotation>)>,
+        revision: u64,
+    ) {
+        let mut presences: Vec<_> = inputs.iter().map(|input| input.presence).collect();
+        presences.sort_unstable();
+        // Aliases can alternate DObj models and advance revisions on every settlement.
+        self.revision = (!presences.windows(2).any(|pair| pair[0] == pair[1])).then_some(revision);
+        self.non_reflexive = inputs.iter().any(CollisionInput::non_reflexive);
+        self.inputs = inputs;
+        self.turrets = turrets;
     }
 }
 
 /// Collision rows only. Networked mover state is left to `present`: posing a
 /// mover mid-tick would break its tick-to-tick velocity.
 pub(crate) fn settle_collision(world: &mut World) {
-    let mut runtime = world.resource_mut::<RoundScript>();
-    let placed: Vec<(u64, ScriptModelId, bool, bool)> = runtime
-        .entities
-        .iter()
-        .filter_map(|(id, e)| Some((*id, e.presence?, e.hidden, e.solid)))
-        .collect();
-    let wanted: BTreeMap<ScriptModelId, ([f32; 3], [f32; 3], bool, bool)> = placed
-        .into_iter()
-        .map(|(object, presence, hidden, solid)| {
-            let origin = vector(&mut runtime, object, "origin");
-            let angles = vector(&mut runtime, object, "angles");
-            (presence, (origin, angles, hidden, solid))
-        })
-        .collect();
-    let turrets: Vec<_> = runtime
-        .engine
-        .turrets
-        .iter()
-        .filter_map(|(object, turret)| {
-            Some((
-                *object,
-                runtime.entities.get(object)?.presence?,
-                turret.clone(),
-            ))
-        })
-        .collect();
+    let _span = perf::span_handle!("script_collision_settle", "iw4l.sim").enter();
+    let anim_span = perf::span_handle!("script_settle_animation", "iw4l.sim").enter();
+    super::animations::settle_actor_trees(world);
+    drop(anim_span);
+    let revision = FrameWorld::from_world(world).collision_revision();
+    let (changes, turrets, symbols) = {
+        let mut runtime = world.resource_mut::<RoundScript>();
+        runtime.collision_settlement.checks += 1;
+        let symbols = [
+            runtime.symbol("origin"),
+            runtime.symbol("angles"),
+            runtime.symbol("model"),
+        ];
+        let changes = runtime
+            .collision_settlement
+            .changes(&runtime, symbols, revision);
+        let turrets = collision_turrets(&runtime, symbols[1]);
+        if changes.as_ref().is_some_and(Vec::is_empty)
+            && runtime.collision_settlement.turrets == turrets
+        {
+            runtime.collision_settlement.reused += 1;
+            acknowledge_sources(&mut runtime, symbols, false);
+            return;
+        }
+        (changes, turrets, symbols)
+    };
+    let incremental = changes.is_some();
+    let mut placements = CollisionPlacements::default();
+    let mut inputs = Vec::new();
+    let wanted = if let Some(changes) = changes {
+        inputs = changes;
+        collect_changed(world, &inputs, &turrets, &mut placements)
+    } else {
+        collect_wanted(world, Some(&mut placements), Some(&mut inputs))
+    };
+    placements.sort();
+    let model_span = perf::span_handle!("script_settle_models", "iw4l.sim").enter();
+    let mut frame = FrameWorld::from_world(world);
+    for want in &wanted {
+        present_model(&mut frame, want);
+    }
+    drop(model_span);
+    let placement_span = perf::span_handle!("script_settle_placements", "iw4l.sim").enter();
     let rotations: BTreeMap<_, _> = turrets
-        .into_iter()
-        .map(|(object, presence, turret)| {
-            let base = vector(&mut runtime, object, "angles");
-            (presence, turret.model_rotations(base))
-        })
+        .iter()
+        .map(|(_, presence, rotations)| (*presence, rotations.clone()))
         .collect();
     let mut frame = FrameWorld::from_world(world);
-    for row in frame.entity_collision_capabilities_mut() {
-        let Some(&(origin, angles, hidden, solid)) =
-            row.owner.script_model().and_then(|id| wanted.get(&id))
-        else {
-            continue;
-        };
+    let content = frame.content();
+    let place = |row: &mut EntityCollisionCapabilities, placement: &CollisionPlacement| {
+        let &CollisionPlacement {
+            origin,
+            angles,
+            hidden,
+            solid,
+            contents,
+        } = placement;
         row.hidden = hidden;
         row.solid = solid;
+        // The content frame is immutable during the match. Repeated reads of
+        // exactly the settled pose do not need another frame lookup or matrix.
+        // Nonidentical poses still validate the frame before the near check.
+        let model_pose = if row.followed_pose == Some((origin, angles)) {
+            None
+        } else {
+            let Some(pose) = content.simulation_model_transform(origin, angles) else {
+                row.hidden = true;
+                row.solid = false;
+                row.followed_pose = None;
+                return;
+            };
+            Some(pose)
+        };
+        if let Some(body) = &mut row.body {
+            body.bounds.contents = contents as u32;
+        }
         if let Some(rotations) = row.owner.script_model().and_then(|id| rotations.get(&id))
             && let Some(dobj) = row.dobj.as_mut()
         {
@@ -204,36 +522,272 @@ pub(crate) fn settle_collision(world: &mut World) {
             .followed_pose
             .is_some_and(|(at, facing)| near(at, origin) && near_angles(facing, angles));
         if settled {
-            continue;
+            return;
         }
         row.followed_pose = Some((origin, angles));
+        if let Some(body) = &mut row.body {
+            body.origin = origin;
+        }
         if let Some(dobj) = row.dobj.as_mut() {
-            dobj.set_world_pose(origin, angles);
+            dobj.set_world_transform(model_pose.expect("unsettled pose has a resolved frame"));
         }
         for brush in &mut row.linked_brushes {
             brush.origin = origin;
             brush.angles = angles;
         }
+    };
+    if incremental {
+        for (presence, placement) in placements.iter() {
+            for row in frame.collision_owners_mut(presence) {
+                place(row, placement);
+            }
+        }
+    } else {
+        for row in frame.entity_collision_capabilities_mut() {
+            if let Some(placement) = row.owner.script_model().and_then(|id| placements.get(id)) {
+                place(row, placement);
+            }
+        }
     }
+    drop(placement_span);
+    let _materialize_span = perf::span_handle!("script_settle_materialize", "iw4l.sim").enter();
+    let materialize = |row: &mut EntityCollisionCapabilities| {
+        if row.solid
+            && let Some(dobj) = &mut row.dobj
+        {
+            dobj.materialize();
+        }
+    };
+    if incremental {
+        for (presence, _) in placements.iter() {
+            for row in frame.collision_owners_mut(presence) {
+                materialize(row);
+            }
+        }
+    } else {
+        for row in frame.entity_collision_capabilities_mut() {
+            materialize(row);
+        }
+    }
+    let revision = frame.collision_revision();
+    let mut runtime = world.resource_mut::<RoundScript>();
+    if incremental {
+        let cache = &mut runtime.collision_settlement;
+        for input in inputs {
+            let index = cache
+                .inputs
+                .binary_search_by_key(&input.object, |old| old.object)
+                .expect("unchanged collision topology");
+            cache.non_reflexive |= input.non_reflexive();
+            cache.inputs[index] = input;
+        }
+        cache.revision = Some(revision);
+        cache.turrets = turrets;
+    } else {
+        runtime
+            .collision_settlement
+            .capture(inputs, turrets, revision);
+    }
+    acknowledge_sources(&mut runtime, symbols, !incremental);
+}
+
+fn acknowledge_sources(runtime: &mut RoundScript, symbols: [u32; 3], refreshed: bool) {
+    let pending = |entity: &ScriptEntity| entity.presence.is_some() && entity.anim_op.is_some();
+    let verify_topology = refreshed || runtime.collision_settlement.untracked_sources;
+    let incomplete = verify_topology
+        && !runtime
+            .collision_settlement
+            .inputs
+            .iter()
+            .map(|row| (row.object, row.presence))
+            .eq(runtime
+                .entities
+                .iter()
+                .filter_map(|(&id, entity)| Some((id, entity.presence?))));
+    let operations = if verify_topology {
+        runtime.entities.values().any(pending)
+    } else if let Some(ids) = runtime.entities.changed() {
+        ids.iter()
+            .any(|id| runtime.entities.get(id).is_some_and(pending))
+    } else {
+        runtime.entities.values().any(pending)
+    };
+    runtime.collision_settlement.untracked_sources = incomplete || operations;
+    runtime.collision_settlement.source_maps = Some([
+        runtime.entities.identity().clone(),
+        runtime.objects.identity().clone(),
+        runtime.actors.identity().clone(),
+    ]);
+    runtime.collision_settlement.source_symbols = Some(symbols);
+    runtime.entities.acknowledge();
+    runtime.objects.acknowledge();
+    runtime.actors.acknowledge();
 }
 
 pub(crate) fn sync_presence(world: &mut World) {
+    let _span = perf::span_handle!("script_presence_sync", "iw4l.sim").enter();
+    super::model_state::player_appearance::sync_all(world);
     let request = world.resource::<crate::step::StepRequest>();
-    if !request.reason.advances_authority_world() {
-        return;
-    }
     let tick = request.tick;
     let now = crate::level_time_ms(tick);
     settle_collision(world);
+    {
+        let runtime = world.resource::<RoundScript>();
+        perf::counter!(
+            "script_collision_checks",
+            "iw4l.sim",
+            runtime.collision_settlement.checks as f64
+        );
+        perf::counter!(
+            "script_collision_reused",
+            "iw4l.sim",
+            runtime.collision_settlement.reused as f64
+        );
+    }
     super::entity_damage::apply_script_blasts(world, tick);
+    super::audio::waits::advance(world);
     publish_loop_sounds(world);
     super::objectives::publish(world);
     super::controls::sync_script_locks(world);
     super::triggers::dispatch_triggers(world);
+    super::actors::suppression::advance(world, now);
+    if let Err(message) = super::actors::targeting::advance(world, now) {
+        world.resource_mut::<RoundScript>().fault = Some(crate::script::Fault::at(
+            &crate::script::Location {
+                module: "<engine>".into(),
+                function: "actor target selection".into(),
+                line: 0,
+                column: 0,
+            },
+            message,
+        ));
+        return;
+    }
+    if let Err(message) = super::actors::death::advance(world, now)
+        .and_then(|()| super::actors::corpses::advance(world, now))
+    {
+        world.resource_mut::<RoundScript>().fault = Some(crate::script::Fault::at(
+            &crate::script::Location {
+                module: "<engine>".into(),
+                function: "actor death".into(),
+                line: 0,
+                column: 0,
+            },
+            message,
+        ));
+        return;
+    }
+    if let Err(message) = super::actors::scripted::think(world, now) {
+        world.resource_mut::<RoundScript>().fault = Some(crate::script::Fault::at(
+            &crate::script::Location {
+                module: "<engine>".into(),
+                function: "actor scripted animation".into(),
+                line: 0,
+                column: 0,
+            },
+            message,
+        ));
+        return;
+    }
+    if let Err(message) = super::actors::turret::advance(world, now)
+        .and_then(|()| super::actors::traversal::advance(world, now))
+        .and_then(|()| super::actors::bad_places::advance(world, now))
+        .and_then(|()| super::actors::arrival::advance(world, now))
+        .and_then(|()| super::actors::cover::advance(world, now))
+        .and_then(|()| super::actors::reacquire::advance(world, now))
+        .and_then(|()| super::actors::grenades::think(world, now))
+        .and_then(|()| super::actors::animation::think(world, now))
+    {
+        world.resource_mut::<RoundScript>().fault = Some(crate::script::Fault::at(
+            &crate::script::Location {
+                module: "<engine>".into(),
+                function: "actor animation".into(),
+                line: 0,
+                column: 0,
+            },
+            message,
+        ));
+        return;
+    }
+    if let Err(message) = super::actors::orientation::advance(world) {
+        world.resource_mut::<RoundScript>().fault = Some(crate::script::Fault::at(
+            &crate::script::Location {
+                module: "<engine>".into(),
+                function: "actor orientation".into(),
+                line: 0,
+                column: 0,
+            },
+            message,
+        ));
+        return;
+    }
+    if let Err(message) = super::actors::physics::advance(world) {
+        world.resource_mut::<RoundScript>().fault = Some(crate::script::Fault::at(
+            &crate::script::Location {
+                module: "<engine>".into(),
+                function: "actor physics".into(),
+                line: 0,
+                column: 0,
+            },
+            message,
+        ));
+        return;
+    }
+    if let Err(message) = super::actors::turret::pose::advance(world) {
+        world.resource_mut::<RoundScript>().fault = Some(crate::script::Fault::at(
+            &crate::script::Location {
+                module: "<engine>".into(),
+                function: "actor turret pose".into(),
+                line: 0,
+                column: 0,
+            },
+            message,
+        ));
+        return;
+    }
+    settle_collision(world);
     present(world, now);
+    if let Err(message) = super::actors::prone::advance(world, now) {
+        world.resource_mut::<RoundScript>().fault = Some(crate::script::Fault::at(
+            &crate::script::Location {
+                module: "<engine>".into(),
+                function: "actor prone update".into(),
+                line: 0,
+                column: 0,
+            },
+            message,
+        ));
+        return;
+    }
+    if let Err(message) = super::actors::goals::advance(world, now) {
+        world.resource_mut::<RoundScript>().fault = Some(crate::script::Fault::at(
+            &crate::script::Location {
+                module: "<engine>".into(),
+                function: "actor goal update".into(),
+                line: 0,
+                column: 0,
+            },
+            message,
+        ));
+        return;
+    }
+    super::animations::publish(world);
+    if let Err(message) = super::actors::grenades::advance(world, now)
+        .and_then(|()| super::actors::weapon_drops::advance(world, i64::from(now)))
+    {
+        world.resource_mut::<RoundScript>().fault = Some(crate::script::Fault::at(
+            &crate::script::Location {
+                module: "<engine>".into(),
+                function: "actor weapon drop".into(),
+                line: 0,
+                column: 0,
+            },
+            message,
+        ));
+        return;
+    }
     publish_killcam_cameras(world);
     settle_collision(world);
-    resolve_link_tags(world);
 }
 
 fn publish_killcam_cameras(world: &mut World) {
@@ -262,9 +816,9 @@ fn publish_killcam_cameras(world: &mut World) {
 }
 
 fn present(world: &mut World, now: i32) {
-    world.resource_mut::<RoundScript>().new_models.clear();
+    let _span = perf::span_handle!("script_presence_present", "iw4l.sim").enter();
     let retired = std::mem::take(&mut world.resource_mut::<RoundScript>().retired_presence);
-    let wanted = collect_wanted(world);
+    let wanted = collect_wanted(world, None, None);
     if retired.is_empty() && wanted.is_empty() {
         return;
     }
@@ -306,8 +860,14 @@ fn present(world: &mut World, now: i32) {
                 .map(|dobj| dobj.current_model.as_str().into()),
             attachments: Vec::new(),
             hidden: mover.state.e_flags & entity_iw4::CG_SCRIPT_MOVER_NODRAW != 0,
+            thermal_draw: mover.thermal_draw,
+            hero_lighting: mover.state.e_flags & entity_iw4::SP_HERO_ONLY_LIGHTING != 0,
+            less_frequent_lighting: mover.state.e_flags & entity_iw4::SP_LESS_FREQUENT_LIGHTING
+                != 0,
+            aim_assist: mover.state.e_flags & entity_iw4::SP_SCRIPT_MODEL_AIM_ASSIST != 0,
             shown_to: mover.shown_to,
             solid: !mover.nonsolid,
+            contents: mover.body.map_or(0, |body| body.contents as i32),
             moving: false,
         });
         let posed = !near(shown.origin, want.origin) || !near_angles(shown.angles, want.angles);
@@ -318,21 +878,33 @@ fn present(world: &mut World, now: i32) {
                 mover.state.e_flags &= !entity_iw4::CG_SCRIPT_MOVER_NODRAW;
             }
             mover.nonsolid = !want.solid;
+            if let Some(body) = &mut mover.body {
+                body.contents = want.contents as u32;
+            }
             mover.shown_to = want.shown_to;
+            mover.thermal_draw = want.thermal_draw;
+            if want.aim_assist {
+                mover.state.e_flags |= entity_iw4::SP_SCRIPT_MODEL_AIM_ASSIST;
+            } else {
+                mover.state.e_flags &= !entity_iw4::SP_SCRIPT_MODEL_AIM_ASSIST;
+            }
+            if want.less_frequent_lighting {
+                mover.state.e_flags |= entity_iw4::SP_LESS_FREQUENT_LIGHTING;
+            } else {
+                mover.state.e_flags &= !entity_iw4::SP_LESS_FREQUENT_LIGHTING;
+            }
+            if want.hero_lighting {
+                mover.state.e_flags |= entity_iw4::SP_HERO_ONLY_LIGHTING;
+            } else {
+                mover.state.e_flags &= !entity_iw4::SP_HERO_ONLY_LIGHTING;
+            }
         }
         if posed || shown.moving {
             frame.set_script_mover_pose(mover.state.number, now, want.origin, want.angles);
         }
         let reshaped = want.model != shown.model || want.attachments != shown.attachments;
-        if reshaped || !want.part_ops.is_empty() || want.anim_op.is_some() {
+        if reshaped || want.anim_op.is_some() {
             present_model(&mut frame, &want);
-        }
-        if let Some(tree) = &want.tree
-            && let Some(dobj) = frame
-                .collision_owner_mut(want.presence)
-                .and_then(|row| row.dobj.as_mut())
-        {
-            dobj.set_script_tree(tree.clone());
         }
         updates.push((
             want.object,
@@ -343,14 +915,25 @@ fn present(world: &mut World, now: i32) {
                 model: want.model,
                 attachments: want.attachments,
                 hidden: want.hidden,
+                thermal_draw: want.thermal_draw,
+                hero_lighting: want.hero_lighting,
+                less_frequent_lighting: want.less_frequent_lighting,
+                aim_assist: want.aim_assist,
                 shown_to: want.shown_to,
                 solid: want.solid,
+                contents: want.contents,
                 moving: posed,
             },
         ));
     }
     let movers = crate::frame::collect_script_movers(frame.ecs());
-    crate::presence::follow_movers(frame.entity_collision_capabilities_mut(), &movers, now);
+    let content = frame.content();
+    crate::presence::follow_movers(
+        frame.entity_collision_capabilities_mut(),
+        &movers,
+        now,
+        &content,
+    );
     let mut runtime = world.resource_mut::<RoundScript>();
     for (object, number, shown) in updates {
         let Some(entity) = runtime.entities.get_mut(&object) else {
@@ -368,12 +951,37 @@ fn with_tag_dobj<T>(
     object: u64,
     read: impl FnOnce(&AuthorityDObjState) -> Option<T>,
 ) -> Option<T> {
+    if world
+        .resource::<RoundScript>()
+        .player_client(object)
+        .is_none()
+    {
+        settle_collision(world);
+    }
+    with_tag_dobj_settled(world, object, read)
+}
+
+// Internal read-only query batch: the caller has settled poses and animation.
+fn with_tag_dobj_settled<T>(
+    world: &mut World,
+    object: u64,
+    read: impl FnOnce(&AuthorityDObjState) -> Option<T>,
+) -> Option<T> {
+    if let Some(client) = world.resource::<RoundScript>().player_client(object) {
+        super::model_state::player_appearance::sync_one(world, client);
+        let runtime = world.resource::<RoundScript>();
+        let slot = runtime.players.get(&client)?;
+        if slot.object != object {
+            return None;
+        }
+        return read(slot.appearance.as_ref()?.dobj.as_ref()?);
+    }
     let presence = world
         .resource::<RoundScript>()
         .entities
         .get(&object)?
         .presence?;
-    let frame = settled(world);
+    let frame = FrameWorld::from_world(world);
     if let Some(dobj) = frame
         .entity_collision_capabilities()
         .iter()
@@ -394,64 +1002,19 @@ fn with_tag_dobj<T>(
     let capability = FrameWorld::from_world(world)
         .model_capability(&model)
         .flatten()?;
-    read(&AuthorityDObjState::at_pose(
-        &model,
+    let pose = FrameWorld::from_world(world)
+        .content()
+        .simulation_model_transform(origin, angles)?;
+    read(&AuthorityDObjState::new_dirty(
+        model.to_string(),
         Some(capability),
-        origin,
-        angles,
+        pose,
     ))
 }
 
-fn tag_world_from_anim(world: &mut World, object: u64, tag: &str) -> Option<glam::Mat4> {
-    let (node, scripted, anim_time) = {
-        let runtime = world.resource::<RoundScript>();
-        let entity = runtime.entities.get(&object)?;
-        let anim = entity.anim.as_ref()?;
-        let scripted = anim.scripted.as_ref()?;
-        (scripted.node, scripted.clone(), anim.time(scripted.node))
-    };
-    let clip = {
-        let runtime = world.resource::<RoundScript>();
-        let entity = runtime.entities.get(&object)?;
-        let anim = entity.anim.as_ref()?;
-        let clip_name = anim.node_clip_name(node)?;
-        runtime.campaign.anim_library.clip(clip_name)?
-    };
-    let track_idx = clip.tracks.iter().position(|t| &*t.name == tag)?;
-    let sampled = clip.sample_track(track_idx, anim_time)?;
-    let axis = math_iw4::angles_to_axis(scripted.angles);
-    let base_rot = glam::Quat::from_array(fx_iw4::axis_to_quat(axis));
-    let tag_trans = glam::Vec3::from(sampled.translation.unwrap_or([0.0; 3]));
-    let tag_rot = glam::Quat::from_array(sampled.rotation.unwrap_or([0.0, 0.0, 0.0, 1.0]));
-
-    let world_trans = glam::Vec3::from(scripted.origin) + base_rot * tag_trans;
-    let world_rot = (base_rot * tag_rot).normalize();
-    Some(glam::Mat4::from_rotation_translation(
-        world_rot,
-        world_trans,
-    ))
-}
-
-fn tag_lookup(world: &mut World, object: u64, tag: &str) -> Option<Option<[f32; 3]>> {
-    if let Some(matrix) = tag_world_from_anim(world, object, tag) {
-        let (scripted_origin, scripted_rot) = {
-            let runtime = world.resource::<RoundScript>();
-            let entity = runtime.entities.get(&object);
-            let scripted = entity
-                .and_then(|e| e.anim.as_ref())
-                .and_then(|a| a.scripted.as_ref());
-            if let Some(scripted) = scripted {
-                let axis = math_iw4::angles_to_axis(scripted.angles);
-                let rot = glam::Quat::from_array(fx_iw4::axis_to_quat(axis));
-                (glam::Vec3::from(scripted.origin), rot)
-            } else {
-                (glam::Vec3::ZERO, glam::Quat::IDENTITY)
-            }
-        };
-        let world_pos = matrix.w_axis.truncate();
-        let local_pos = scripted_rot.inverse() * (world_pos - scripted_origin);
-        return Some(Some(local_pos.to_array()));
-    }
+/// Model-space offset of `tag`: `None` when the entity has no model to ask,
+/// `Some(None)` when its model lacks the tag.
+pub(crate) fn tag_lookup(world: &mut World, object: u64, tag: &str) -> Option<Option<[f32; 3]>> {
     with_tag_dobj(world, object, |dobj| {
         Some(dobj.tag_world_pose(tag).map(|(at, _)| {
             dobj.world_from_model
@@ -467,8 +1030,39 @@ pub(crate) fn tag_world(
     object: u64,
     tag: &str,
 ) -> Option<([f32; 3], [[f32; 3]; 3])> {
-    let matrix = tag_world_from_anim(world, object, tag)
-        .or_else(|| with_tag_dobj(world, object, |dobj| dobj.tag_world_matrix(tag)))?;
+    if world
+        .resource::<RoundScript>()
+        .player_client(object)
+        .is_none()
+    {
+        settle_collision(world);
+    }
+    tag_world_settled(world, object, tag)
+}
+
+/// Query in a read-only batch after collision settlement; no pose/animation writes.
+pub(crate) fn tag_world_settled(
+    world: &mut World,
+    object: u64,
+    tag: &str,
+) -> Option<([f32; 3], [[f32; 3]; 3])> {
+    let mut matrix = with_tag_dobj_settled(world, object, |dobj| dobj.tag_world_matrix(tag))?;
+    let simulation_origin = {
+        let mut runtime = world.resource_mut::<RoundScript>();
+        runtime
+            .player_client(object)
+            .is_none()
+            .then(|| vector(&mut runtime, object, "origin"))
+    };
+    if let Some(origin) = simulation_origin {
+        let content = FrameWorld::from_world(world).content();
+        let owner = if content.atlas().is_some() {
+            asset_core::world_frame::SimPoint::from_slab(origin).world()
+        } else {
+            asset_core::atlas::WorldId::ROOT
+        };
+        matrix = content.scene_model_transform(owner, matrix)?;
+    }
     let axis = |v: glam::Vec4| v.truncate().normalize_or_zero().to_array();
     Some((
         matrix.w_axis.truncate().to_array(),
@@ -480,66 +1074,205 @@ pub(crate) fn tag_world(
     ))
 }
 
-pub(crate) fn tag_offset(world: &mut World, object: u64, tag: &str) -> Option<[f32; 3]> {
-    tag_lookup(world, object, tag).flatten()
-}
-
-fn resolve_link_tags(world: &mut World) {
-    let pending: Vec<(u64, u64, Arc<str>)> = world
-        .resource::<RoundScript>()
-        .entities
-        .iter()
-        .filter_map(|(id, e)| {
-            let link = e.linked_to.as_ref().filter(|l| l.tag_offset.is_none())?;
-            Some((*id, link.parent, link.tag.clone()?))
-        })
-        .collect();
-    for (id, parent, tag) in pending {
-        let Some(offset) = tag_lookup(world, parent, &tag) else {
-            continue;
-        };
-        if let Some(link) = world
-            .resource_mut::<RoundScript>()
-            .entities
-            .get_mut(&id)
-            .and_then(|e| e.linked_to.as_mut())
-        {
-            link.tag_offset = Some(offset.unwrap_or([0.0; 3]));
-        }
+pub(crate) fn link_parent_pose(
+    world: &mut World,
+    link: &super::entities::Link,
+) -> Option<([f32; 3], [[f32; 3]; 3])> {
+    if let Some(tag) = &link.tag {
+        return tag_world(world, link.parent, tag);
     }
+    let mut runtime = world.resource_mut::<RoundScript>();
+    let Value::Vector(origin) = runtime.object_field(link.parent, "origin") else {
+        return None;
+    };
+    let Value::Vector(angles) = runtime.object_field(link.parent, "angles") else {
+        return None;
+    };
+    Some((origin, math_iw4::angles_to_axis(angles)))
 }
 
-fn collect_wanted(world: &mut World) -> Vec<Wanted> {
+fn collect_changed(
+    world: &mut World,
+    inputs: &[CollisionInput],
+    turrets: &[(u64, ScriptModelId, Vec<xmodel_runtime::TagRotation>)],
+    placements: &mut CollisionPlacements,
+) -> Vec<Wanted> {
+    let _span = perf::span_handle!("script_settle_incremental_collect", "iw4l.sim").enter();
     let mut runtime = world.resource_mut::<RoundScript>();
-    let ids: Vec<(u64, ScriptModelId, bool, u64, bool)> = runtime
-        .entities
-        .iter()
-        .filter_map(|(id, e)| e.presence.map(|p| (*id, p, e.hidden, e.shown_to, e.solid)))
-        .collect();
-    let mut wanted = Vec::with_capacity(ids.len());
-    for (object, presence, hidden, shown_to, solid) in ids {
+    let mut wanted = Vec::with_capacity(inputs.len());
+    let RoundScript {
+        entities,
+        collision_settlement,
+        ..
+    } = &mut *runtime;
+    for input in inputs {
+        let entity = entities.get_mut(&input.object).unwrap();
+        let shown = &input.shown;
+        placements.0.push((
+            input.presence,
+            input.object,
+            CollisionPlacement {
+                origin: shown.origin,
+                angles: shown.angles,
+                hidden: shown.hidden,
+                solid: shown.solid,
+                contents: shown.contents,
+            },
+        ));
+        if presentation_matches(
+            collision_settlement
+                .input(input.object)
+                .map(|row| &row.shown),
+            CollisionSource {
+                has_operations: entity.anim_op.is_some(),
+                ..input.source()
+            },
+        ) {
+            continue;
+        }
+        wanted.push(Wanted {
+            collision_only: matches!(entity.kind, EntityKind::Missile(_)),
+            object: input.object,
+            presence: input.presence,
+            origin: shown.origin,
+            angles: shown.angles,
+            model: shown.model.clone(),
+            attachments: shown.attachments.clone(),
+            hidden: shown.hidden,
+            thermal_draw: shown.thermal_draw,
+            hero_lighting: shown.hero_lighting,
+            less_frequent_lighting: shown.less_frequent_lighting,
+            aim_assist: shown.aim_assist,
+            shown_to: shown.shown_to,
+            solid: shown.solid,
+            contents: shown.contents,
+            anim_op: entity.anim_op.take(),
+        });
+    }
+    for &(object, presence, _) in turrets {
         let origin = vector(&mut runtime, object, "origin");
         let angles = vector(&mut runtime, object, "angles");
-        let model = model_field(&mut runtime, object);
-        let entity = runtime.entities.get_mut(&object).unwrap();
-        let part_ops = std::mem::take(&mut entity.part_ops);
-        let anim_op = entity.anim_op.take();
-        let tree = entity.anim.as_ref().map(|anim| anim.snapshot());
-        let attachments = entity.attachments.clone();
+        let entity = &runtime.entities[&object];
+        placements.0.push((
+            presence,
+            object,
+            CollisionPlacement {
+                origin,
+                angles,
+                hidden: entity.hidden,
+                solid: entity.solid,
+                contents: entity.contents,
+            },
+        ));
+    }
+    wanted
+}
+
+fn collect_wanted(
+    world: &mut World,
+    mut placements: Option<&mut CollisionPlacements>,
+    mut settled_inputs: Option<&mut Vec<CollisionInput>>,
+) -> Vec<Wanted> {
+    let _span = perf::span_handle!("script_presence_collect", "iw4l.sim").enter();
+    let settling = settled_inputs.is_some();
+    let mut runtime = world.resource_mut::<RoundScript>();
+    let origin_field = runtime.symbol("origin");
+    let angles_field = runtime.symbol("angles");
+    let model_field = runtime.symbol("model");
+    let RoundScript {
+        entities,
+        objects,
+        shown,
+        collision_settlement,
+        actors,
+        ..
+    } = &mut *runtime;
+    let mut wanted = Vec::new();
+    for (&object, entity) in entities {
+        let Some(presence) = entity.presence else {
+            continue;
+        };
+        let fields = objects.get(&object);
+        let vector = |symbol| match fields.and_then(|fields| fields.get(&symbol)) {
+            Some(Value::Vector(value)) => *value,
+            _ => [0.; 3],
+        };
+        let origin = vector(origin_field);
+        let angles = vector(angles_field);
+        if let Some(placements) = placements.as_deref_mut() {
+            placements.0.push((
+                presence,
+                object,
+                CollisionPlacement {
+                    origin,
+                    angles,
+                    hidden: entity.hidden,
+                    solid: entity.solid,
+                    contents: entity.contents,
+                },
+            ));
+        }
+        let model = match fields.and_then(|fields| fields.get(&model_field)) {
+            Some(Value::String(model)) if !model.is_empty() && !model.starts_with('*') => {
+                Some(model)
+            }
+            _ => None,
+        };
+        let hidden = entity.hidden;
+        let shown_to = entity.shown_to;
+        let solid = entity.solid;
         let collision_only = matches!(entity.kind, EntityKind::Missile(_));
-        let unchanged = part_ops.is_empty()
-            && anim_op.is_none()
-            && tree.is_none()
-            && runtime.shown.get(&object).is_some_and(|shown| {
-                !shown.moving
-                    && shown.hidden == hidden
-                    && shown.shown_to == shown_to
-                    && shown.solid == solid
-                    && shown.model == model
-                    && shown.attachments == attachments
-                    && near(shown.origin, origin)
-                    && near_angles(shown.angles, angles)
+        let contents = entity.contents;
+        let aim_assist = entity.aim_assist;
+        let actor = actors.get(&object);
+        let hero_lighting = entity.hero_only_lighting || actor.is_some();
+        let less_frequent_lighting = entity.less_frequent_lighting;
+        let thermal_draw = actor.is_some_and(|actor| actor.thermal_draw);
+        if let Some(inputs) = settled_inputs.as_deref_mut() {
+            inputs.push(CollisionInput {
+                object,
+                presence,
+                shown: Shown {
+                    origin,
+                    angles,
+                    model: model.map(|model| model.clone().into()),
+                    attachments: entity.attachments.clone(),
+                    hidden,
+                    thermal_draw,
+                    hero_lighting,
+                    less_frequent_lighting,
+                    aim_assist,
+                    shown_to,
+                    solid,
+                    contents,
+                    moving: false,
+                },
             });
+        }
+        let unchanged = presentation_matches(
+            if settling {
+                collision_settlement.input(object).map(|row| &row.shown)
+            } else {
+                shown.get(&object)
+            },
+            CollisionSource {
+                object,
+                presence,
+                origin,
+                angles,
+                model: model.map(|model| &**model),
+                attachments: &entity.attachments,
+                hidden,
+                thermal_draw,
+                hero_lighting,
+                less_frequent_lighting,
+                aim_assist,
+                shown_to,
+                solid,
+                contents,
+                has_operations: entity.anim_op.is_some(),
+            },
+        );
         if unchanged {
             continue;
         }
@@ -549,34 +1282,40 @@ fn collect_wanted(world: &mut World) -> Vec<Wanted> {
             presence,
             origin,
             angles,
-            model,
-            attachments,
+            model: model.map(|model| model.clone().into()),
+            attachments: entity.attachments.clone(),
             hidden,
+            thermal_draw,
+            hero_lighting,
+            less_frequent_lighting,
+            aim_assist,
             shown_to,
             solid,
-            part_ops,
-            anim_op,
-            tree,
+            contents,
+            anim_op: entity.anim_op.take(),
         });
     }
     wanted
 }
 
 fn present_model(frame: &mut FrameWorld, want: &Wanted) {
+    let model_pose = frame
+        .content()
+        .simulation_model_transform(want.origin, want.angles);
     let capability = want
         .model
         .as_deref()
         .and_then(|model| frame.model_capability(model))
         .flatten();
-    let attached: Vec<_> = want
-        .attachments
-        .iter()
-        .map(|(model, _)| frame.model_capability(model).flatten())
-        .collect();
     let anim = want
         .anim_op
         .as_ref()
         .and_then(|op| op.as_deref().and_then(|clip| frame.script_model_anim(clip)));
+    let attachments: Vec<_> = want
+        .attachments
+        .iter()
+        .map(|(model, tag)| (&**model, &**tag, frame.model_capability(model).flatten()))
+        .collect();
     let Some(row) = frame.collision_owner_mut(want.presence) else {
         return;
     };
@@ -588,11 +1327,13 @@ fn present_model(frame: &mut FrameWorld, want: &Wanted) {
             }
         }
         (Some(model), None) => {
-            row.dobj = Some(AuthorityDObjState::at_pose(
-                model,
+            let Some(model_pose) = model_pose else {
+                return;
+            };
+            row.dobj = Some(AuthorityDObjState::new_dirty(
+                model.to_string(),
                 capability,
-                want.origin,
-                want.angles,
+                model_pose,
             ));
             row.followed_pose = Some((want.origin, want.angles));
         }
@@ -600,16 +1341,7 @@ fn present_model(frame: &mut FrameWorld, want: &Wanted) {
     let Some(dobj) = row.dobj.as_mut() else {
         return;
     };
-    let attachments: Vec<_> = want
-        .attachments
-        .iter()
-        .zip(attached)
-        .map(|((model, tag), capability)| (&**model, &**tag, capability))
-        .collect();
     dobj.set_attachments(&attachments);
-    for (tag, hidden) in &want.part_ops {
-        dobj.set_tag_hidden(tag, *hidden);
-    }
     match &want.anim_op {
         Some(Some(clip)) => {
             let anim = anim.unwrap_or(crate::ScriptModelPlayAnim {
@@ -632,7 +1364,7 @@ fn publish_loop_sounds(world: &mut World) {
         .iter()
         .filter_map(|(object, e)| Some((*object, e.presence, e.loop_sound.clone()?, e.number)))
         .collect();
-    let placed: Vec<(ScriptModelId, Arc<str>, [f32; 3], Option<u32>)> = speaking
+    let placed: SpeakingModels = speaking
         .into_iter()
         .map(|(object, presence, alias, number)| {
             let owner = presence.unwrap_or_else(|| {
@@ -646,12 +1378,29 @@ fn publish_loop_sounds(world: &mut World) {
             )
         })
         .collect();
+    let mut placed: Vec<_> = placed
+        .into_iter()
+        .map(|(owner, alias, origin, number)| (owner, alias, origin, number, 1.0))
+        .collect();
+    // Each vehicle engine has separate source keys from its script loop voice.
+    const VEHICLE_ENGINE_LOOP_OWNER: u32 = 0x3000_0000;
+    for (object, slot, alias, gain) in super::vehicles::engine_sounds(&runtime) {
+        if let Some(entity) = runtime.entities.get(&object) {
+            let owner = ScriptModelId::from_wire(
+                VEHICLE_ENGINE_LOOP_OWNER | ((object as u32 & 0x01ff_ffff) << 3) | u32::from(slot),
+            );
+            let number = u32::try_from(entity.number).ok();
+            let origin = vector(&mut runtime, object, "origin");
+            placed.push((owner, alias, origin, number, gain));
+        }
+    }
     let mut frame = FrameWorld::from_world(world);
     let rows = placed
         .into_iter()
         .map(
-            |(owner, alias, origin, snd_ent)| crate::world_objects::DestructibleLoopSound {
+            |(owner, alias, origin, snd_ent, gain)| crate::world_objects::DestructibleLoopSound {
                 snd_ent,
+                gain,
                 owner,
                 alias_index: frame.sound_alias_index(&alias),
                 origin,
@@ -684,7 +1433,7 @@ impl RoundScript {
             .collect()
     }
 
-    pub(crate) fn presence_of(&self, value: &Value) -> Option<ScriptModelId> {
+    pub fn presence_of(&self, value: &Value) -> Option<ScriptModelId> {
         self.entity(value).and_then(|(_, e)| e.presence)
     }
 

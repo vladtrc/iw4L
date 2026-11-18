@@ -59,9 +59,19 @@ impl CEntityRuntime {
         evaluate_trajectory(&self.current.pos, self.pose_time_ms)
     }
 
-    pub fn present_pose(&mut self, at_time_ms: i32) {
+    pub fn pose_at(&self, at_time_ms: i32) -> ([f32; 3], [f32; 3]) {
+        let sampled = || {
+            (
+                evaluate_trajectory(&self.current.pos, at_time_ms),
+                evaluate_trajectory(&self.current.apos, at_time_ms),
+            )
+        };
         let Some((previous, previous_time)) = self.previous_pose else {
-            return;
+            let time = at_time_ms.max(self.pose_time_ms);
+            return (
+                evaluate_trajectory(&self.current.pos, time),
+                evaluate_trajectory(&self.current.apos, time),
+            );
         };
         if !self.in_next_snap()
             || !lerps_between_snapshots(
@@ -70,21 +80,38 @@ impl CEntityRuntime {
                 self.current.pos.tr_type,
             )
         {
-            return;
+            return sampled();
         }
         let span = self.pose_time_ms - previous_time;
         if span <= 0 {
-            return;
+            return sampled();
         }
         let fraction = ((at_time_ms - previous_time) as f32 / span as f32).clamp(0.0, 1.0);
         let old_origin = evaluate_trajectory(&previous.pos, previous_time);
         let old_angles = evaluate_trajectory(&previous.apos, previous_time);
         let origin = self.adopted_origin();
         let angles = evaluate_trajectory(&self.current.apos, self.pose_time_ms);
-        for axis in 0..3 {
-            self.origin[axis] = old_origin[axis] + fraction * (origin[axis] - old_origin[axis]);
-            self.angles[axis] = old_angles[axis]
-                + fraction * math_iw4::angle_subtract(angles[axis], old_angles[axis]);
+        (
+            std::array::from_fn(|axis| {
+                old_origin[axis] + fraction * (origin[axis] - old_origin[axis])
+            }),
+            std::array::from_fn(|axis| {
+                old_angles[axis]
+                    + fraction * math_iw4::angle_subtract(angles[axis], old_angles[axis])
+            }),
+        )
+    }
+
+    pub fn present_pose(&mut self, at_time_ms: i32) {
+        if self.previous_pose.is_some_and(|(previous, _)| {
+            lerps_between_snapshots(
+                self.pose_e_type as i32,
+                previous.pos.tr_type,
+                self.current.pos.tr_type,
+            )
+        }) && self.in_next_snap()
+        {
+            (self.origin, self.angles) = self.pose_at(at_time_ms);
         }
     }
 
@@ -96,7 +123,7 @@ impl CEntityRuntime {
 
 fn lerps_between_snapshots(e_type: i32, previous_tr_type: i32, current_tr_type: i32) -> bool {
     match e_type {
-        ET_PLAYER_CORPSE => true,
+        ET_PLAYER_CORPSE | entity_iw4::ET_SCRIPTMOVER => true,
         ET_PLAYER => previous_tr_type == TR_INTERPOLATE && current_tr_type == TR_INTERPOLATE,
         _ => false,
     }
@@ -162,6 +189,9 @@ pub fn remote_body_submit_kind(
     if !runtime.in_next_snap() {
         return RemoteBodySubmitKind::NotInSnap;
     }
+    if runtime.next_state.e_flags & playerstate_iw4::eflags::NODRAW != 0 {
+        return RemoteBodySubmitKind::Hidden;
+    }
     let is_corpse = i32::from(number) >= PLAYER_CORPSE_ENTITY_BASE;
     if is_corpse {
         let corpse = runtime.pose_e_type == ET_PLAYER_CORPSE as u8
@@ -171,9 +201,6 @@ pub fn remote_body_submit_kind(
         } else {
             RemoteBodySubmitKind::NotInSnap
         };
-    }
-    if runtime.next_state.e_flags & playerstate_iw4::eflags::NODRAW != 0 {
-        return RemoteBodySubmitKind::Hidden;
     }
     if runtime.next_state.e_flags & EFLAGS_DEAD != 0 {
         return RemoteBodySubmitKind::Dead;
@@ -257,12 +284,20 @@ fn write_reset_cursor(rt: &mut CEntityRuntime, next: &EntityState, new_entity: b
     }
 }
 
-pub fn apply_existing(rt: &mut CEntityRuntime, next: EntityState, at_time_ms: i32) {
+pub fn apply_existing(
+    rt: &mut CEntityRuntime,
+    next: EntityState,
+    at_time_ms: i32,
+    has_atlas: bool,
+) {
     let was_in = rt.in_next_snap();
     let e_type_changed = rt.next_state.e_type != next.e_type;
     let teleport = (rt.next_state.e_flags ^ next.e_flags) & EFLAGS_TELEPORT != 0;
     let other_body = another_body(&rt.next_state, &next);
-    if !was_in || e_type_changed || teleport || other_body {
+    let changed_world = has_atlas
+        && sim::world_graph::world_at(rt.next_state.tr_base)
+            != sim::world_graph::world_at(next.tr_base);
+    if !was_in || e_type_changed || teleport || other_body || changed_world {
         let new_entity = !was_in || e_type_changed || other_body;
         reset_entity(rt, next, at_time_ms, new_entity);
         return;
@@ -279,9 +314,11 @@ pub fn apply_existing(rt: &mut CEntityRuntime, next: EntityState, at_time_ms: i3
 }
 
 pub fn player_state_to_entity_state(client: ClientId, ps: &PlayerState) -> EntityState {
-    let mut es = EntityState::default();
-    es.number = i32::try_from(client.0).unwrap_or(0);
-    es.e_type = ET_PLAYER;
+    let mut es = EntityState {
+        number: i32::try_from(client.0).unwrap_or(0),
+        e_type: ET_PLAYER,
+        ..EntityState::default()
+    };
     es.client_num = es.number;
     es.e_flags = ps.e_flags;
     if ps.pm_type >= playerstate_iw4::PM_TYPE_DEAD {
@@ -338,7 +375,11 @@ pub fn remote_pose_sample(runtime: &CEntityRuntime) -> RemotePoseSample {
             legs_anim: state.legs_anim,
             torso_anim: state.torso_anim,
         },
-        weapon: u32::try_from(state.index).unwrap_or(0),
+        weapon: if state.e_flags & (eflags::TURRET_ACTIVE_PRONE | eflags::TURRET_ACTIVE_DUCK) != 0 {
+            0
+        } else {
+            u32::try_from(state.index).unwrap_or(0)
+        },
         weapon_model: state.weapon_model,
         view_pitch_deg: runtime.angles[0],
         prone: state.e_flags & eflags::PRONE != 0,
@@ -347,24 +388,24 @@ pub fn remote_pose_sample(runtime: &CEntityRuntime) -> RemotePoseSample {
 }
 
 pub fn corpse_slot_to_entity_state(slot: &PlayerCorpseSlot) -> EntityState {
-    let mut es = EntityState::default();
-    es.number = slot.entnum;
-    es.e_type = ET_PLAYER_CORPSE;
-    es.client_num = i32::try_from(slot.victim.0).unwrap_or(0);
-    es.time2 = slot.spawn_time_ms;
-    es.e_flags = slot.e_flags;
-    es.weapon_model = slot.weapon_model;
-    es.tr_type = slot.tr_type;
-    es.tr_time = slot.tr_time;
-    es.tr_duration = slot.tr_duration;
-    es.tr_delta = slot.tr_delta;
-    es.tr_base = slot.tr_base;
-    es.apos_tr_type = TR_INTERPOLATE;
-    es.apos_tr_base = slot.viewangles;
-    es.legs_anim = slot.anim.legs_anim;
-    es.torso_anim = slot.anim.torso_anim;
-    es.index = i32::try_from(slot.weapon).unwrap_or(0);
-
-    es.ground_entity_num = slot.ground_entity_num;
-    es
+    EntityState {
+        number: slot.entnum,
+        e_type: ET_PLAYER_CORPSE,
+        client_num: i32::try_from(slot.victim.0).unwrap_or(0),
+        time2: slot.spawn_time_ms,
+        e_flags: slot.e_flags,
+        weapon_model: slot.weapon_model,
+        tr_type: slot.tr_type,
+        tr_time: slot.tr_time,
+        tr_duration: slot.tr_duration,
+        tr_delta: slot.tr_delta,
+        tr_base: slot.tr_base,
+        apos_tr_type: TR_INTERPOLATE,
+        apos_tr_base: slot.viewangles,
+        legs_anim: slot.anim.legs_anim,
+        torso_anim: slot.anim.torso_anim,
+        index: i32::try_from(slot.weapon).unwrap_or(0),
+        ground_entity_num: slot.ground_entity_num,
+        ..EntityState::default()
+    }
 }

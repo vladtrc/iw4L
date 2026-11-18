@@ -1,8 +1,7 @@
 use bevy::prelude::*;
 use render_backend::overlay::CODE_TRANSPOSE_WORLD_VIEW_PROJECTION0;
-use render_material::{CodeSourceError, RuntimeCodeSources};
+use render_material::RuntimeCodeSources;
 
-const FILM_DESAT_MIN: f32 = 1.0 / 4096.0;
 pub const POSTFX_MATERIALS: &[&str] = &[
     "postfx_color2",
     "dof_downsample",
@@ -24,16 +23,6 @@ pub const GLOW_APPLY_MATERIAL: &str = "glow_apply_bloom";
 const CODE_TEXTURE_RESOLVED_SCENE: u32 = 10;
 const CODE_TEXTURE_FEEDBACK: u32 = 8;
 const RESOLVED_SCENE_SAMPLER: u8 = 0x62;
-const CODE_COLOR_BIAS: u16 = 46;
-const CODE_COLOR_TINT_BASE: u16 = 47;
-const CODE_COLOR_TINT_DELTA: u16 = 48;
-const CODE_COLOR_TINT_QUADRATIC_DELTA: u16 = 49;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PostFxSourceRefusal {
-    InvalidDimensions { width: u32, height: u32 },
-    CodeSource(CodeSourceError),
-}
 
 fn float4_bits(row: [f32; 4]) -> [u32; 4] {
     row.map(f32::to_bits)
@@ -60,13 +49,13 @@ pub fn film_sources(
     width: u32,
     height: u32,
     vision: Option<asset_world::FilmVision>,
-) -> Result<RuntimeCodeSources, PostFxSourceRefusal> {
-    let width_i32 = i32::try_from(width)
-        .map_err(|_| PostFxSourceRefusal::InvalidDimensions { width, height })?;
-    let height_i32 = i32::try_from(height)
-        .map_err(|_| PostFxSourceRefusal::InvalidDimensions { width, height })?;
+) -> Result<RuntimeCodeSources, String> {
+    let width_i32 =
+        i32::try_from(width).map_err(|_| format!("invalid postfx dimensions {width}x{height}"))?;
+    let height_i32 =
+        i32::try_from(height).map_err(|_| format!("invalid postfx dimensions {width}x{height}"))?;
     let mut projection = hud_iw4::cmd_buf_set_2d_projection(width_i32, height_i32)
-        .ok_or(PostFxSourceRefusal::InvalidDimensions { width, height })?;
+        .ok_or_else(|| format!("invalid postfx dimensions {width}x{height}"))?;
     // Fullscreen quads must cover wgpu's half-integer pixel centers. The D3D9
     // projection shifts the right/bottom edges onto the last pixel centers,
     // leaving clear texels that subsequent blur passes spread into the image.
@@ -86,91 +75,14 @@ pub fn film_sources(
             1.0 / height as f32,
         ])],
     );
-    let authored = vision.unwrap_or_default();
-    let vision = if authored.enable {
-        authored
-    } else {
-        asset_world::FilmVision::default()
-    };
-    let desaturation = vision.desaturation.max(FILM_DESAT_MIN);
-    let mut contrast = vision.contrast;
-    let mut offset = vision.brightness + 0.5 - 0.5 * contrast;
-    if vision.invert {
-        contrast = -contrast;
-        offset += 1.0;
-    }
-    let base = vision.dark_tint.map(|value| value * contrast);
-    let delta: [f32; 3] = std::array::from_fn(|channel| {
-        2.0 * contrast * (vision.medium_tint[channel] - vision.dark_tint[channel])
-    });
-    let quadratic: [f32; 3] = std::array::from_fn(|channel| {
-        contrast
-            * (vision.light_tint[channel] - 2.0 * vision.medium_tint[channel]
-                + vision.dark_tint[channel])
-    });
-    sources.set_constant_rows(
-        CODE_COLOR_BIAS,
-        &[float4_bits([
-            offset,
-            offset,
-            offset,
-            1.0 / desaturation - 1.0,
-        ])],
-    );
-    sources.set_constant_rows(
-        CODE_COLOR_TINT_BASE,
-        &[float4_bits([
-            base[0],
-            base[1],
-            base[2],
-            vision.desaturation_dark,
-        ])],
-    );
-    sources.set_constant_rows(
-        CODE_COLOR_TINT_DELTA,
-        &[float4_bits([
-            delta[0],
-            delta[1],
-            delta[2],
-            vision.desaturation - vision.desaturation_dark,
-        ])],
-    );
-    sources.set_constant_rows(
-        CODE_COLOR_TINT_QUADRATIC_DELTA,
-        &[float4_bits([quadratic[0], quadratic[1], quadratic[2], 0.0])],
-    );
-    apply_glow_consts(&mut sources, authored);
+    render_scene::film::set_film_vision(&mut sources, vision);
     sources
         .set_texture(CODE_TEXTURE_RESOLVED_SCENE, RESOLVED_SCENE_SAMPLER)
-        .map_err(PostFxSourceRefusal::CodeSource)?;
+        .map_err(|cause| format!("postfx code source: {cause:?}"))?;
     sources
         .set_texture(CODE_TEXTURE_FEEDBACK, RESOLVED_SCENE_SAMPLER)
-        .map_err(PostFxSourceRefusal::CodeSource)?;
+        .map_err(|cause| format!("postfx code source: {cause:?}"))?;
     Ok(sources)
-}
-
-fn apply_glow_consts(sources: &mut RuntimeCodeSources, authored: asset_world::FilmVision) {
-    let bits = |row: [f32; 4]| row.map(f32::to_bits);
-    match lighting_iw4::set_glow_info(
-        authored.glow_bloom_cutoff,
-        authored.glow_bloom_desaturation,
-        authored.glow_bloom_intensity,
-    ) {
-        Some(consts) => {
-            sources.set_constant_rows(
-                lighting_iw4::CONST_SRC_CODE_GLOW_SETUP,
-                &[bits(consts.setup)],
-            );
-            sources.set_constant_rows(
-                lighting_iw4::CONST_SRC_CODE_GLOW_APPLY,
-                &[bits(consts.apply)],
-            );
-        }
-        None => {
-            sources.set_constant_rows(lighting_iw4::CONST_SRC_CODE_GLOW_SETUP, &[[0; 4]]);
-            sources.set_constant_rows(lighting_iw4::CONST_SRC_CODE_GLOW_APPLY, &[[0; 4]]);
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -243,7 +155,7 @@ impl Default for GlowFrame {
 
 impl GlowFrame {
     pub fn from_vision(vision: Option<asset_world::FilmVision>) -> Self {
-        let vision = vision.unwrap_or_default();
+        let vision = vision.unwrap_or_else(asset_world::FilmVision::default);
         Self {
             enable: vision.glow_enable,
             radius: vision.glow_radius,
@@ -277,7 +189,7 @@ pub enum DofPlanRefusal {
     InvalidDimensions,
     InvalidFocus,
     BlurFractions { small: f32, medium: f32 },
-    CodeSource(PostFxSourceRefusal),
+    CodeSource(String),
 }
 
 pub fn sources(
@@ -356,7 +268,7 @@ pub fn sources(
     }
     for index in [8, 11, 12, 15] {
         s.set_texture(index, if index == 15 { 0x61 } else { 0x62 })
-            .map_err(|e| DofPlanRefusal::CodeSource(PostFxSourceRefusal::CodeSource(e)))?;
+            .map_err(|e| DofPlanRefusal::CodeSource(format!("postfx code source: {e:?}")))?;
     }
     Ok(s)
 }
@@ -414,11 +326,21 @@ pub fn gaussian_chain(radius: f32, width: u32, height: u32) -> Vec<GaussianPass>
             let (_, x) = gaussian_points(r, width, 2);
             let (_, y) = gaussian_points(r, height, 2);
             let mut taps = [[0.0; 4]; 8];
-            for j in 0..2 {
-                for i in 0..2 {
+            for (j, y_entry) in y[..2].iter().enumerate() {
+                for (i, x_entry) in x[..2].iter().enumerate() {
                     let k = j * 4 + i * 2;
-                    taps[k] = [-x[i][0], y[j][0], 0.0, x[i][1] * y[j][1]];
-                    taps[k + 1] = [x[i][0], y[j][0], 0.0, x[i][1] * y[j][1]];
+                    taps[k] = [
+                        -(*x_entry)[0],
+                        (*y_entry)[0],
+                        0.0,
+                        (*x_entry)[1] * (*y_entry)[1],
+                    ];
+                    taps[k + 1] = [
+                        (*x_entry)[0],
+                        (*y_entry)[0],
+                        0.0,
+                        (*x_entry)[1] * (*y_entry)[1],
+                    ];
                 }
             }
             passes.push(GaussianPass { half_taps: 8, taps });

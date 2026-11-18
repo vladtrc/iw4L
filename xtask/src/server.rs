@@ -10,14 +10,14 @@ pub fn root_dir(env: &Env) -> Res<PathBuf> {
 pub struct Descriptor {
     pub path: PathBuf,
     pub bytes: Vec<u8>,
-    pub community: updater::Community,
+    pub community: community::Community,
 }
 
 impl Descriptor {
     pub fn read(path: &Path) -> Res<Self> {
         let bytes =
             std::fs::read(path).map_err(|error| format!("reading {}: {error}", path.display()))?;
-        let community = updater::Community::parse(&bytes)
+        let community = community::Community::parse(&bytes)
             .map_err(|error| format!("{}: {error}", path.display()))?;
         let descriptor = Self {
             path: path.to_path_buf(),

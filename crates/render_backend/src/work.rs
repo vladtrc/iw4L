@@ -42,9 +42,6 @@ pub struct ShadowDrawListWork {
     pub smodel_skinned_flushes: Vec<SmodelRigidFlush>,
 
     pub smodel_skinned_unconsumed: u32,
-    pub world_work_calls: u32,
-    pub xmodel_work_calls: u32,
-    pub smodel_work_calls: u32,
 
     pub ended: bool,
 
@@ -63,12 +60,10 @@ struct WorldListWorker<'a> {
     cur: usize,
     flushes: &'a mut Vec<TrianglesListFlush>,
     emit: Option<&'a RefCell<Vec<PackedEmit>>>,
-    calls: u32,
 }
 
 impl DrawSurfListWorker for WorldListWorker<'_> {
     fn work(&mut self, _ctx: &mut GfxCmdBufContext) -> bool {
-        self.calls += 1;
         if self.cur >= self.entries.len() {
             return false;
         }
@@ -113,12 +108,10 @@ struct SmodelListWorker<'a> {
     flushes: &'a mut Vec<SmodelRigidFlush>,
     emit: Option<&'a RefCell<Vec<PackedEmit>>>,
     kind: PackedListKind,
-    calls: u32,
 }
 
 impl DrawSurfListWorker for SmodelListWorker<'_> {
     fn work(&mut self, _ctx: &mut GfxCmdBufContext) -> bool {
-        self.calls += 1;
         if self.cur >= self.entries.len() {
             return false;
         }
@@ -158,12 +151,10 @@ struct XModelListWorker<'a> {
     cur: usize,
     flushes: &'a mut Vec<XModelRigidFlush>,
     emit: Option<&'a RefCell<Vec<PackedEmit>>>,
-    calls: u32,
 }
 
 impl DrawSurfListWorker for XModelListWorker<'_> {
     fn work(&mut self, _ctx: &mut GfxCmdBufContext) -> bool {
-        self.calls += 1;
         if self.cur >= self.entries.len() {
             return false;
         }
@@ -234,58 +225,65 @@ fn which_for_cursor(cursor: u16) -> Option<Which> {
     }
 }
 
-fn dispatch_registered(
-    list: &GfxDrawList,
-    ctx: &mut GfxCmdBufContext,
-    sorted: bool,
-    world: &mut WorldListWorker<'_>,
-    xmodel: &mut XModelListWorker<'_>,
-    smodel: &mut SmodelListWorker<'_>,
-    cached: &mut SmodelListWorker<'_>,
-    pretess: &mut SmodelListWorker<'_>,
-    skinned: &mut SmodelListWorker<'_>,
-) {
-    let mut which_slots: Vec<Which> = Vec::with_capacity(list.registered_kinds.len());
-    let mut kind_ids: Vec<u32> = Vec::with_capacity(list.registered_kinds.len());
-    let mut recs: Vec<GfxDrawListHeapRecord> = Vec::with_capacity(list.registered_kinds.len());
-    for kind in &list.registered_kinds {
-        let Some(which) = which_for_cursor(kind.cursor) else {
-            continue;
-        };
-        let key = match which {
-            Which::World => world.peek_sort_key(),
-            Which::XModel => xmodel.peek_sort_key(),
-            Which::Smodel => smodel.peek_sort_key(),
-            Which::Cached => cached.peek_sort_key(),
-            Which::Pretess => pretess.peek_sort_key(),
-            Which::Skinned => skinned.peek_sort_key(),
-        };
-        recs.push([u32::from(kind.id), key, which_slots.len() as u32, 0]);
-        kind_ids.push(u32::from(kind.id));
-        which_slots.push(which);
-    }
-    dispatch_draw_list_records(&mut recs, sorted, ctx, |i, ctx| {
-        let more = match which_slots[i] {
-            Which::World => world.work(ctx),
-            Which::XModel => xmodel.work(ctx),
-            Which::Smodel => smodel.work(ctx),
-            Which::Cached => cached.work(ctx),
-            Which::Pretess => pretess.work(ctx),
-            Which::Skinned => skinned.work(ctx),
-        };
-        if !more {
-            return None;
+struct DrawListWorkers<'a> {
+    world: WorldListWorker<'a>,
+    xmodel: XModelListWorker<'a>,
+    smodel: SmodelListWorker<'a>,
+    cached: SmodelListWorker<'a>,
+    pretess: SmodelListWorker<'a>,
+    skinned: SmodelListWorker<'a>,
+}
+
+impl DrawListWorkers<'_> {
+    fn peek_sort_key(&self, which: Which) -> u32 {
+        match which {
+            Which::World => self.world.peek_sort_key(),
+            Which::XModel => self.xmodel.peek_sort_key(),
+            Which::Smodel => self.smodel.peek_sort_key(),
+            Which::Cached => self.cached.peek_sort_key(),
+            Which::Pretess => self.pretess.peek_sort_key(),
+            Which::Skinned => self.skinned.peek_sort_key(),
         }
-        let key = match which_slots[i] {
-            Which::World => world.peek_sort_key(),
-            Which::XModel => xmodel.peek_sort_key(),
-            Which::Smodel => smodel.peek_sort_key(),
-            Which::Cached => cached.peek_sort_key(),
-            Which::Pretess => pretess.peek_sort_key(),
-            Which::Skinned => skinned.peek_sort_key(),
-        };
-        Some((key, kind_ids[i]))
-    });
+    }
+
+    fn work(&mut self, which: Which, ctx: &mut GfxCmdBufContext) -> bool {
+        match which {
+            Which::World => self.world.work(ctx),
+            Which::XModel => self.xmodel.work(ctx),
+            Which::Smodel => self.smodel.work(ctx),
+            Which::Cached => self.cached.work(ctx),
+            Which::Pretess => self.pretess.work(ctx),
+            Which::Skinned => self.skinned.work(ctx),
+        }
+    }
+
+    fn dispatch_registered(
+        &mut self,
+        list: &GfxDrawList,
+        ctx: &mut GfxCmdBufContext,
+        sorted: bool,
+    ) {
+        let mut which_slots: Vec<Which> = Vec::with_capacity(list.registered_kinds.len());
+        let mut kind_ids: Vec<u32> = Vec::with_capacity(list.registered_kinds.len());
+        let mut recs: Vec<GfxDrawListHeapRecord> = Vec::with_capacity(list.registered_kinds.len());
+        for kind in &list.registered_kinds {
+            let Some(which) = which_for_cursor(kind.cursor) else {
+                continue;
+            };
+            let key = self.peek_sort_key(which);
+            recs.push([u32::from(kind.id), key, which_slots.len() as u32, 0]);
+            kind_ids.push(u32::from(kind.id));
+            which_slots.push(which);
+        }
+        dispatch_draw_list_records(&mut recs, sorted, ctx, |i, ctx| {
+            let more = self.work(which_slots[i], ctx);
+            if !more {
+                return None;
+            }
+            let key = self.peek_sort_key(which_slots[i]);
+            Some((key, kind_ids[i]))
+        });
+    }
 }
 
 pub fn draw_surf_list_work_shadow(packed: &PackedFrontendLists) -> ShadowDrawListWork {
@@ -314,73 +312,62 @@ fn run_packed_work(
     let mut smodel_pretess_flushes = Vec::new();
     let emit_cell = RefCell::new(Vec::new());
     let emit = if sorted { Some(&emit_cell) } else { None };
-    let mut world = WorldListWorker {
+    let world = WorldListWorker {
         entries: &packed.world,
         sort_keys: &packed.sort_key_by_rank,
         cur: 0,
         flushes: &mut world_flushes,
         emit,
-        calls: 0,
     };
-    let mut xmodel = XModelListWorker {
+    let xmodel = XModelListWorker {
         entries: &packed.xmodel,
         sort_keys: &packed.sort_key_by_rank,
         cur: 0,
         flushes: &mut xmodel_flushes,
         emit,
-        calls: 0,
     };
-    let mut smodel = SmodelListWorker {
+    let smodel = SmodelListWorker {
         entries: &packed.smodel,
         sort_keys: &packed.sort_key_by_rank,
         cur: 0,
         flushes: &mut smodel_flushes,
         emit,
         kind: PackedListKind::Smodel,
-        calls: 0,
     };
-    let mut pretess = SmodelListWorker {
+    let pretess = SmodelListWorker {
         entries: &packed.smodel_pretess,
         sort_keys: &packed.sort_key_by_rank,
         cur: 0,
         flushes: &mut smodel_pretess_flushes,
         emit,
         kind: PackedListKind::Pretess,
-        calls: 0,
     };
-    let mut cached = SmodelListWorker {
+    let cached = SmodelListWorker {
         entries: &packed.smodel_cached,
         sort_keys: &packed.sort_key_by_rank,
         cur: 0,
         flushes: &mut smodel_cached_flushes,
         emit,
         kind: PackedListKind::Cached,
-        calls: 0,
     };
     let mut smodel_skinned_flushes = Vec::new();
-    let mut skinned = SmodelListWorker {
+    let skinned = SmodelListWorker {
         entries: &packed.smodel_skinned,
         sort_keys: &packed.sort_key_by_rank,
         cur: 0,
         flushes: &mut smodel_skinned_flushes,
         emit,
         kind: PackedListKind::SmodelSkinned,
-        calls: 0,
     };
-    dispatch_registered(
-        &list,
-        &mut ctx,
-        sorted,
-        &mut world,
-        &mut xmodel,
-        &mut smodel,
-        &mut cached,
-        &mut pretess,
-        &mut skinned,
-    );
-    let world_work_calls = world.calls;
-    let xmodel_work_calls = xmodel.calls;
-    let smodel_work_calls = smodel.calls;
+    let mut workers = DrawListWorkers {
+        world,
+        xmodel,
+        smodel,
+        cached,
+        pretess,
+        skinned,
+    };
+    workers.dispatch_registered(&list, &mut ctx, sorted);
     let smodel_skinned_unconsumed = 0u32;
     let end = if sorted {
         let mut cmd = GfxCmdBufDepthState {
@@ -402,9 +389,6 @@ fn run_packed_work(
         smodel_pretess_flushes,
         smodel_skinned_flushes,
         smodel_skinned_unconsumed,
-        world_work_calls,
-        xmodel_work_calls,
-        smodel_work_calls,
         ended: true,
         end_restore_n: end.restore_n,
         end_depth_range_type: end.depth_range_type,

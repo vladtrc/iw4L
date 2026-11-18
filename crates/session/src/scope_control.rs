@@ -6,7 +6,7 @@ use frame::{MatchScope, RoundPhase, ScopeSet, TeardownReason};
 #[derive(Resource, Default)]
 pub struct ScopeControl {
     pending: Option<(u8, MatchScope)>,
-    install: Option<(frame::LocalLoadKey, CommandQueue)>,
+    install: Option<(frame::MatchKey, CommandQueue)>,
     pub(crate) teardown: Option<TeardownReason>,
     round: Option<RoundPhase>,
     last_reason: Option<TeardownReason>,
@@ -30,7 +30,7 @@ impl ScopeControl {
         self.request(1, MatchScope::Loading);
     }
 
-    pub(crate) fn install(&mut self, key: frame::LocalLoadKey, install: CommandQueue) {
+    pub(crate) fn install(&mut self, key: frame::MatchKey, install: CommandQueue) {
         assert!(self.install.is_none(), "two prepared installs in one frame");
         self.install = Some((key, install));
         self.request(2, MatchScope::Live);
@@ -65,24 +65,14 @@ impl ScopeControl {
     }
 }
 
-pub(crate) fn accepts_install(world: &World, key: frame::LocalLoadKey) -> bool {
-    world
-        .get_resource::<assets::CurrentMatchLoad>()
-        .is_some_and(|current| current.0 == Some(key))
-        && world
-            .resource::<crate::SessionSwapRequest>()
-            .accepts_install(key.local_load_request_id)
-        && world
-            .get_resource::<assets::MatchLoadAbort>()
-            .is_none_or(|abort| abort.0 != key.local_load_request_id)
-        && (key.match_key.is_none()
+pub(crate) fn accepts_install(world: &World, key: frame::MatchKey) -> bool {
+    world.resource::<crate::SessionSwapRequest>().can_install()
+        && (key.is_none()
             || world
                 .get_resource::<net::MasterBridge>()
                 .is_some_and(|bridge| {
                     let state = bridge.state();
-                    state.in_match()
-                        && state.identity().match_key() == key.match_key
-                        && bridge.incarnation() == key.incarnation
+                    state.in_match() && state.identity().match_key() == key
                 }))
 }
 
@@ -92,6 +82,18 @@ fn resolve_scope(world: &mut World) {
         (control.pending.take(), control.round.take())
     };
     if let Some((_, target)) = pending {
+        if target == MatchScope::Absent {
+            if let Some(request) = world.remove_resource::<assets::MatchLoadRequest>() {
+                request.progress.cancel();
+                world.resource_mut::<frame::Retiring>().hand_over(request);
+            }
+            world
+                .resource_mut::<Messages<frame::MapLoadApproved>>()
+                .clear();
+            world
+                .resource_mut::<Messages<frame::MapLoadFailed>>()
+                .clear();
+        }
         if target != MatchScope::Live {
             if let Some(install) = world.resource_mut::<ScopeControl>().install.take() {
                 world.resource_mut::<frame::Retiring>().hand_over(install);
@@ -116,8 +118,7 @@ fn resolve_scope(world: &mut World) {
                     world
                         .resource_mut::<Messages<frame::MapLoadFailed>>()
                         .write(frame::MapLoadFailed {
-                            request_id: key.local_load_request_id,
-                            load_key: key,
+                            match_key: key,
                             zone: String::new(),
                             error: "Prepared audio does not belong to the current load".into(),
                         });
@@ -140,7 +141,7 @@ fn resolve_scope(world: &mut World) {
 }
 
 #[derive(Resource, Default)]
-pub(crate) struct InstallAnnouncement(pub CommandQueue, pub Option<frame::LocalLoadKey>);
+pub(crate) struct InstallAnnouncement(pub CommandQueue, pub Option<frame::MatchKey>);
 
 fn announce_install(world: &mut World) {
     let (mut queue, key) = {
@@ -161,14 +162,13 @@ pub(crate) fn register(app: &mut App) {
     if !app.is_plugin_added::<frame::ScopePlugin>() {
         app.add_plugins(frame::ScopePlugin);
     }
-    app.staged::<assets::prepared::PreparedCapabilities>(MatchScope::Live)
-        .staged::<frame::WorldGeneration>(MatchScope::Live)
+    app.staged::<assets::PreparedCapabilities>(MatchScope::Live)
         .staged::<frame::WorldProducts>(MatchScope::Live)
         .staged::<crate::LiveWorldIdentity>(MatchScope::Live)
         .staged::<render_frontend::prepare::scene::world::WorldScene>(MatchScope::Live)
         .staged::<crate::SessionContentManifest>(MatchScope::Live)
         .staged::<MatchUiImages>(MatchScope::Live)
-        .scoped::<RoundClock>(frame::Timeline::Running)
+        .scoped::<RoundClock>(frame::Timeline::Live)
         .init_resource::<ScopeControl>()
         .init_resource::<InstallAnnouncement>()
         .add_systems(

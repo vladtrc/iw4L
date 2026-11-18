@@ -28,8 +28,9 @@ pub(crate) fn route_capture_commands(
     for cmd in events.read() {
         match cmd.name.as_str() {
             "screenshot" => {
-                if cmd.args.len() > 1 {
-                    echo("usage: screenshot [name]".into(), console, line);
+                let any_screen = cmd.args.get(1).is_some_and(|arg| arg == "now");
+                if cmd.args.len() > 2 || (cmd.args.len() == 2 && !any_screen) {
+                    echo("usage: screenshot [name [now]]".into(), console, line);
                     continue;
                 }
                 let Some(identity) = identity.as_ref() else {
@@ -73,6 +74,7 @@ pub(crate) fn route_capture_commands(
                 queue.push(CaptureRequest {
                     path: path.clone(),
                     exit_after_capture: false,
+                    any_screen,
                 });
                 echo(
                     format!(

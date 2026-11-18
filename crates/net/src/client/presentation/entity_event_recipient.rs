@@ -16,6 +16,7 @@ fn without_centity(event: EntityEventKind) -> bool {
         entity_event_action(event),
         Ok(EntityEventAction::PlayFx | EntityEventAction::Obituary | EntityEventAction::Rumble)
     ) || event == EntityEventKind::PLAY_RUMBLE_ON_POS
+        || event == EntityEventKind::MISSILE_REMOTE_BOOST
         || event == EntityEventKind::STOPSOUNDS
         || event == EntityEventKind::SOUND_ALIAS
         || event == EntityEventKind::SOUND_ALIAS_AS_MASTER

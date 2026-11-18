@@ -4,7 +4,7 @@ use asset_core::{AssetKey, AssetKind};
 use asset_game::WeaponRegistry;
 use bevy::prelude::Resource;
 
-pub const SESSION_MANIFEST_SCHEME: u32 = 2;
+pub const SESSION_MANIFEST_SCHEME: u32 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuntimeRuleset {
@@ -244,7 +244,7 @@ impl Digest {
     }
 
     fn asset_key(&mut self, key: &AssetKey) {
-        self.byte(namespace_tag(key.namespace));
+        self.bytes(key.namespace.as_str().as_bytes());
         self.byte(kind_tag(key.kind));
         self.bytes(key.name.as_bytes());
     }
@@ -288,15 +288,6 @@ impl Digest {
 
     fn finish(self) -> u64 {
         self.0
-    }
-}
-
-fn namespace_tag(namespace: asset_core::AssetNamespace) -> u8 {
-    match namespace {
-        asset_core::AssetNamespace::Iw4 => 1,
-        asset_core::AssetNamespace::Iw5 => 2,
-        asset_core::AssetNamespace::T5 => 3,
-        asset_core::AssetNamespace::T6 => 4,
     }
 }
 

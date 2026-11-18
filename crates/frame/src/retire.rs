@@ -61,10 +61,19 @@ pub struct RetiringInFlight {
 }
 
 impl RetiringInFlight {
-    pub fn settle(self) -> Option<usize> {
-        self.all.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    pub fn settle(mut self) -> Option<usize> {
         self.teardown
+            .take()
             .map(|counter| counter.fetch_sub(1, std::sync::atomic::Ordering::AcqRel) - 1)
+    }
+}
+
+impl Drop for RetiringInFlight {
+    fn drop(&mut self) {
+        self.all.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        if let Some(counter) = self.teardown.take() {
+            counter.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        }
     }
 }
 

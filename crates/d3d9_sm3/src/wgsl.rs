@@ -502,10 +502,28 @@ pub fn lower_sm3_to_wgsl(program: &Sm3ProgramIr) -> Result<Sm3Wgsl, Sm3WgslError
     })
 }
 
+/// Exit-plane clipping preserves the authored projection and depth mapping.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ExitClipMode {
+    ClipDistance,
+    FragmentDiscard,
+}
+
 pub fn lower_pass_to_wgsl(
     abi: &PassLoweringAbi,
     vertex: &Sm3ProgramIr,
     pixel: &Sm3ProgramIr,
+) -> Result<PassWgsl, Sm3WgslError> {
+    lower_pass_to_wgsl_with_exit_clip(abi, vertex, pixel, None)
+}
+
+/// Clipped colour passes bind a clip-space plane at group 2, binding 0.
+/// Plain passes retain their existing ABI and require no extra binding.
+pub fn lower_pass_to_wgsl_with_exit_clip(
+    abi: &PassLoweringAbi,
+    vertex: &Sm3ProgramIr,
+    pixel: &Sm3ProgramIr,
+    exit_clip: Option<ExitClipMode>,
 ) -> Result<PassWgsl, Sm3WgslError> {
     let vertex_plan = plan_program(vertex)?;
     let pixel_plan = plan_program(pixel)?;
@@ -558,6 +576,13 @@ pub fn lower_pass_to_wgsl(
     }
 
     let mut source = String::from("enable wgpu_binding_array;\n");
+    if exit_clip == Some(ExitClipMode::ClipDistance) {
+        source.push_str("enable clip_distances;\n");
+    }
+    if exit_clip.is_some() {
+        source
+            .push_str("@group(2) @binding(0) var<uniform> sm3_clip_planes: array<vec4<f32>, 7>;\n");
+    }
     source.push_str("struct Sm3ConstantArena { c: array<vec4<f32>> }\n");
     source.push_str("@group(0) @binding(0) var<storage, read> sm3_constants: Sm3ConstantArena;\n");
     if vertex_plan.uses_relative_float {
@@ -585,7 +610,34 @@ pub fn lower_pass_to_wgsl(
         abi.varyings.len()
     )
     .unwrap();
-    source.push_str("}\n\n@vertex\nfn ");
+    if exit_clip.is_some() {
+        writeln!(source, "    @location({}) sm3_exit_distance: vec2<f32>,\n    @location({}) sm3_aperture_distance: vec4<f32>,\n    @interpolate(flat) @location({}) sm3_clip_options: vec2<f32>,", abi.varyings.len() + 1, abi.varyings.len() + 2, abi.varyings.len() + 3).unwrap();
+    }
+    source.push_str("}\n");
+    // Clip distances are vertex outputs only. Pixel inputs keep the shared
+    // varying ABI and never contain a vertex-only builtin.
+    if exit_clip == Some(ExitClipMode::ClipDistance) {
+        source.push_str(
+            "struct Sm3VertexOut {\n    @builtin(position) @invariant position: vec4<f32>,\n",
+        );
+        for varying in &abi.varyings {
+            writeln!(
+                source,
+                "    @location({}) varying_{}: vec4<f32>,",
+                varying.location, varying.location
+            )
+            .unwrap();
+        }
+        writeln!(
+            source,
+            "    @interpolate(flat) @location({}) sm3_constant_base: u32,",
+            abi.varyings.len()
+        )
+        .unwrap();
+        writeln!(source, "    @location({}) sm3_exit_distance: vec2<f32>,\n    @location({}) sm3_aperture_distance: vec4<f32>,\n    @interpolate(flat) @location({}) sm3_clip_options: vec2<f32>,", abi.varyings.len() + 1, abi.varyings.len() + 2, abi.varyings.len() + 3).unwrap();
+        source.push_str("    @builtin(clip_distances) sm3_hardware_clip: array<f32, 2>,\n}\n");
+    }
+    source.push_str("\n@vertex\nfn ");
     source.push_str(PASS_VERTEX_ENTRY);
     source.push_str("(\n");
     for input in &abi.vertex_inputs {
@@ -602,7 +654,11 @@ pub fn lower_pass_to_wgsl(
         .unwrap();
     }
     source.push_str("    @builtin(instance_index) sm3_constant_base: u32,\n");
-    source.push_str(") -> Sm3Varyings {\n");
+    source.push_str(if exit_clip == Some(ExitClipMode::ClipDistance) {
+        ") -> Sm3VertexOut {\n"
+    } else {
+        ") -> Sm3Varyings {\n"
+    });
     for input in &abi.vertex_inputs {
         let expansion = match (input.location, input.decl_type) {
             (Some(location), Some(decl_type)) => attribute_expansion(decl_type, location),
@@ -645,7 +701,11 @@ pub fn lower_pass_to_wgsl(
         &mut defined,
         vertex_relative,
     )?;
-    source.push_str("    return Sm3Varyings(\n");
+    source.push_str(if exit_clip == Some(ExitClipMode::ClipDistance) {
+        "    return Sm3VertexOut(\n"
+    } else {
+        "    return Sm3Varyings(\n"
+    });
     writeln!(
         source,
         "        {},",
@@ -661,8 +721,20 @@ pub fn lower_pass_to_wgsl(
         .unwrap();
     }
     source.push_str("        sm3_constant_base,\n");
+    if let Some(mode) = exit_clip {
+        let position = register_name(abi.position.vertex_register);
+        writeln!(source, "        vec2<f32>(dot({position}, sm3_clip_planes[0]), dot({position}, sm3_clip_planes[1])),").unwrap();
+        writeln!(source, "        vec4<f32>(dot({position}, sm3_clip_planes[2]), dot({position}, sm3_clip_planes[3]), dot({position}, sm3_clip_planes[4]), dot({position}, sm3_clip_planes[5])),").unwrap();
+        source.push_str("        sm3_clip_planes[6].xy,\n");
+        if mode == ExitClipMode::ClipDistance {
+            writeln!(source, "        array<f32, 2>(dot({position}, sm3_clip_planes[0]), select(dot({position}, sm3_clip_planes[1]), 1.0, sm3_clip_planes[6].x == 1.0)),").unwrap();
+        }
+    }
     source.push_str("    );\n}\n");
 
+    if exit_clip.is_some() {
+        source.push_str("\nfn sm3_portal_discard(v: Sm3Varyings) -> bool {\n    if v.sm3_exit_distance.x < 0.0 { return true; }\n    let inside = all(v.sm3_aperture_distance >= vec4<f32>(0.0));\n    if v.sm3_clip_options.x == 1.0 {\n        return inside && (v.sm3_clip_options.y > 0.5 || v.sm3_exit_distance.y < 0.0);\n    }\n    return v.sm3_exit_distance.y < 0.0 ||\n        (v.sm3_clip_options.x == 2.0 && (!inside || v.sm3_clip_options.y > 0.5));\n}\n");
+    }
     let front_facing = pixel_plan
         .external
         .iter()
@@ -746,39 +818,60 @@ pub fn lower_pass_to_wgsl(
     writeln!(source, "    return {};", register_name(colour_output)).unwrap();
     source.push_str("}\n");
 
+    source.push_str(
+        "\nstruct Sm3ColourDepth { @location(0) colour: vec4<f32>, @location(1) depth: f32 }\n",
+    );
     for index in 0..=abi.alpha_tests.len() {
         let alpha_test = index.checked_sub(1).map(|slot| abi.alpha_tests[slot]);
-        source.push_str("\n@fragment\nfn ");
-        match index.checked_sub(1) {
-            None => source.push_str(PASS_FRAGMENT_ENTRY),
-            Some(slot) => source.push_str(&pass_fragment_alpha_test_entry(slot)),
-        }
-        source.push_str("(varyings: Sm3Varyings");
-        if front_facing {
-            source.push_str(", @builtin(front_facing) sm3_front_facing: bool");
-        }
-        source.push_str(") -> @location(0) vec4<f32> {\n");
-        writeln!(
-            source,
-            "    let {} = sm3_pixel_main(varyings{});",
-            register_name(colour_output),
-            if front_facing {
-                ", sm3_front_facing"
-            } else {
-                ""
+        let entry = match index.checked_sub(1) {
+            None => String::from(PASS_FRAGMENT_ENTRY),
+            Some(slot) => pass_fragment_alpha_test_entry(slot),
+        };
+        for effect_depth in [false, true] {
+            source.push_str("\n@fragment\nfn ");
+            source.push_str(&entry);
+            if effect_depth {
+                source.push_str("_effect_depth");
             }
-        )
-        .unwrap();
-        if let Some(alpha_test) = alpha_test {
-            emit_alpha_test(&mut source, alpha_test, colour_output)?;
-        }
-        if abi.depth_to_colour {
-            source.push_str("    return vec4<f32>(varyings.position.z);\n");
+            source.push_str("(varyings: Sm3Varyings");
+            if front_facing {
+                source.push_str(", @builtin(front_facing) sm3_front_facing: bool");
+            }
+            source.push_str(if effect_depth {
+                ") -> Sm3ColourDepth {\n"
+            } else {
+                ") -> @location(0) vec4<f32> {\n"
+            });
+            writeln!(
+                source,
+                "    let {} = sm3_pixel_main(varyings{});",
+                register_name(colour_output),
+                if front_facing {
+                    ", sm3_front_facing"
+                } else {
+                    ""
+                }
+            )
+            .unwrap();
+            if exit_clip.is_some() {
+                source.push_str("    if sm3_portal_discard(varyings) { discard; }\n");
+            }
+            if let Some(alpha_test) = alpha_test {
+                emit_alpha_test(&mut source, alpha_test, colour_output)?;
+            }
+            let colour = if abi.depth_to_colour {
+                String::from("vec4<f32>(varyings.position.z)")
+            } else {
+                register_name(colour_output)
+            };
+            if effect_depth {
+                source.push_str("    let linear_depth = 1.0 / max(varyings.position.w, 1.0e-7);\n");
+                writeln!(source, "    return Sm3ColourDepth({colour}, select(linear_depth, -linear_depth, varyings.position.z > 0.984375));").unwrap();
+            } else {
+                writeln!(source, "    return {colour};").unwrap();
+            }
             source.push_str("}\n");
-            continue;
         }
-        writeln!(source, "    return {};", register_name(colour_output)).unwrap();
-        source.push_str("}\n");
     }
 
     Ok(PassWgsl {
@@ -1176,6 +1269,14 @@ fn emit_vs_relative_const_loader(source: &mut String, len: usize) {
     source.push_str("    return sm3_constants.c[base + u32(i)];\n}\n");
 }
 
+#[derive(Clone, Copy)]
+struct ProgramBindings<'a> {
+    external: &'a BTreeSet<Sm3Register>,
+    samplers: &'a BTreeMap<u16, SamplerTextureDimension>,
+    compare: &'a BTreeSet<u16>,
+    relative_c: Option<&'a str>,
+}
+
 fn emit_body(
     wgsl: &mut String,
     instructions: &[Sm3Instruction],
@@ -1185,18 +1286,15 @@ fn emit_body(
     defined: &mut BTreeMap<Sm3Register, u8>,
     relative_c: Option<&str>,
 ) -> Result<(), Sm3WgslError> {
+    let bindings = ProgramBindings {
+        external,
+        samplers,
+        compare,
+        relative_c,
+    };
     let mut flow = Vec::new();
     for instruction in instructions {
-        emit_instruction(
-            wgsl,
-            instruction,
-            external,
-            samplers,
-            compare,
-            defined,
-            &mut flow,
-            relative_c,
-        )?;
+        emit_instruction(wgsl, instruction, &bindings, defined, &mut flow)?;
     }
     if let Some(frame) = flow.last() {
         return Err(Sm3WgslError::UnbalancedControlFlow {
@@ -1236,13 +1334,15 @@ fn emit_texkill(
 fn emit_instruction(
     wgsl: &mut String,
     instruction: &Sm3Instruction,
-    external: &BTreeSet<Sm3Register>,
-    samplers: &BTreeMap<u16, SamplerTextureDimension>,
-    compare: &BTreeSet<u16>,
+    bindings: &ProgramBindings<'_>,
     defined: &mut BTreeMap<Sm3Register, u8>,
     flow: &mut Vec<FlowFrame>,
-    relative_c: Option<&str>,
 ) -> Result<(), Sm3WgslError> {
+    let ProgramBindings {
+        external,
+        relative_c,
+        ..
+    } = *bindings;
     match &instruction.body {
         Sm3InstructionBody::Declaration { .. }
         | Sm3InstructionBody::FloatDefinition { .. }
@@ -1414,11 +1514,8 @@ fn emit_instruction(
                     instruction.controls,
                     sources,
                     component,
-                    external,
-                    samplers,
-                    compare,
+                    bindings,
                     defined,
-                    relative_c,
                 )?;
                 if destination.saturate {
                     if instruction.opcode == Sm3Opcode::Mova {
@@ -1479,12 +1576,14 @@ fn operation_component(
     controls: u8,
     sources: &[Sm3Source],
     component: u8,
-    external: &BTreeSet<Sm3Register>,
-    samplers: &BTreeMap<u16, SamplerTextureDimension>,
-    compare: &BTreeSet<u16>,
+    bindings: &ProgramBindings<'_>,
     defined: &BTreeMap<Sm3Register, u8>,
-    relative_c: Option<&str>,
 ) -> Result<String, Sm3WgslError> {
+    let ProgramBindings {
+        external,
+        relative_c,
+        ..
+    } = *bindings;
     let scalar = |source: &Sm3Source, output_component: u8| {
         source_component(
             at_word,
@@ -1624,8 +1723,7 @@ fn operation_component(
             format!("({x0} * {x1} + {y0} * {y1} + {})", scalar(&sources[2], 0)?)
         }
         Sm3Opcode::TexLd | Sm3Opcode::TexLdL | Sm3Opcode::TexLdD => texture_component(
-            at_word, opcode, controls, sources, component, external, samplers, compare, defined,
-            relative_c,
+            at_word, opcode, controls, sources, component, bindings, defined,
         )?,
         Sm3Opcode::Nop
         | Sm3Opcode::Dcl
@@ -1671,12 +1769,15 @@ fn texture_component(
     controls: u8,
     sources: &[Sm3Source],
     component: u8,
-    external: &BTreeSet<Sm3Register>,
-    samplers: &BTreeMap<u16, SamplerTextureDimension>,
-    compare: &BTreeSet<u16>,
+    bindings: &ProgramBindings<'_>,
     defined: &BTreeMap<Sm3Register, u8>,
-    relative_c: Option<&str>,
 ) -> Result<String, Sm3WgslError> {
+    let ProgramBindings {
+        external,
+        samplers,
+        compare,
+        relative_c,
+    } = *bindings;
     let sampler = &sources[1];
     if sampler.register.file != Sm3RegisterFile::Sampler
         || sampler.modifier != Sm3SourceModifier::None

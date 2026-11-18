@@ -1,13 +1,14 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use d3d9_sm3::{PassLoweringAbi, PassWgsl};
+use d3d9_sm3::PassWgsl;
 
 use super::material_runtime::RuntimeShaderPair;
 
 // Bump when emitted WGSL changes as well as when the binary format changes.
-pub const WGSL_CACHE_FORMAT: u32 = 7;
+pub const WGSL_CACHE_FORMAT: u32 = 9;
 
 const MAGIC: &[u8; 8] = b"IWLWGSL\n";
+const HEADER_LEN: usize = MAGIC.len() + 7 * size_of::<u32>();
 
 static HIT: AtomicU64 = AtomicU64::new(0);
 static MISS: AtomicU64 = AtomicU64::new(0);
@@ -21,8 +22,8 @@ pub fn stats() -> (u64, u64, f64) {
     )
 }
 
-pub fn load(pair: RuntimeShaderPair, abi: &PassLoweringAbi) -> Option<PassWgsl> {
-    let key = cache_key(pair, abi);
+pub fn load(pair: RuntimeShaderPair, owner: &str, backend_key: &[u8]) -> Option<PassWgsl> {
+    let key = cache_key(pair, owner, backend_key);
     let started = std::time::Instant::now();
     let bytes = assets::cache_get("wgsl", &key)?;
     IO_NS.fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
@@ -31,9 +32,9 @@ pub fn load(pair: RuntimeShaderPair, abi: &PassLoweringAbi) -> Option<PassWgsl> 
     Some(module)
 }
 
-pub fn store(pair: RuntimeShaderPair, abi: &PassLoweringAbi, module: &PassWgsl) {
+pub fn store(pair: RuntimeShaderPair, owner: &str, backend_key: &[u8], module: &PassWgsl) {
     MISS.fetch_add(1, Ordering::Relaxed);
-    let key = cache_key(pair, abi);
+    let key = cache_key(pair, owner, backend_key);
     let bytes = encode(module);
     let started = std::time::Instant::now();
     if let Err(error) = assets::cache_put("wgsl", &key, &bytes) {
@@ -42,17 +43,19 @@ pub fn store(pair: RuntimeShaderPair, abi: &PassLoweringAbi, module: &PassWgsl) 
     IO_NS.fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
 }
 
-fn cache_key(pair: RuntimeShaderPair, abi: &PassLoweringAbi) -> String {
+fn cache_key(pair: RuntimeShaderPair, owner: &str, backend_key: &[u8]) -> String {
     let mut hash = assets::fnv1a64(&WGSL_CACHE_FORMAT.to_le_bytes());
     hash = assets::fnv1a64_more(hash, &pair.vertex.program_hash.to_le_bytes());
     hash = assets::fnv1a64_more(hash, &pair.pixel.program_hash.to_le_bytes());
-    hash = assets::fnv1a64_more(hash, format!("{abi:?}").as_bytes());
+    hash = assets::fnv1a64_more(hash, &(owner.len() as u64).to_le_bytes());
+    hash = assets::fnv1a64_more(hash, owner.as_bytes());
+    hash = assets::fnv1a64_more(hash, backend_key);
     format!("{hash:016x}")
 }
 
 fn encode(module: &PassWgsl) -> Vec<u8> {
     let source = module.source.as_bytes();
-    let mut out = Vec::with_capacity(8 + 24 + source.len());
+    let mut out = Vec::with_capacity(HEADER_LEN + source.len());
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&WGSL_CACHE_FORMAT.to_le_bytes());
     out.extend_from_slice(&(module.attribute_count as u32).to_le_bytes());
@@ -66,7 +69,7 @@ fn encode(module: &PassWgsl) -> Vec<u8> {
 }
 
 fn decode(bytes: &[u8]) -> Option<PassWgsl> {
-    if bytes.len() < 8 + 24 {
+    if bytes.len() < HEADER_LEN {
         return None;
     }
     if &bytes[..8] != MAGIC {
@@ -82,7 +85,7 @@ fn decode(bytes: &[u8]) -> Option<PassWgsl> {
     let pixel_constant_len = u32::from_le_bytes(bytes[24..28].try_into().ok()?) as usize;
     let sampler_count = u32::from_le_bytes(bytes[28..32].try_into().ok()?) as usize;
     let source_len = u32::from_le_bytes(bytes[32..36].try_into().ok()?) as usize;
-    let source = bytes.get(36..36 + source_len)?;
+    let source = bytes.get(HEADER_LEN..)?.get(..source_len)?;
     let source = std::str::from_utf8(source).ok()?.to_owned();
     Some(PassWgsl {
         source,

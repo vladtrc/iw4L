@@ -1,15 +1,20 @@
 use frame::ScopeApp;
-use std::sync::Arc;
-use std::sync::Mutex;
+use render_scene::{SkinFailure, WorldPresentAck};
 
 use bevy::prelude::*;
 use bevy::render::render_resource::TextureFormat;
 
 use crate::prepare::scene::world::WorldScene;
-use frame::{LaunchReport, WorldGeneration, WorldStamp};
+use frame::LaunchReport;
 use render_fx::{HostFxSystem, PreparedFxCatalog, PreparedTracers};
 
 pub(crate) use super::world_gpu::WorldGpuReady;
+
+type TessImageSlices<'a> = (
+    &'a [Option<Handle<Image>>],
+    &'a [Option<crate::assemble::drawsurf::RuntimeLightmapHandles>],
+    &'a [Option<Handle<Image>>],
+);
 
 fn hist_u8(values: impl IntoIterator<Item = u8>) -> String {
     let mut hist = std::collections::BTreeMap::<u8, usize>::new();
@@ -120,8 +125,6 @@ pub struct WorldSpawnJob {
 
     pub gpu_wait: super::world_gpu::WorldGpuWait,
 
-    pub spawn: WorldStamp,
-
     last_slice_at: Option<std::time::Instant>,
 }
 
@@ -135,13 +138,7 @@ impl WorldSpawnJob {
         gap
     }
 
-    pub(crate) fn tess_image_handles(
-        &self,
-    ) -> (
-        &[Option<Handle<Image>>],
-        &[Option<crate::assemble::drawsurf::RuntimeLightmapHandles>],
-        &[Option<Handle<Image>>],
-    ) {
+    pub(crate) fn tess_image_handles(&self) -> TessImageSlices<'_> {
         self.images.tess_handles()
     }
 
@@ -165,6 +162,10 @@ impl WorldSpawnJob {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 pub(crate) fn spawn_world(
     mut commands: Commands,
     load: Option<Res<assets::MapLoadProcess>>,
@@ -184,11 +185,9 @@ pub(crate) fn spawn_world(
         Res<render_anim::PreparedFpv>,
         Res<render_anim::PreparedModelMaterials>,
     ),
+    profile: Option<Res<frame::MatchRuntimeProfile>>,
 ) {
     let (fpv, model_materials) = prepared;
-    if scene.readiness.generation != job.spawn || job.spawn.0.is_none() {
-        return;
-    }
     // Pacing belongs to the load that is still running, not to the screen that
     // happens to be drawing it: a run without an overlay must spawn the world
     // the same way this one does.
@@ -203,11 +202,10 @@ pub(crate) fn spawn_world(
             return;
         }
         let gap_ms = job.slice_gap_ms(std::time::Instant::now());
-        let spawn = job.spawn;
         let gpu_ready = gpu.as_deref();
-        let gpu_done = super::world_gpu::poll(&mut job.gpu_wait, spawn, gpu_ready, gap_ms);
+        let gpu_done = super::world_gpu::poll(&mut job.gpu_wait, gpu_ready, gap_ms);
         let fpv_done =
-            fpv.settled_for(&tess.catalog()) && model_materials.settled_for(&tess.catalog());
+            fpv.settled_for(tess.catalog()) && model_materials.settled_for(tess.catalog());
         if gpu_done && !fpv_done {
             diag::info!(
                 World,
@@ -226,12 +224,12 @@ pub(crate) fn spawn_world(
                 gpu_ready.map(|g| i32::from(g.pipelines)).unwrap_or(-1),
                 elapsed_ms,
             );
-            log_load_ledger(&job, gpu_ready, &fpv, elapsed_ms);
+            log_load_ledger(&job, gpu_ready, elapsed_ms);
         }
         return;
     }
     if scene.spawned {
-        record_first_world_frame(progress.as_ref(), &job, &present_ack, report.as_deref());
+        record_first_world_frame(progress.as_ref(), &present_ack, report.as_deref());
         return;
     }
     if scene.batches.is_empty() {
@@ -302,10 +300,9 @@ pub(crate) fn spawn_world(
         job.last_work_ms = frame_started.elapsed().as_secs_f32() * 1000.0;
         diag::info!(
             World,
-            "world spawn slice: phase=images done={}/{} resident={} skipped={} reused_handles={}/{}B common_reused={}/{}B {:.1}ms gap={gap_ms:.1}ms handed_bytes={} total_handed={} byte_budget={} largest_step={:.1}ms/{}B (budget 40ms; bytes are handed to Assets<Image>, not copied to the GPU; a reused handle is a slot whose variant was already an asset)",
+            "world spawn slice: phase=images done={}/{} skipped={} reused_handles={}/{}B common_reused={}/{}B {:.1}ms gap={gap_ms:.1}ms handed_bytes={} total_handed={} byte_budget={} largest_step={:.1}ms/{}B (budget 40ms; bytes are handed to Assets<Image>, not copied to the GPU; a reused handle is a slot whose variant was already an asset)",
             job.images.done,
             job.images.total,
-            job.images.resident,
             job.images.skipped,
             job.images.reused_handles,
             job.images.reused_handle_bytes,
@@ -332,7 +329,7 @@ pub(crate) fn spawn_world(
         let compile_finished = job.compile.until(&scene.runtime_material_catalog, deadline);
         job.last_work_ms = frame_started.elapsed().as_secs_f32() * 1000.0;
         let gap_ms = job.slice_gap_ms(std::time::Instant::now());
-        if compile_finished || job.last_work_ms >= 20.0 || job.compile.done() % 32 == 0 {
+        if compile_finished || job.last_work_ms >= 20.0 || job.compile.done().is_multiple_of(32) {
             let (wgsl_hit, wgsl_miss, wgsl_io_ms) = crate::assemble::drawsurf::wgsl_cache_stats();
             diag::info!(
                 World,
@@ -392,6 +389,9 @@ pub(crate) fn spawn_world(
             scene.runtime_material_catalog.clone(),
             programs,
             exact_shaders,
+            profile
+                .as_ref()
+                .map_or(Default::default(), |profile| profile.0),
         );
         {
             let value = render_scene::TessMaterials::new(
@@ -528,7 +528,7 @@ pub(crate) fn spawn_world(
             let value = crate::assemble::drawsurf::MapOutdoor {
                 image: scene
                     .outdoor_image
-                    .map(|id| crate::assemble::drawsurf::RuntimeImageId(id)),
+                    .map(crate::assemble::drawsurf::RuntimeImageId),
                 lookup: scene.outdoor_lookup,
             };
             commands.queue(move |world: &mut World| {
@@ -750,9 +750,7 @@ pub(crate) fn spawn_world(
             &mut commands,
             &scene,
             &images,
-            job.images.exact_handles().to_vec(),
-            job.images.probe_handles().to_vec(),
-            job.images.lightmap_handles().to_vec(),
+            &job.images,
             tracers.as_deref(),
             fx_catalog.as_deref(),
         );
@@ -783,10 +781,7 @@ pub(crate) fn spawn_world_finish(
     mut tess: ResMut<render_scene::TessMaterials>,
     fx_models: Option<Res<render_fx::PreparedFxModels>>,
 ) {
-    if scene.readiness.generation != job.spawn
-        || job.spawn.0.is_none()
-        || job.phase != WorldSpawnPhase::WorldTess
-    {
+    if job.phase != WorldSpawnPhase::WorldTess {
         return;
     }
     let progress = load
@@ -836,14 +831,13 @@ pub(crate) fn spawn_world_finish(
 
 fn record_first_world_frame(
     progress: Option<&asset_transport::LoadProgress>,
-    job: &WorldSpawnJob,
     present_ack: &WorldPresentAck,
     report: Option<&LaunchReport>,
 ) {
     let Some(progress) = progress else {
         return;
     };
-    let Some(presented_at) = present_ack.presented_at(job.spawn) else {
+    let Some(presented_at) = present_ack.at else {
         return;
     };
     if !progress.record_first_frame(presented_at) {
@@ -870,34 +864,18 @@ fn record_first_world_frame(
     );
 }
 
-#[derive(Resource, Clone, Default)]
-pub(crate) struct WorldPresentAck(Arc<Mutex<Option<(WorldStamp, std::time::Instant)>>>);
-
-impl WorldPresentAck {
-    fn presented_at(&self, generation: WorldStamp) -> Option<std::time::Instant> {
-        self.0.lock().ok().and_then(|ack| {
-            ack.as_ref()
-                .filter(|(seen, _)| *seen == generation)
-                .map(|(_, at)| *at)
-        })
-    }
-}
+#[derive(Resource, Default)]
+struct ExtractedWorldPresent(bool);
 
 #[derive(Resource, Default)]
-struct ExtractedWorldPresent(Option<WorldStamp>);
+struct SkinLimitsChecked(Option<u64>);
 
-fn log_load_ledger(
-    job: &WorldSpawnJob,
-    gpu: Option<&WorldGpuReady>,
-    fpv: &render_anim::PreparedFpv,
-    gpu_wait_ms: f32,
-) {
+fn log_load_ledger(job: &WorldSpawnJob, gpu: Option<&WorldGpuReady>, gpu_wait_ms: f32) {
     let images = &job.images;
     let pipelines_added = gpu.and_then(|gpu| job.gpu_wait.pipelines_added(gpu.pipeline_n));
-    let fpv_census = fpv.table().map(|table| table.census());
     diag::info!(
         World,
-        "load ledger: images handed={} handed_bytes={} reused_slot={} reused_slot_bytes={} reused_common={} reused_common_bytes={} resident_map={} | pipelines cached={} compiled_this_load={} | fpv models={} rigs={} materials={} built_ms={} | gpu_wait_ms={gpu_wait_ms:.1}",
+        "load ledger: images handed={} handed_bytes={} reused_slot={} reused_slot_bytes={} reused_common={} reused_common_bytes={} copied={} copied_bytes={} | pipelines cached={} compiled_this_load={} | gpu_wait_ms={gpu_wait_ms:.1}",
         images
             .done
             .saturating_sub(images.skipped)
@@ -907,20 +885,14 @@ fn log_load_ledger(
         images.reused_handle_bytes,
         images.reused_common_handles,
         images.reused_common_bytes,
-        images.resident,
+        images.copied,
+        images.copied_bytes,
         gpu.map_or_else(|| "?".to_owned(), |gpu| gpu.pipeline_n.to_string()),
         pipelines_added.map_or_else(|| "?".to_owned(), |n| n.to_string()),
-        fpv_census.map_or_else(|| "?".to_owned(), |c| c.models.to_string()),
-        fpv_census.map_or_else(|| "?".to_owned(), |c| c.rigs.to_string()),
-        fpv_census.map_or_else(|| "?".to_owned(), |c| c.materials.to_string()),
-        fpv_census.map_or_else(|| "?".to_owned(), |c| format!("{:.1}", c.elapsed_ms)),
     );
 }
 
 fn finish_world_spawn(scene: &mut WorldScene, job: &mut WorldSpawnJob, commands: &mut Commands) {
-    if scene.readiness.generation != job.spawn || job.spawn.0.is_none() {
-        return;
-    }
     job.phase = WorldSpawnPhase::Done;
     scene.spawned = true;
     scene.readiness.state = frame::ReadinessState::Ready;
@@ -930,28 +902,18 @@ fn finish_world_spawn(scene: &mut WorldScene, job: &mut WorldSpawnJob, commands:
             frame::scope::insert(world, value, frame::MatchScope::Live);
         });
     };
-    perf::world_ready(1);
+    perf::instant!("world_ready", "iw4l.render", |ctx| {
+        let spawned: i64 = 1;
+        ctx.arg("spawned", spawned);
+    });
 }
 
-pub(crate) fn arm_world_spawn_on_install(
-    generation: Res<WorldGeneration>,
-    mut job: ResMut<WorldSpawnJob>,
-    mut gpu: ResMut<WorldGpuReady>,
-) {
-    let spawn = generation.stamp();
-    *job = WorldSpawnJob {
-        spawn,
-        ..Default::default()
-    };
-    *gpu = WorldGpuReady {
-        spawn,
-        ..Default::default()
-    };
-}
-
+#[expect(
+    clippy::type_complexity,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 fn check_skin_support(
     support: Option<Res<render_scene::SkinSupport>>,
-    generation: Option<Res<WorldGeneration>>,
     scene: Option<ResMut<WorldScene>>,
     products: (
         Option<Res<assets::PreparedBodies>>,
@@ -959,21 +921,17 @@ fn check_skin_support(
         Option<Res<assets::PreparedWorldWeapons>>,
         Option<Res<assets::PreparedWeapons>>,
     ),
-    mut checked: Local<Option<(WorldStamp, u64)>>,
+    mut checked: ResMut<SkinLimitsChecked>,
+    mut failure: ResMut<SkinFailure>,
 ) {
     let Some(support) = support else {
         return;
     };
-    let world = generation.map_or(WorldStamp(None), |generation| generation.stamp());
-    support.set_world(world);
     let Some(mut scene) = scene else {
         return;
     };
-    if world.0.is_none() {
-        return;
-    }
-    let installation = (world, support.device_generation());
-    if *checked != Some(installation) {
+    let installation = support.device_generation();
+    if checked.0 != Some(installation) {
         let Some(limits) = support.limits() else {
             scene.readiness.state = frame::ReadinessState::Pending;
             return;
@@ -1054,46 +1012,47 @@ fn check_skin_support(
             limits.buffer_bytes,
             limits.storage_bytes
         );
-        if largest_shape * 64 > limits.storage_bytes
+        if support.resident_budget == 0
+            || largest_shape * 64 > limits.storage_bytes
             || max_bones * 64 > limits.storage_bytes
             || output > limits.buffer_bytes
         {
-            support.refuse(
-                world,
-                render_frame::skinning::SkinRefusal::UnsupportedProduct,
-            );
+            failure.reason = Some("unsupported skin product");
         } else if (input + palettes)
             .saturating_mul(2)
             .saturating_add(output.saturating_mul(3))
             > support.resident_budget
         {
-            support.refuse(
-                world,
-                render_frame::skinning::SkinRefusal::ResidencyPressure,
-            );
+            failure.reason = Some("skin residency budget exhausted");
         }
-        if let Some(refusal) = support.failure(world) {
+        if let Some(refusal) = failure.reason {
             diag::warn!(World, "skinning support refused: {refusal:?}");
         }
-        *checked = Some(installation);
-        if scene.spawned && support.failure(world).is_none() {
+        checked.0 = Some(installation);
+        if scene.spawned && failure.reason.is_none() {
             scene.readiness.state = frame::ReadinessState::Ready;
         }
     }
-    if support.failure(world).is_some() {
+    if failure.reason.is_some() {
         scene.readiness.state = frame::ReadinessState::Failed;
     }
 }
 
 pub(crate) fn register_world_gpu_ready(app: &mut App) {
-    app.add_systems(
-        Update,
-        check_skin_support
-            .after(spawn_world)
-            .in_set(frame::ClientSet::Present),
-    );
+    app.scoped::<SkinLimitsChecked>(frame::MatchScope::Live)
+        .scoped::<SkinFailure>(frame::MatchScope::Live)
+        .scoped::<WorldPresentAck>(frame::MatchScope::Live)
+        .add_systems(
+            Update,
+            check_skin_support
+                .in_set(frame::InMatch)
+                .after(spawn_world)
+                .in_set(frame::ClientSet::Present),
+        );
     super::world_gpu::register_resources(app);
-    app.scoped::<super::world_images::ResidentGpuImages>(frame::MatchScope::Live);
+    // Not match-scoped: the common set outlives every match, and so must the
+    // textures made from it, or each load copies and uploads them again.
+    app.init_resource::<super::world_images::ResidentGpuImages>();
     app.add_systems(
         Update,
         supply_requested_shaders
@@ -1101,14 +1060,10 @@ pub(crate) fn register_world_gpu_ready(app: &mut App) {
             .in_set(frame::ClientSet::Present)
             .before(spawn_world),
     );
-    let present_ack = WorldPresentAck::default();
-    app.insert_resource(present_ack.clone());
     let Some(render_app) = app.get_sub_app_mut(bevy::render::RenderApp) else {
         return;
     };
-    render_app
-        .insert_resource(present_ack)
-        .init_resource::<ExtractedWorldPresent>();
+    render_app.init_resource::<ExtractedWorldPresent>();
     render_app.add_systems(
         bevy::render::ExtractSchedule,
         (
@@ -1128,22 +1083,17 @@ fn extract_world_present(
     main_world: Res<bevy::render::MainWorld>,
     mut extracted: ResMut<ExtractedWorldPresent>,
 ) {
-    let generation = main_world
-        .get_resource::<WorldGeneration>()
-        .map(|generation| generation.stamp())
-        .unwrap_or(WorldStamp(None));
-    let spawned = main_world
+    extracted.0 = main_world
         .get_resource::<WorldScene>()
-        .is_some_and(|scene| scene.spawned && scene.readiness.ready_for(generation));
-    extracted.0 = (spawned && generation.0.is_some()).then_some(generation);
+        .is_some_and(|scene| scene.spawned && scene.readiness.is_ready());
 }
 
-fn acknowledge_world_present(extracted: Res<ExtractedWorldPresent>, ack: Res<WorldPresentAck>) {
-    let Some(generation) = extracted.0 else {
-        return;
-    };
-    if let Ok(mut slot) = ack.0.lock() {
-        *slot = Some((generation, std::time::Instant::now()));
+fn acknowledge_world_present(
+    extracted: Res<ExtractedWorldPresent>,
+    mut ack: ResMut<WorldPresentAck>,
+) {
+    if extracted.0 && ack.at.is_none() {
+        ack.at = Some(std::time::Instant::now());
     }
 }
 

@@ -3,7 +3,7 @@ name = "playerstate_iw4"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
-description = "playerState_t and usercmd_s from retail MW2 — one-to-one data, with no ECS, bevy, or I/O."
+description = "playerState_t and usercmd_s for IW4 compatibility — one-to-one data, with no ECS, bevy, or I/O."
 
 [dependencies]
 math_iw4.workspace = true

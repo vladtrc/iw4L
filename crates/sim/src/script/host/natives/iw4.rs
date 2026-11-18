@@ -1,9 +1,51 @@
+pub(crate) mod saved;
+mod saves;
+
 use super::super::args::string;
 use crate::script::{Namespace, NativeRegistry, RoundScript, Value};
 use bevy_ecs::prelude::World;
 
 pub(crate) fn register(registry: &mut NativeRegistry) {
+    registry.register(Namespace::Method, "playersetstreamorigin", |_, _, _| {
+        perf::instant!("gsc_platform_hint", "iw4l.sim",
+            "native" => "playersetstreamorigin", "policy" => "eager_scene_residency");
+        Ok(Value::Undefined)
+    });
+    registry.register(Namespace::Method, "playerclearstreamorigin", |_, _, _| {
+        perf::instant!("gsc_platform_hint", "iw4l.sim",
+            "native" => "playerclearstreamorigin", "policy" => "eager_scene_residency");
+        Ok(Value::Undefined)
+    });
+    registry.register(Function, "settimescale", |world, receiver, args| {
+        if args.len() != 1 {
+            return Err("settimescale expects one positive scale".into());
+        }
+        let scale = super::super::args::float(args, 0)?;
+        let value = super::scene_effects::set_slow_motion(
+            world,
+            receiver,
+            &[Value::Float(scale), Value::Float(scale), Value::Float(0.0)],
+        )?;
+        set_dvar(world, "timescale", &scale.to_string());
+        Ok(value)
+    });
     use Namespace::Function;
+    saves::register(registry);
+    registry.register(Function, "precachenightvisioncodeassets", |world, _, _| {
+        if !world.resource::<RoundScript>().loading {
+            return Err(
+                "PrecacheNightvisionCodeAssets must be called before any wait statements".into(),
+            );
+        }
+        world
+            .resource_mut::<RoundScript>()
+            .engine
+            .night_vision_assets = true;
+        Ok(Value::Undefined)
+    });
+    registry.register(Function, "notifyoncommand", |world, _, args| {
+        super::super::commands::register(world, None, args)
+    });
     registry.register(Function, "getdvar", |world, _, args| {
         Ok(Value::String(dvar(world, args)?.into()))
     });
@@ -20,31 +62,13 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
             parts.next().unwrap_or(0.0)
         })))
     });
-    for name in ["setdvar", "setsaveddvar"] {
-        registry.register(Function, name, |world, _, args| {
-            let name = dvar_name(args)?;
-            let value = dvar_value(args)?;
-            set_dvar(world, &name, &value);
-            Ok(Value::Undefined)
-        });
-    }
-    registry.register(Function, "settimescale", |world, _, args| {
-        let scale = super::super::args::float(args, 0)?;
-        if scale <= 0.0 {
-            return Err("timescale must be positive".into());
-        }
-        set_dvar(world, "timescale", &scale.to_string());
-        Ok(Value::Undefined)
+    registry.register(Function, "setsaveddvar", |world, _, args| {
+        saved::set(world, args)
     });
-    registry.register(Function, "soundsettimescalefactor", |world, _, args| {
-        let factor = super::super::args::float(args, 0)?;
-        set_dvar(world, "snd_timescalefactor", &factor.to_string());
-        Ok(Value::Undefined)
-    });
-    registry.register(Function, "laserforceon", |_, _, _| Ok(Value::Undefined));
-    registry.register(Function, "laserforceoff", |_, _, _| Ok(Value::Undefined));
-    registry.register(Function, "issavesuccessful", |_, _, _| Ok(Value::Int(1)));
-    registry.register(Function, "refreshhudcompass", |_, _, _| {
+    registry.register(Function, "setdvar", |world, _, args| {
+        let name = dvar_name(args)?;
+        let value = dvar_value(args)?;
+        set_script_dvar(world, &name, &value);
         Ok(Value::Undefined)
     });
     registry.register(Function, "setdvarifuninitialized", |world, _, args| {
@@ -198,7 +222,18 @@ pub(crate) fn register_local_presentation_dvars(world: &mut World, local: Option
 }
 
 pub(crate) fn set_dvar(world: &mut World, name: &str, value: &str) {
+    set_dvar_source(world, name, value, false);
+}
+
+fn set_script_dvar(world: &mut World, name: &str, value: &str) {
+    set_dvar_source(world, name, value, true);
+}
+
+fn set_dvar_source(world: &mut World, name: &str, value: &str, script: bool) {
     let name = name.to_ascii_lowercase();
+    let campaign = world
+        .get_resource::<RoundScript>()
+        .is_some_and(|runtime| runtime.profile == asset_core::RuntimeProfile::Campaign);
     let mut runtime = world.resource_mut::<crate::script::MatchScript>();
     let value = if runtime.local_presentation_dvars
         && let Some(setting) = crate::TargetBoxDvar::named(&name)
@@ -210,17 +245,28 @@ pub(crate) fn set_dvar(world: &mut World, name: &str, value: &str) {
     } else {
         value.to_owned()
     };
+    let value = if campaign {
+        let Some(value) = saved::normalize(&name, &value) else {
+            diag::warn!(Sim, "dvar {name}: value outside registered domain: {value}");
+            return;
+        };
+        value
+    } else {
+        value
+    };
+    if campaign && script && saved::is_latched(&name) {
+        if runtime.dvars.get(&name) == Some(&value) {
+            runtime.latched_dvars.remove(&name);
+        } else {
+            runtime.latched_dvars.insert(name, value);
+        }
+        return;
+    }
+    runtime.latched_dvars.remove(&name);
     runtime.dvars.insert(name, value);
 }
 
 pub(crate) fn deliver_local_presentation_dvars(world: &mut World) {
-    if !world
-        .resource::<crate::step::StepRequest>()
-        .reason
-        .advances_authority_world()
-    {
-        return;
-    }
     let Some(client) = world
         .resource::<crate::script::MatchScript>()
         .local_presentation_client
@@ -299,7 +345,7 @@ fn dvar_value(args: &[Value]) -> Result<String, String> {
     string(args, 1)
 }
 
-pub(crate) fn atoi(text: &str) -> i32 {
+pub fn atoi(text: &str) -> i32 {
     let text = text.trim_start_matches([' ', '\t', '\n', '\r', '\x0b', '\x0c']);
     let (negative, digits) = match text.as_bytes().first() {
         Some(b'-') => (true, &text[1..]),
@@ -326,7 +372,7 @@ pub(crate) fn atoi(text: &str) -> i32 {
     }
 }
 
-pub(crate) fn atof(text: &str) -> f64 {
+pub fn atof(text: &str) -> f64 {
     let text = text.trim_start_matches([' ', '\t', '\n', '\r', '\x0b', '\x0c']);
     let bytes = text.as_bytes();
     let mut end = usize::from(matches!(bytes.first(), Some(b'-' | b'+')));
@@ -353,4 +399,19 @@ pub(crate) fn atof(text: &str) -> f64 {
         }
     }
     text[..end].parse().unwrap_or(0.0)
+}
+
+pub(crate) fn campaign_shared_dvars(world: &World) -> Vec<(String, String)> {
+    if !world
+        .get_resource::<RoundScript>()
+        .is_some_and(|runtime| runtime.profile == asset_core::RuntimeProfile::Campaign)
+    {
+        return Vec::new();
+    }
+    world
+        .resource::<crate::script::MatchScript>()
+        .dvars
+        .iter()
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect()
 }

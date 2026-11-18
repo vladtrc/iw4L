@@ -9,17 +9,17 @@ use crate::{
     model_kind,
     model_skel::{ModelSkel, capture_untyped_skel},
 };
-use asset_core::AssetNamespace;
+use asset_core::FamilyId;
 use asset_material::{MaterialCatalog, MaterialDefinitions};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ProjectileMeshKey {
-    pub namespace: AssetNamespace,
+    pub namespace: FamilyId,
     pub name: String,
 }
 
 impl ProjectileMeshKey {
-    pub fn new(namespace: AssetNamespace, name: &str) -> Self {
+    pub fn new(namespace: FamilyId, name: &str) -> Self {
         Self {
             namespace,
             name: name.to_ascii_lowercase(),
@@ -33,7 +33,7 @@ impl ProjectileMeshKey {
 
 #[derive(Clone, Debug)]
 pub struct ProjectileMeshEntry {
-    pub namespace: AssetNamespace,
+    pub namespace: FamilyId,
     pub skel: std::sync::Arc<ModelSkel>,
     pub material_keys: Vec<Option<asset_core::MaterialKey>>,
     pub material_edges: Vec<AssetEdge<crate::MaterialSpace>>,
@@ -41,7 +41,7 @@ pub struct ProjectileMeshEntry {
 
 impl ProjectileMeshEntry {
     fn from_skel(
-        namespace: AssetNamespace,
+        namespace: FamilyId,
         skel: std::sync::Arc<ModelSkel>,
         materials: Option<&MaterialCatalog>,
     ) -> Self {
@@ -90,7 +90,7 @@ pub struct ProjectileMeshCatalog {
 #[derive(Clone, Debug, Default)]
 pub struct ProjectileMeshBuild {
     catalog: ProjectileMeshCatalog,
-    capture_ns: Option<AssetNamespace>,
+    capture_ns: Option<FamilyId>,
     strings: ScriptStrings,
 }
 
@@ -111,7 +111,7 @@ impl ProjectileMeshBuild {
         self.strings = strings;
     }
 
-    pub fn set_capture_ns(&mut self, ns: AssetNamespace) {
+    pub fn set_capture_ns(&mut self, ns: FamilyId) {
         self.capture_ns = Some(ns);
     }
 
@@ -140,47 +140,13 @@ impl ProjectileMeshBuild {
         );
     }
 
-    pub fn capture_t5(
-        &mut self,
-        stream: &fastfile_t5::ZoneStream<'_>,
-        strings: &fastfile_t5::ScriptStrings,
-        materials: &MaterialCatalog,
-    ) {
-        let Some(geometry) = stream.latest_xmodel() else {
-            return;
-        };
-        let Some(skel) =
-            crate::model_skel::capture_xmodel_skel_t5(stream, strings, geometry, materials)
-        else {
-            return;
-        };
-        self.insert_in(AssetNamespace::T5, skel, Some(materials));
-    }
-
-    pub fn capture_iw5(
-        &mut self,
-        stream: &fastfile_iw5::ZoneStream<'_>,
-        strings: &fastfile_iw5::ScriptStrings,
-        materials: &MaterialCatalog,
-    ) {
-        let Some(geometry) = stream.latest_xmodel() else {
-            return;
-        };
-        let Some(skel) =
-            crate::model_skel::capture_xmodel_skel_iw5(stream, strings, geometry, materials)
-        else {
-            return;
-        };
-        self.insert_in(AssetNamespace::Iw5, skel, Some(materials));
-    }
-
     pub fn absorb(&mut self, mut other: Self) {
         for key in std::mem::take(&mut other.catalog.order) {
-            if !self.catalog.entries.contains_key(&key) {
-                if let Some(entry) = other.catalog.entries.remove(&key) {
-                    self.catalog.order.push(key.clone());
-                    self.catalog.entries.insert(key, entry);
-                }
+            if !self.catalog.entries.contains_key(&key)
+                && let Some(entry) = other.catalog.entries.remove(&key)
+            {
+                self.catalog.order.push(key.clone());
+                self.catalog.entries.insert(key, entry);
             }
         }
     }
@@ -199,7 +165,13 @@ impl ProjectileMeshBuild {
         skel: &std::sync::Arc<ModelSkel>,
         materials: &MaterialCatalog,
     ) {
-        if model_kind(&skel.name).is_none() {
+        if crate::classify_model(
+            self.capture_ns
+                .expect("asset capture requires an explicit family"),
+            &skel.name,
+        )
+        .is_none()
+        {
             self.insert_in(
                 self.capture_ns
                     .expect("asset capture requires an explicit family"),
@@ -211,16 +183,16 @@ impl ProjectileMeshBuild {
 
     pub fn capture_shared(
         &mut self,
-        ns: AssetNamespace,
+        ns: FamilyId,
         skel: &std::sync::Arc<ModelSkel>,
         materials: &MaterialCatalog,
     ) {
         self.insert_in(ns, skel.clone(), Some(materials));
     }
 
-    fn insert_in(
+    pub fn insert_in(
         &mut self,
-        ns: AssetNamespace,
+        ns: FamilyId,
         skel: impl Into<std::sync::Arc<ModelSkel>>,
         materials: Option<&MaterialCatalog>,
     ) {
@@ -269,11 +241,11 @@ impl ProjectileMeshCatalog {
         self.order.is_empty()
     }
 
-    pub fn get(&self, ns: AssetNamespace, name: &str) -> Option<&ProjectileMeshEntry> {
+    pub fn get(&self, ns: FamilyId, name: &str) -> Option<&ProjectileMeshEntry> {
         self.entries.get(&ProjectileMeshKey::new(ns, name))
     }
 
-    pub fn index_by_name(&self, ns: AssetNamespace, name: &str) -> Option<usize> {
+    pub fn index_by_name(&self, ns: FamilyId, name: &str) -> Option<usize> {
         self.order
             .iter()
             .position(|k| *k == ProjectileMeshKey::new(ns, name))
@@ -295,18 +267,18 @@ impl ProjectileMeshCatalog {
         self.order.iter().map(|k| k.name.as_str())
     }
 
-    pub fn names_in(&self, ns: AssetNamespace) -> impl Iterator<Item = &str> {
+    pub fn names_in(&self, ns: FamilyId) -> impl Iterator<Item = &str> {
         self.order
             .iter()
             .filter(move |k| k.namespace == ns)
             .map(|k| k.name.as_str())
     }
 
-    pub fn contains(&self, ns: AssetNamespace, name: &str) -> bool {
+    pub fn contains(&self, ns: FamilyId, name: &str) -> bool {
         self.entries.contains_key(&ProjectileMeshKey::new(ns, name))
     }
 
-    pub fn namespace_count(&self, ns: AssetNamespace) -> usize {
+    pub fn namespace_count(&self, ns: FamilyId) -> usize {
         self.order.iter().filter(|k| k.namespace == ns).count()
     }
 

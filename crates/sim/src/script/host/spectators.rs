@@ -124,8 +124,7 @@ pub(crate) fn hold_killcam_viewer(
 }
 
 fn update(world: &mut World, input: bool) {
-    let replacement = RoundScript::new(world.resource::<crate::script::MatchScript>());
-    let mut runtime = std::mem::replace(&mut *world.resource_mut::<RoundScript>(), replacement);
+    let mut runtime = std::mem::take(&mut *world.resource_mut::<RoundScript>());
     let clients: Vec<u32> = runtime.players.keys().copied().collect();
     let mut frame = FrameWorld::from_world(world);
     let targets: Vec<(u32, i32, bool)> = clients

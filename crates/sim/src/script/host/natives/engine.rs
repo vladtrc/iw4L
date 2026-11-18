@@ -11,6 +11,11 @@ use crate::script::{Arc, ArrayKey, Namespace, NativeRegistry, RoundScript, Value
 use bevy_ecs::prelude::World;
 
 const ZERO: [f32; 3] = [0.0; 3];
+const MASK_SIGHT_FULL: u32 = 0x0280_d803;
+const MASK_SIGHT_REDUCED: u32 = 0x0080_1803;
+const MASK_GROUND_POSITION: u32 = 0x0082_0015;
+const DEFAULT_GROUND_SEARCH_DEPTH: f32 = 1000.0;
+const MIN_GROUND_SEARCH_LIFT: f32 = 64.0;
 
 fn runtime(world: &mut World) -> bevy_ecs::world::Mut<'_, RoundScript> {
     world.resource_mut::<RoundScript>()
@@ -48,7 +53,7 @@ fn describe(value: &Value) -> &'static str {
     }
 }
 
-pub(crate) fn entity_id(world: &World, value: &Value) -> Result<u64, String> {
+pub fn entity_id(world: &World, value: &Value) -> Result<u64, String> {
     match world.resource::<RoundScript>().entity(value) {
         Some((id, e)) if e.kind != EntityKind::HudElem => Ok(id),
         Some(_) => Err("hud element is not an entity".into()),
@@ -73,7 +78,7 @@ fn vector_field(world: &mut World, id: u64, name: &str) -> [f32; 3] {
     }
 }
 
-fn origin_of(world: &mut World, value: &Value) -> Result<[f32; 3], String> {
+pub(crate) fn origin_of(world: &mut World, value: &Value) -> Result<[f32; 3], String> {
     match value {
         Value::Object(id) if world.resource::<RoundScript>().live(id) => {
             Ok(vector_field(world, *id, "origin"))
@@ -176,7 +181,7 @@ fn surface_name(collider: crate::bullet_collision::ColliderId) -> &'static str {
         ColliderId::World { surface_flags, .. }
         | ColliderId::EntityDObjBone { surface_flags, .. }
         | ColliderId::EntityLinkedBrush { surface_flags, .. } => surface_flags,
-        ColliderId::Player { .. } => return "flesh",
+        ColliderId::Player { .. } | ColliderId::EntityBody { .. } => return "flesh",
     };
     weapon_iw4::SURFACE_TYPE_NAMES
         .get(trace_iw4::surface_type_from_flags(flags) as usize)
@@ -193,7 +198,9 @@ pub(crate) fn collider_entity(
     let found = match collider {
         ColliderId::World { .. } => None,
         ColliderId::Player { client, .. } => runtime.players.get(&client.0).map(|s| s.object),
-        ColliderId::EntityDObjBone { owner, .. } | ColliderId::EntityLinkedBrush { owner, .. } => {
+        ColliderId::EntityDObjBone { owner, .. }
+        | ColliderId::EntityLinkedBrush { owner, .. }
+        | ColliderId::EntityBody { owner } => {
             let model = owner.script_model();
             runtime
                 .entities
@@ -281,7 +288,29 @@ fn trace_passed(world: &mut World, start: [f32; 3], end: [f32; 3], mask: u32) ->
     t.fraction >= 1.0 && t.startsolid == 0
 }
 
-fn matching_entities(world: &mut World, args: &[Value]) -> Result<Vec<u64>, String> {
+#[derive(Clone, Copy)]
+enum QueryScope {
+    Entities,
+    VehicleNodes,
+}
+
+impl QueryScope {
+    fn contains(self, entity: &ScriptEntity) -> bool {
+        match self {
+            Self::Entities => !matches!(
+                entity.kind,
+                EntityKind::HudElem | EntityKind::VehicleNode | EntityKind::Fx
+            ),
+            Self::VehicleNodes => entity.kind == EntityKind::VehicleNode,
+        }
+    }
+}
+
+fn matching_entities(
+    world: &mut World,
+    args: &[Value],
+    scope: QueryScope,
+) -> Result<Vec<u64>, String> {
     let value = string(args, 0)?;
     let key = string(args, 1)?.to_ascii_lowercase();
     let mut runtime = runtime(world);
@@ -290,7 +319,7 @@ fn matching_entities(world: &mut World, args: &[Value]) -> Result<Vec<u64>, Stri
     Ok(runtime
         .entities
         .iter()
-        .filter(|(_, e)| e.kind != EntityKind::HudElem)
+        .filter(|(_, e)| scope.contains(e))
         .map(|(id, _)| *id)
         .filter(|id| {
             matches!(
@@ -299,13 +328,6 @@ fn matching_entities(world: &mut World, args: &[Value]) -> Result<Vec<u64>, Stri
             )
         })
         .collect())
-}
-
-fn classname_prefix(world: &World, ids: Vec<u64>, prefix: &str) -> Vec<u64> {
-    let runtime = world.resource::<RoundScript>();
-    ids.into_iter()
-        .filter(|id| runtime.entities[id].classname.starts_with(prefix))
-        .collect()
 }
 
 fn single(ids: Vec<u64>, what: &str) -> Result<Value, String> {
@@ -335,7 +357,7 @@ fn array_values(world: &World, value: &Value) -> Result<Vec<Value>, String> {
 }
 
 fn seconds_ms(seconds: f32) -> Result<i64, String> {
-    if !(seconds > 0.0) {
+    if seconds <= 0.0 || seconds.is_nan() {
         return Err("total time must be positive".into());
     }
     Ok((seconds * 1000.0).round().max(1.0) as i64)
@@ -482,6 +504,8 @@ fn fx_on_tag(
     let fallback = (origin_of(world, &entity)?, [0.0, 0.0, 1.0]);
     let mut frame = super::super::presence::settled(world);
     let number = presence.and_then(|id| frame.gentity_number(id));
+    let content = frame.content();
+    let owner = asset_core::world_frame::SimPoint::from_slab(fallback.0).world();
     let dobj = presence.and_then(|id| {
         frame
             .entity_collision_capabilities()
@@ -489,7 +513,18 @@ fn fx_on_tag(
             .find(|row| row.owner.script_model() == Some(id))?
             .dobj
             .as_ref()
-            .map(|dobj| (dobj.tag_bone(&tag), dobj.tag_world_pose(&tag)))
+            .map(|dobj| {
+                let pose = dobj
+                    .tag_world_matrix(&tag)
+                    .and_then(|pose| content.scene_model_transform(owner, pose))
+                    .map(|pose| {
+                        (
+                            pose.w_axis.truncate().to_array(),
+                            pose.x_axis.truncate().normalize_or_zero().to_array(),
+                        )
+                    });
+                (dobj.tag_bone(&tag), pose)
+            })
     });
     let (bone, pose) = dobj.unwrap_or((None, None));
     let (origin, direction) = pose.unwrap_or(fallback);
@@ -587,11 +622,7 @@ fn team_clients(world: &mut World, team: &str, except: Option<u32>) -> Vec<crate
         .collect()
 }
 
-pub(crate) fn play_sound_at(
-    world: &mut World,
-    origin: [f32; 3],
-    alias: &str,
-) -> Result<(), String> {
+pub fn play_sound_at(world: &mut World, origin: [f32; 3], alias: &str) -> Result<(), String> {
     if crate::frame::FrameWorld::from_world(world).script_sound_is_looping(alias)? {
         return Err("cannot play a looping alias as a one-shot sound".into());
     }
@@ -647,16 +678,6 @@ fn radius_damage(
     Ok(Value::Undefined)
 }
 
-fn part(
-    world: &mut World,
-    receiver: &Value,
-    args: &[Value],
-    hidden: bool,
-) -> Result<Value, String> {
-    let tag: Arc<str> = string(args, 0)?.into();
-    with_entity(world, receiver, |e| e.part_ops.push((tag, hidden)))
-}
-
 fn team_key(args: &[Value]) -> Result<String, String> {
     let team = string(args, 0)?;
     match team.as_str() {
@@ -709,7 +730,9 @@ fn weapon_facts(
     let index = frame
         .weapon_index_by_script_name(&name)
         .ok_or_else(|| format!("unknown weapon '{name}'"))?;
-    Ok(frame.weapon_combat_row(index).unwrap_or_default())
+    Ok(frame
+        .weapon_combat_row(index)
+        .unwrap_or_else(weapon_iw4::WeaponCombatFacts::default))
 }
 
 const WEAPON_TYPES: &[&str] = &["bullet", "grenade", "projectile", "riotshield"];
@@ -772,7 +795,10 @@ fn register_entities(registry: &mut NativeRegistry) {
     use Namespace::{Function, Method};
 
     registry.register(Function, "getent", |world, _, args| {
-        single(matching_entities(world, args)?, "getent")
+        single(
+            matching_entities(world, args, QueryScope::Entities)?,
+            "getent",
+        )
     });
     registry.register(Function, "getentarray", |world, _, args| {
         let ids = if args.is_empty() {
@@ -780,27 +806,32 @@ fn register_entities(registry: &mut NativeRegistry) {
             runtime
                 .entities
                 .iter()
-                .filter(|(_, e)| e.kind != EntityKind::HudElem)
+                .filter(|(_, e)| QueryScope::Entities.contains(e))
                 .map(|(id, _)| *id)
                 .collect()
         } else {
-            matching_entities(world, args)?
+            matching_entities(world, args, QueryScope::Entities)?
         };
         objects(world, ids)
     });
     registry.register(Function, "getvehiclenode", |world, _, args| {
-        let ids = matching_entities(world, args)?;
         single(
-            classname_prefix(world, ids, "info_vehicle_node"),
+            matching_entities(world, args, QueryScope::VehicleNodes)?,
             "getvehiclenode",
         )
     });
     registry.register(Function, "getvehiclenodearray", |world, _, args| {
-        let ids = matching_entities(world, args)?;
-        let ids = classname_prefix(world, ids, "info_vehicle_node");
+        let ids = matching_entities(world, args, QueryScope::VehicleNodes)?;
         objects(world, ids)
     });
-    registry.register(Function, "isspawner", |_, _, _| Ok(Value::Int(0)));
+    registry.register(Function, "isspawner", |world, _, args| {
+        let value = arg(args, 0)?;
+        let runtime = world.resource::<RoundScript>();
+        let spawner = runtime.entity(value).is_some_and(|(id, entity)| {
+            runtime.spawners.contains_key(&id) || entity.kind == EntityKind::VehicleSpawner
+        });
+        Ok(Value::Int(i32::from(spawner)))
+    });
     registry.register(Function, "getteamplayersalive", |world, _, args| {
         let team = team_key(args)?;
         Ok(Value::Int(super::super::players::alive_on_team(
@@ -825,6 +856,26 @@ fn register_entities(registry: &mut NativeRegistry) {
         };
         Ok(Value::Int((health > 0.0).into()))
     });
+    registry.register(Method, "getnormalhealth", |world, receiver, _| {
+        let id = entity_id(world, receiver)?;
+        let mut values = [0.0; 2];
+        for (index, field) in ["health", "maxhealth"].into_iter().enumerate() {
+            values[index] = match super::super::players::entity_field(world, id, field) {
+                Value::Int(value) => value as f32,
+                Value::Float(value) if value.is_finite() => value,
+                Value::Undefined => 0.0,
+                _ => return Err(format!("entity {field} must be a finite number")),
+            };
+        }
+        let [health, maximum] = values;
+        // Normalized health is a ratio, not a clamp: scripts can author health
+        // above the usual maximum. Entities without a maximum report zero.
+        Ok(Value::Float(if maximum == 0.0 {
+            0.0
+        } else {
+            health / maximum
+        }))
+    });
     registry.register(Method, "piecestage", |world, receiver, args| {
         let piece = int(args, 0)?;
         let stage = int(args, 1)?;
@@ -834,7 +885,7 @@ fn register_entities(registry: &mut NativeRegistry) {
         Ok(Value::Int(i32::from(
             piece >= 0
                 && stage >= 0
-                && crate::t5_destructible::stage_matches(
+                && crate::model_behaviors::stage_matches(
                     &crate::frame::FrameWorld::from_world(world),
                     crate::AuthorityModelOwner::ScriptModel(target),
                     piece as usize,
@@ -861,6 +912,7 @@ fn register_entities(registry: &mut NativeRegistry) {
                 amount,
                 origin,
                 attacker,
+                attacker_entity: None,
                 inflictor: Some(target),
                 means: "MOD_EXPLOSIVE",
                 weapon: 0,
@@ -888,15 +940,21 @@ fn register_entities(registry: &mut NativeRegistry) {
         } else {
             None
         };
+        let id = runtime(world).create_entity(EntityKind::Spawned, &classname)?;
         let presence = if matches!(classname.as_str(), "script_model" | "script_origin") {
-            Some(super::super::presence::spawn_presence(world, origin)?)
+            match super::super::presence::spawn_presence(world, origin) {
+                Ok(presence) => Some(presence),
+                Err(error) => {
+                    runtime(world).delete_entity(id);
+                    return Err(error);
+                }
+            }
         } else {
             None
         };
         let number =
             presence.and_then(|id| crate::frame::FrameWorld::from_world(world).gentity_number(id));
         let mut runtime = runtime(world);
-        let id = runtime.create_entity(EntityKind::Spawned, &classname)?;
         runtime.set_object_field(id, "origin", Value::Vector(origin));
         runtime.set_object_field(id, "angles", Value::Vector(ZERO));
         runtime.set_object_field(id, "spawnflags", Value::Int(flags));
@@ -965,12 +1023,73 @@ fn register_placement(registry: &mut NativeRegistry) {
     });
     registry.register(Method, "gettagorigin", |world, receiver, args| {
         let id = entity_id(world, receiver)?;
-        let tag = string(args, 0)?;
+        let tag = string(args, 0)?.to_ascii_lowercase();
+        if runtime(world).player_client(id).is_some()
+            && matches!(runtime(world).object_field(id, "model"), Value::String(_))
+        {
+            if let Some((position, _)) = super::super::presence::tag_world(world, id, &tag) {
+                return Ok(Value::Vector(position));
+            }
+            if tag != "tag_origin" {
+                return Err(format!("tag '{tag}' has no retained player bone"));
+            }
+        }
         let origin = vector_field(world, id, "origin");
-        let offset = super::super::presence::tag_offset(world, id, &tag).unwrap_or(ZERO);
+        let offset = match super::super::presence::tag_lookup(world, id, &tag) {
+            Some(Some(offset)) => offset,
+            Some(None) if !tag.eq_ignore_ascii_case("tag_origin") => {
+                return Err(format!("tag '{tag}' does not exist on entity"));
+            }
+            _ => ZERO,
+        };
         let axis = math_iw4::angles_to_axis(vector_field(world, id, "angles"));
         Ok(Value::Vector(std::array::from_fn(|i| {
             origin[i] + axis[0][i] * offset[0] + axis[1][i] * offset[1] + axis[2][i] * offset[2]
+        })))
+    });
+    registry.register(
+        Namespace::Function,
+        "sethalfresparticles",
+        |world, _, args| {
+            if args.len() != 1 {
+                return Err("SetHalfResParticles expects one integer".into());
+            }
+            world
+                .resource_mut::<RoundScript>()
+                .engine
+                .half_res_particles = int(args, 0)? != 0;
+            Ok(Value::Undefined)
+        },
+    );
+    registry.register(Method, "getshootatpos", |world, receiver, _| {
+        let id = entity_id(world, receiver)?;
+        let origin = vector_field(world, id, "origin");
+        if let Some(client) = runtime(world).player_client(id) {
+            let frame = crate::frame::FrameWorld::from_world(world);
+            if let Some(view) = frame
+                .client_meta(crate::ClientId(client))
+                .and_then(|meta| meta.linked_weapon_view)
+            {
+                return Ok(Value::Vector(view.origin));
+            }
+            let ps = frame
+                .player(crate::ClientId(client))
+                .ok_or("player has no physical state")?;
+            return Ok(Value::Vector([
+                ps.origin[0],
+                ps.origin[1],
+                ps.origin[2] + ps.view_height_current,
+            ]));
+        }
+        if let Some((position, _)) = super::super::presence::tag_world(world, id, "tag_eye") {
+            return Ok(Value::Vector(position));
+        }
+        if runtime(world).actors.contains_key(&id) {
+            return Ok(Value::Vector(add(origin, [0.0, 0.0, 64.0])));
+        }
+        let (mins, maxs) = super::super::triggers::entity_bounds(world, id);
+        Ok(Value::Vector(std::array::from_fn(|i| {
+            origin[i] + (mins[i] + maxs[i]) * 0.5
         })))
     });
     registry.register(Method, "geteye", |world, receiver, _| {
@@ -991,6 +1110,23 @@ fn register_placement(registry: &mut NativeRegistry) {
         };
         Ok(Value::Vector(add(origin, [0.0, 0.0, height])))
     });
+    registry.register(Method, "getcentroid", |world, receiver, _| {
+        let id = entity_id(world, receiver)?;
+        super::super::presence::settle_collision(world);
+        let origin = origin_of(world, receiver)?;
+        let (mins, maxs) = super::super::triggers::entity_bounds(world, id);
+        let angles = if runtime(world).player_client(id).is_some() {
+            // The player's body remains upright when the view pitches.
+            [0.0; 3]
+        } else {
+            vector_field(world, id, "angles")
+        };
+        let axis = math_iw4::angles_to_axis(angles);
+        let midpoint: [f32; 3] = std::array::from_fn(|i| (mins[i] + maxs[i]) * 0.5);
+        Ok(Value::Vector(std::array::from_fn(|i| {
+            origin[i] + (0..3).map(|j| axis[j][i] * midpoint[j]).sum::<f32>()
+        })))
+    });
     registry.register(Method, "getpointinbounds", |world, receiver, args| {
         let id = entity_id(world, receiver)?;
         let origin = vector_field(world, id, "origin");
@@ -1008,16 +1144,6 @@ fn register_placement(registry: &mut NativeRegistry) {
             origin[i] + (maxs[i] + mins[i]) * 0.5
         })))
     });
-    registry.register(Method, "setlookattext", |world, receiver, args| {
-        let id = entity_id(world, receiver)?;
-        let text = string(args, 0)?;
-        let mut runtime = world.resource_mut::<RoundScript>();
-        runtime.set_object_field(id, "lookattext", Value::string(&text));
-        if let Some(sub) = args.get(1) {
-            runtime.set_object_field(id, "lookatsubtext", sub.clone());
-        }
-        Ok(Value::Undefined)
-    });
     registry.register(Method, "stoplookat", |world, receiver, _| {
         let id = entity_id(world, receiver)?;
         let mut runtime = world.resource_mut::<RoundScript>();
@@ -1027,7 +1153,7 @@ fn register_placement(registry: &mut NativeRegistry) {
     });
     registry.register(Method, "gettagangles", |world, receiver, args| {
         let id = entity_id(world, receiver)?;
-        let tag = string(args, 0)?;
+        let tag = string(args, 0)?.to_ascii_lowercase();
         match super::super::presence::tag_world(world, id, &tag) {
             Some((_, axis)) => Ok(Value::Vector(math_iw4::axis_to_angles(axis))),
             None if tag.eq_ignore_ascii_case("tag_origin") => {
@@ -1045,6 +1171,9 @@ fn register_placement(registry: &mut NativeRegistry) {
                     .map_or(ZERO, |ps| ps.velocity),
             ));
         }
+        if let Some(actor) = world.resource::<RoundScript>().actors.get(&id) {
+            return Ok(Value::Vector(actor.motion.velocity));
+        }
         let now = now_ms(world);
         Ok(Value::Vector(
             world.resource::<Mechanics>().velocity(id, now),
@@ -1058,15 +1187,74 @@ fn register_placement(registry: &mut NativeRegistry) {
     });
 }
 
+fn set_aim_assist(world: &mut World, receiver: &Value, enabled: bool) -> Result<Value, String> {
+    let id = entity_id(world, receiver)?;
+    let mut runtime = runtime(world);
+    if runtime.profile != asset_core::RuntimeProfile::Campaign {
+        return Err("aim assist: requires campaign entity contract".into());
+    }
+    let entity = runtime.entities.get_mut(&id).unwrap();
+    if !matches!(
+        entity.classname.as_ref(),
+        "script_model" | "script_brushmodel"
+    ) {
+        return Err("aim assist: entity is not a script mover".into());
+    }
+    entity.aim_assist = enabled;
+    Ok(Value::Undefined)
+}
+
 fn register_appearance(registry: &mut NativeRegistry) {
+    registry.register(
+        Namespace::Method,
+        "enableaimassist",
+        |world, receiver, _| set_aim_assist(world, receiver, true),
+    );
+    registry.register(
+        Namespace::Method,
+        "disableaimassist",
+        |world, receiver, _| set_aim_assist(world, receiver, false),
+    );
+    registry.register(
+        Namespace::Method,
+        "startusingheroonlylighting",
+        |world, receiver, _| {
+            with_entity(world, receiver, |entity| entity.hero_only_lighting = true)
+        },
+    );
+    registry.register(
+        Namespace::Method,
+        "stopusingheroonlylighting",
+        |world, receiver, _| {
+            with_entity(world, receiver, |entity| entity.hero_only_lighting = false)
+        },
+    );
+    registry.register(
+        Namespace::Method,
+        "startusinglessfrequentlighting",
+        |world, receiver, _| {
+            with_entity(world, receiver, |entity| {
+                entity.less_frequent_lighting = true
+            })
+        },
+    );
+    registry.register(
+        Namespace::Method,
+        "stopusinglessfrequentlighting",
+        |world, receiver, _| {
+            with_entity(world, receiver, |entity| {
+                entity.less_frequent_lighting = false
+            })
+        },
+    );
     use Namespace::Method;
 
     registry.register(Method, "setmodel", |world, receiver, args| {
         let model = string(args, 0)?;
         let id = entity_id(world, receiver)?;
         runtime(world).set_object_field(id, "model", Value::string(&model));
-        runtime(world).new_models.push(id);
         crate::script::host::players::dress_insertion_glow(world, id, &model);
+        super::super::model_state::player_appearance::sync_receiver(world, id);
         Ok(Value::Undefined)
     });
     registry.register(
@@ -1090,7 +1278,7 @@ fn register_appearance(registry: &mut NativeRegistry) {
             let entity = runtime.entities.get_mut(&id).unwrap();
             entity.brush = Some(brush);
             let presence = entity.presence;
-            drop(runtime);
+
             if let Some(presence) = presence
                 && let Some(row) =
                     crate::frame::FrameWorld::from_world(world).collision_owner_mut(presence)
@@ -1108,12 +1296,14 @@ fn register_appearance(registry: &mut NativeRegistry) {
         with_entity(world, receiver, |e| {
             e.hidden = true;
             e.shown_to = 0;
+            e.hidden_from = 0;
         })
     });
     registry.register(Method, "show", |world, receiver, _| {
         with_entity(world, receiver, |e| {
             e.hidden = false;
             e.shown_to = 0;
+            e.hidden_from = 0;
         })
     });
     registry.register(Method, "showtoplayer", |world, receiver, args| {
@@ -1186,6 +1376,7 @@ fn slide_object(world: &mut World, receiver: &Value) -> Result<u64, String> {
 
 fn register_motion(registry: &mut NativeRegistry) {
     use Namespace::Method;
+    super::super::entity_links::register(registry);
 
     registry.register(Method, "linkto", |world, receiver, args| {
         if let Some(client) = runtime(world).player_client_of(receiver) {
@@ -1210,20 +1401,18 @@ fn register_motion(registry: &mut NativeRegistry) {
         }
         let parent = entity_id(world, arg(args, 0)?)?;
         let id = entity_id(world, receiver)?;
-        if parent == id {
-            return Err("cannot link an entity to itself".into());
-        }
+        super::super::entity_links::require_enabled(world, id)?;
+        super::super::players::links::validate_parent(world, id, parent)?;
         let tag = optional(args, 1, string)?
-            .filter(|tag| !tag.is_empty() && !tag.eq_ignore_ascii_case("tag_origin"))
+            .map(|tag| tag.to_ascii_lowercase())
+            .filter(|tag| !tag.is_empty())
             .map(Arc::<str>::from);
+        let (parent_origin, parent_axis) =
+            super::super::players::link_parent_pose(world, parent, tag.as_deref())?;
         let (origin, angles) = match optional(args, 2, vector)? {
             Some(offset) => (offset, optional(args, 3, vector)?.unwrap_or(ZERO)),
             None => {
-                let parent_axis = math_iw4::angles_to_axis(vector_field(world, parent, "angles"));
-                let delta = sub(
-                    vector_field(world, id, "origin"),
-                    vector_field(world, parent, "origin"),
-                );
+                let delta = sub(vector_field(world, id, "origin"), parent_origin);
                 let child_axis = math_iw4::angles_to_axis(vector_field(world, id, "angles"));
                 (
                     std::array::from_fn(|i| dot(delta, parent_axis[i])),
@@ -1234,14 +1423,17 @@ fn register_motion(registry: &mut NativeRegistry) {
                 )
             }
         };
-        let tag_offset = tag.is_none().then_some(ZERO);
+        if !origin.into_iter().chain(angles).all(f32::is_finite) {
+            return Err("link offsets must be finite".into());
+        }
         runtime(world).entities.get_mut(&id).unwrap().linked_to =
             Some(super::super::entities::Link {
                 parent,
                 origin,
                 angles,
                 tag,
-                tag_offset,
+                scripted_parent: None,
+                blend: None,
             });
         Ok(Value::Undefined)
     });
@@ -1481,36 +1673,49 @@ fn register_attachments(registry: &mut NativeRegistry) {
 
     registry.register(Method, "attach", |world, receiver, args| {
         let model: Arc<str> = string(args, 0)?.into();
-        let tag: Arc<str> = optional(args, 1, string)?.unwrap_or_default().into();
+        let tag: Arc<str> = optional(args, 1, string)?.unwrap_or(String::new()).into();
         let id = entity_id(world, receiver)?;
-        let mut runtime = runtime(world);
-        let entity = runtime.entities.get_mut(&id).unwrap();
-        if entity
-            .attachments
-            .iter()
-            .any(|(m, t)| *m == model && *t == tag)
         {
-            return Err(format!("model '{model}' already attached to tag '{tag}'"));
+            let mut runtime = runtime(world);
+            let entity = runtime.entities.get_mut(&id).unwrap();
+            if entity
+                .attachments
+                .iter()
+                .any(|(m, t)| *m == model && *t == tag)
+            {
+                return Err(format!("model '{model}' already attached to tag '{tag}'"));
+            }
+            entity.attachments.push((model, tag));
         }
-        entity.attachments.push((model, tag));
+        super::super::model_state::player_appearance::sync_receiver(world, id);
         Ok(Value::Undefined)
     });
     registry.register(Method, "detach", |world, receiver, args| {
         let model: Arc<str> = string(args, 0)?.into();
-        let tag: Option<Arc<str>> = optional(args, 1, string)?.map(Into::into);
+        let tag = if args.len() > 1 {
+            string(args, 1)?
+        } else {
+            String::new()
+        };
         let id = entity_id(world, receiver)?;
-        let mut runtime = runtime(world);
-        let entity = runtime.entities.get_mut(&id).unwrap();
-        let index = entity
-            .attachments
-            .iter()
-            .position(|(m, t)| *m == model && tag.as_ref().is_none_or(|tag| t == tag))
-            .ok_or_else(|| format!("model '{model}' is not attached"))?;
-        entity.attachments.remove(index);
+        {
+            let mut runtime = runtime(world);
+            let entity = runtime.entities.get_mut(&id).unwrap();
+            let index = entity
+                .attachments
+                .iter()
+                .position(|(m, t)| m.eq_ignore_ascii_case(&model) && t.eq_ignore_ascii_case(&tag))
+                .ok_or_else(|| format!("model '{model}' is not attached"))?;
+            entity.attachments.remove(index);
+        }
+        super::super::model_state::player_appearance::sync_receiver(world, id);
         Ok(Value::Undefined)
     });
     registry.register(Method, "detachall", |world, receiver, _| {
-        with_entity(world, receiver, |e| e.attachments.clear())
+        let result = with_entity(world, receiver, |e| e.attachments.clear())?;
+        let object = entity_id(world, receiver)?;
+        super::super::model_state::player_appearance::sync_receiver(world, object);
+        Ok(result)
     });
     registry.register(Method, "getattachsize", |world, receiver, _| {
         let id = entity_id(world, receiver)?;
@@ -1585,18 +1790,12 @@ fn register_sound_and_fx(registry: &mut NativeRegistry) {
     registry.register(Method, "stoploopsound", |world, receiver, _| {
         with_entity(world, receiver, |e| e.loop_sound = None)
     });
-    for name in ["playsound", "playsoundasmaster"] {
-        registry.register(Method, name, |world, receiver, args| {
-            entity_id(world, receiver)?;
-            let alias = string(args, 0)?;
-            let origin = origin_of(world, receiver)?;
-            play_sound_at(world, origin, &alias)?;
-            if args.len() != 1 {
-                return Err("expected one sound alias argument".into());
-            }
-            Ok(Value::Undefined)
-        });
-    }
+    registry.register(Method, "playsound", |world, receiver, args| {
+        super::super::audio::waits::play(world, receiver, args, false)
+    });
+    registry.register(Method, "playsoundasmaster", |world, receiver, args| {
+        super::super::audio::waits::play(world, receiver, args, true)
+    });
     registry.register(Method, "playsoundtoplayer", |world, receiver, args| {
         let alias = string(args, 0)?;
         let client = super::player::player(world, arg(args, 1)?)?;
@@ -1655,12 +1854,7 @@ fn register_entity_state(registry: &mut NativeRegistry) {
         let on = int(args, 0)? != 0;
         with_entity(world, receiver, |e| e.can_radius_damage = on)
     });
-    registry.register(Method, "hidepart", |world, receiver, args| {
-        part(world, receiver, args, true)
-    });
-    registry.register(Method, "showpart", |world, receiver, args| {
-        part(world, receiver, args, false)
-    });
+    super::super::model_parts::register(registry);
     registry.register(Method, "scriptmodelplayanim", |world, receiver, args| {
         let clip = match arg(args, 0)? {
             Value::Animation { name, .. } => name.clone(),
@@ -1685,20 +1879,69 @@ fn register_entity_state(registry: &mut NativeRegistry) {
 fn register_traces(registry: &mut NativeRegistry) {
     use Namespace::{Function, Method};
 
+    registry.register(Function, "getgroundposition", |world, _, args| {
+        let origin = vector(args, 0)?;
+        let radius = float(args, 1)?;
+        let depth = if args.len() > 2 {
+            float(args, 2)?
+        } else {
+            DEFAULT_GROUND_SEARCH_DEPTH
+        };
+        let lift = if args.len() > 3 {
+            float(args, 3)?
+        } else {
+            radius.max(MIN_GROUND_SEARCH_LIFT)
+        };
+        if !origin
+            .into_iter()
+            .chain([radius, depth, lift])
+            .all(f32::is_finite)
+            || radius < 0.0
+        {
+            return Err(
+                "ground position requires finite parameters and a nonnegative radius".into(),
+            );
+        }
+        let start = [origin[0], origin[1], origin[2] + lift];
+        let end = [origin[0], origin[1], origin[2] - depth];
+        let mins = [-radius, -radius, 0.0];
+        let maxs = [radius, radius, 2.0 * radius];
+        if !start.into_iter().chain(end).chain(maxs).all(f32::is_finite)
+            || !(end[2] - start[2]).is_finite()
+        {
+            return Err("ground position search bounds must be finite".into());
+        }
+        let hit = trace(world, start, end, mins, maxs, MASK_GROUND_POSITION);
+        if hit.startsolid != 0 {
+            return Err("ground position check starts in solid".into());
+        }
+        Ok(Value::Vector(lerp(start, end, hit.fraction)))
+    });
+
     registry.register(Function, "bullettrace", |world, _, args| {
         let (start, end) = (vector(args, 0)?, vector(args, 1)?);
         let mask = shot_mask(args)?;
         let ignore = trace_ignore(world, args.get(3));
         let outcome = entity_trace(world, start, end, mask, ignore);
-        let (fraction, normal, collider) = match outcome {
+        let (fraction, position, normal, collider) = match outcome {
             TraceOutcome::Hit {
                 fraction,
+                end,
                 normal,
                 collider,
-                ..
-            } => (fraction, normal, Some(collider)),
-            TraceOutcome::StartSolid { collider, .. } => (0.0, ZERO, collider),
-            _ => (1.0, ZERO, None),
+            } => (fraction, end, normal, Some(collider)),
+            TraceOutcome::StartSolid { collider, end } => (0.0, end, ZERO, collider),
+            TraceOutcome::Miss { end } => (1.0, end, ZERO, None),
+            TraceOutcome::Invalid { reason } => {
+                return Err(match reason {
+                    crate::TraceInvalidReason::NonFiniteInput => "trace coordinates must be finite",
+                    crate::TraceInvalidReason::PortalLimit => "trace exceeds portal crossing limit",
+                    crate::TraceInvalidReason::WorldUnavailable => {
+                        "trace starts in an unavailable world"
+                    }
+                }
+                .into());
+            }
         };
         let (normal, surface) = match collider {
             Some(collider) if fraction < 1.0 => (normal, surface_name(collider)),
@@ -1713,7 +1956,7 @@ fn register_traces(registry: &mut NativeRegistry) {
             world,
             vec![
                 ("fraction", Value::Float(fraction)),
-                ("position", Value::Vector(lerp(start, end, fraction))),
+                ("position", Value::Vector(position)),
                 ("entity", entity),
                 ("normal", Value::Vector(normal)),
                 ("surfacetype", Value::string(surface)),
@@ -1729,6 +1972,24 @@ fn register_traces(registry: &mut NativeRegistry) {
             TraceOutcome::Miss { .. }
         );
         Ok(Value::Int(passed.into()))
+    });
+    registry.register(Function, "sighttracepassed", |world, _, args| {
+        let (start, end) = (vector(args, 0)?, vector(args, 1)?);
+        let mask = if int(args, 2)? != 0 {
+            MASK_SIGHT_FULL
+        } else {
+            MASK_SIGHT_REDUCED
+        };
+        let ignored = args.get(3).and_then(|value| match value {
+            Value::Object(id) if world.resource::<RoundScript>().entities.contains_key(id) => {
+                Some(*id)
+            }
+            _ => None,
+        });
+        let hit = super::super::trace::sight(world, start, end, mask, ignored.as_slice());
+        Ok(Value::Int(i32::from(
+            hit.fraction == 1. && hit.startsolid == 0 && hit.allsolid == 0,
+        )))
     });
     registry.register(Function, "physicstrace", |world, _, args| {
         let (start, end) = (vector(args, 0)?, vector(args, 1)?);
@@ -2056,23 +2317,23 @@ fn register_match(registry: &mut NativeRegistry) {
         Ok(Value::Undefined)
     });
     registry.register(Function, "hideonclient", |world, _, args| {
-        if !args.is_empty() {
-            if let Ok(id) = entity_id(world, &args[0]) {
-                let client_num = if args.len() > 1 {
-                    if let Ok(c_id) = entity_id(world, &args[1]) {
-                        world
-                            .resource::<RoundScript>()
-                            .entities
-                            .get(&c_id)
-                            .map_or(0, |e| e.number)
-                    } else {
-                        0
-                    }
+        if !args.is_empty()
+            && let Ok(id) = entity_id(world, &args[0])
+        {
+            let client_num = if args.len() > 1 {
+                if let Ok(c_id) = entity_id(world, &args[1]) {
+                    world
+                        .resource::<RoundScript>()
+                        .entities
+                        .get(&c_id)
+                        .map_or(0, |e| e.number)
                 } else {
                     0
-                };
-                runtime(world).set_object_field(id, "hide_on_client", Value::Int(client_num));
-            }
+                }
+            } else {
+                0
+            };
+            runtime(world).set_object_field(id, "hide_on_client", Value::Int(client_num));
         }
         Ok(Value::Undefined)
     });
@@ -2148,7 +2409,7 @@ fn register_match(registry: &mut NativeRegistry) {
             return Err("exitlevel already called".into());
         }
         state.exit_level = true;
-        drop(state);
+
         signal(world, EXIT_LEVEL)
     });
     registry.register(Function, "map_restart", |world, _, args| {
@@ -2267,7 +2528,7 @@ fn register_level(registry: &mut NativeRegistry) {
         };
         let now = crate::level_time_ms(world.resource::<crate::step::StepRequest>().tick);
         let mut runtime = runtime(world);
-        let id = runtime.create_entity(EntityKind::Spawned, "script_model")?;
+        let id = runtime.create_entity(EntityKind::Fx, "fxentity")?;
         runtime.set_object_field(id, "origin", Value::Vector(origin));
         runtime.engine.effects.insert(
             id,
@@ -2418,6 +2679,15 @@ fn register_weapon_facts(registry: &mut NativeRegistry) {
                 .into(),
         ))
     });
+    registry.register(Function, "weaponhasthermalscope", |world, _, args| {
+        let name = string(args, 0)?;
+        let frame = crate::frame::FrameWorld::from_world(world);
+        let weapon = frame
+            .weapon_index_by_script_name(&name)
+            .filter(|&weapon| weapon != 0)
+            .ok_or_else(|| format!("unknown weapon '{name}'"))?;
+        Ok(Value::Int(frame.weapon_has_thermal_scope(weapon).into()))
+    });
     registry.register(Function, "weaponclass", |world, _, args| {
         Ok(enum_name(
             WEAPON_CLASSES,
@@ -2461,6 +2731,21 @@ fn register_weapon_facts(registry: &mut NativeRegistry) {
 }
 
 fn register_damage(registry: &mut NativeRegistry) {
+    registry.register(Namespace::Function, "isexplosivedamagemod", |_, _, args| {
+        let Value::String(name) = arg(args, 0)? else {
+            return Err("damage MOD must be a string".into());
+        };
+        Ok(Value::Int(i32::from(matches!(
+            &**name,
+            "MOD_EXPLOSIVE_BULLET"
+                | "MOD_GRENADE"
+                | "MOD_GRENADE_SPLASH"
+                | "MOD_PROJECTILE"
+                | "MOD_PROJECTILE_SPLASH"
+                | "MOD_EXPLOSIVE"
+        ))))
+    });
+
     use Namespace::{Function, Method};
 
     registry.register(Function, "setplayerignoreradiusdamage", |world, _, args| {
@@ -2496,7 +2781,7 @@ fn register_refused(registry: &mut NativeRegistry) {
         => "animation data is not loaded in the simulation");
     refused!(Function: "getweaponmodel", "getweaponhidetags"
         => "weapon models are not loaded in the simulation");
-    refused!(Method: "getcorpseanim", "startragdoll", "isragdoll" => "receiver is not a corpse");
+    refused!(Method: "getcorpseanim", "startragdoll" => "receiver is not a corpse");
     refused!(Method: "itemweaponsetammo" => "receiver is not a weapon item");
     refused!(Method: "allowjump", "allowspectateteam", "anyammoforweaponmodes", "attachshieldmodel",
         "attackbuttonpressed", "beginlocationselection", "buttonpressed", "cameralinkto",

@@ -39,7 +39,7 @@ pub fn update_ads_frac(ps: &mut PlayerState, msec: i32, context: AdsFracContext)
     }
 
     let ws = ps.weaponstate_primary;
-    if matches!(ws, 0xd | 0xe | 0xf) {
+    if matches!(ws, 0xd..=0xf) {
         ps.f_weapon_pos_frac = 0.0;
         ps.ads_delay_time = 0;
         return;

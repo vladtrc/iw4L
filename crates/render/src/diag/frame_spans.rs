@@ -15,30 +15,27 @@ use bevy::prelude::*;
 /// rather than per system: the process-wide count since the previous bookend.
 /// It is emitted where the clock closes so the count and the frame it belongs
 /// to are the same interval.
-fn bookend_wall_frame(mut wall_open: Local<bool>, mut allocations: Local<Option<u64>>) {
-    if *wall_open {
-        perf::Span::FramesWallFrameMs.end();
-    }
-    // Only when the allocator is actually counting: otherwise the total is a
-    // constant zero and the delta would publish "no allocations this frame",
-    // which is a different claim from "nobody counted".
-    if perf::stats::enabled() && diag::counting_enabled() {
+fn bookend_wall_frame(mut allocations: Local<Option<u64>>) {
+    perf::frames::advance();
+    if perf::recording() && diag::counting_enabled() {
         let total = diag::process_allocations().process_allocations;
         if let Some(previous) = *allocations {
-            perf::Counter::CounterProcessAllocations.emit(total.saturating_sub(previous) as f64);
+            perf::counter!(
+                "process_allocations",
+                "iw4l.frame",
+                total.saturating_sub(previous) as f64
+            );
         }
         *allocations = Some(total);
     }
-    perf::Span::FramesWallFrameMs.begin();
-    *wall_open = true;
 }
 
 fn begin_postupdate() {
-    perf::Span::FramesPostupdateMs.begin();
+    perf::span!("PostUpdate", "iw4l.frame", begin);
 }
 
 fn end_postupdate() {
-    perf::Span::FramesPostupdateMs.end();
+    perf::span!("PostUpdate", "iw4l.frame", end);
 }
 
 /// The clock and the three schedule spans, registered together because their
@@ -57,9 +54,9 @@ pub(crate) fn register_frame_spans(app: &mut App) {
 }
 
 fn begin_preupdate() {
-    perf::Span::FramesPreupdateMs.begin();
+    perf::span!("PreUpdate", "iw4l.frame", begin);
 }
 
 fn end_preupdate() {
-    perf::Span::FramesPreupdateMs.end();
+    perf::span!("PreUpdate", "iw4l.frame", end);
 }

@@ -5,6 +5,7 @@ use render_scene::XModelSurfaceDraw;
 
 pub(super) struct ThermalBodySelection {
     clients: Vec<u32>,
+    entities: Vec<u32>,
     ordinal: Result<u32, String>,
 }
 
@@ -22,6 +23,13 @@ impl ThermalBodySelection {
             .filter(|(_, ps)| ps.perks[0] & playerstate_iw4::PERK_COLDBLOODED == 0)
             .map(|(client, _)| client.0)
             .collect();
+        let entities = snapshot
+            .filter(|_| effects.ready && effects.thermal_active)
+            .into_iter()
+            .flat_map(|snapshot| &snapshot.meta.script_movers)
+            .filter(|mover| mover.thermal_draw)
+            .filter_map(|mover| u32::try_from(mover.state.number).ok())
+            .collect();
         let mut name = material_token(snapshot.map_or("", |snapshot| {
             &snapshot.meta.objectives.thermal_body_material
         }));
@@ -32,13 +40,21 @@ impl ThermalBodySelection {
             .ordinal_for_material_name(&name)
             .map(|ordinal| ordinal.get())
             .ok_or(name);
-        Self { clients, ordinal }
+        Self {
+            clients,
+            entities,
+            ordinal,
+        }
     }
 
     pub(super) fn for_draw(&self, draw: &XModelSurfaceDraw) -> Option<&Result<u32, String>> {
-        draw.body_client
-            .filter(|client| self.clients.contains(client))
-            .map(|_| &self.ordinal)
+        (draw
+            .body_client
+            .is_some_and(|client| self.clients.contains(&client))
+            || draw
+                .scene_entnum
+                .is_some_and(|entity| self.entities.contains(&entity)))
+        .then_some(&self.ordinal)
     }
 }
 

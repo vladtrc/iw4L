@@ -75,7 +75,7 @@ pub fn model_lighting_tile_texels(
         return *tile;
     };
     let mut painted = [0u8; MODEL_LIGHTING_TILE_BYTES];
-    for texel in painted.chunks_exact_mut(4) {
+    for texel in painted.as_chunks_mut::<4>().0 {
         texel.copy_from_slice(&flat);
     }
     painted

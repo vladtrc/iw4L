@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use assets::LoadingScreen;
 use bevy::asset::RenderAssetUsages;
+use bevy::ecs::system::SystemParam;
 use bevy::image::Image;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
@@ -44,6 +45,9 @@ pub struct CaptureRequest {
     pub path: PathBuf,
 
     pub exit_after_capture: bool,
+
+    /// Capture whatever is on screen, the loading screen too.
+    pub any_screen: bool,
 }
 
 impl CaptureRequest {
@@ -52,6 +56,7 @@ impl CaptureRequest {
         Some(CaptureRequest {
             path: PathBuf::from(path),
             exit_after_capture: false,
+            any_screen: false,
         })
     }
 }
@@ -235,6 +240,12 @@ impl CaptureQueue {
         true
     }
 
+    /// Whether the frames have been fit to capture long enough to trust one:
+    /// the same wait a queued screenshot takes before it is read back.
+    pub fn settled(&self) -> bool {
+        self.settled_frames >= CAPTURE_SETTLE_FRAMES
+    }
+
     pub fn owed_at_exit(&self) -> (usize, usize) {
         (self.pending.len(), self.writing)
     }
@@ -293,34 +304,52 @@ fn emptied_readback() -> Image {
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[derive(SystemParam)]
+pub(crate) struct CaptureReadiness<'w> {
+    screen: Option<Res<'w, AppScreen>>,
+    loading: Option<Res<'w, LoadingScreen>>,
+    has_world: Option<Res<'w, State<frame::MatchScope>>>,
+    stats: Option<Res<'w, DpvsFrameStats>>,
+    working: Option<Res<'w, render_gpu::ColourWorkingSet>>,
+}
+
+impl CaptureReadiness<'_> {
+    fn sample(self) -> (CaptureFrameFacts, bool) {
+        let Self {
+            screen,
+            loading,
+            has_world,
+            stats,
+            working,
+        } = self;
+        let submitted_batches = stats.as_ref().map(|s| s.submitted_batches).unwrap_or(0);
+        let g0_world = stats
+            .as_ref()
+            .map(|s| s.g0_world_surfs.len() as u32)
+            .unwrap_or(0);
+        let facts = CaptureFrameFacts {
+            screen: screen.map(|s| *s).unwrap_or(frame::AppScreen::MainMenu),
+            loading_overlay: loading.is_some(),
+            has_world: has_world
+                .map(|w| *w.get() == frame::MatchScope::Live)
+                .unwrap_or(false),
+            submitted_batches,
+            g0_world,
+        };
+
+        let pipelines_ready = !facts.has_world
+            || working.is_some_and(|set| set.hits > 0 && set.pipeline_not_ready == 0);
+        (facts, pipelines_ready)
+    }
+}
+
 pub(crate) fn capture_frame(
     mut commands: Commands,
     mut queue: ResMut<CaptureQueue>,
-    screen: Option<Res<AppScreen>>,
-    loading: Option<Res<LoadingScreen>>,
-    has_world: Option<Res<State<frame::MatchScope>>>,
-    stats: Option<Res<DpvsFrameStats>>,
-    working: Option<Res<render_gpu::ColourWorkingSet>>,
+    readiness: CaptureReadiness,
     mut exit: MessageWriter<AppExit>,
 ) {
-    let submitted_batches = stats.as_ref().map(|s| s.submitted_batches).unwrap_or(0);
-    let g0_world = stats
-        .as_ref()
-        .map(|s| s.g0_world_surfs.len() as u32)
-        .unwrap_or(0);
-    let facts = CaptureFrameFacts {
-        screen: screen.map(|s| *s).unwrap_or_default(),
-        loading_overlay: loading.is_some(),
-        has_world: has_world
-            .map(|w| *w.get() == frame::MatchScope::Live)
-            .unwrap_or(false),
-        submitted_batches,
-        g0_world,
-    };
-
-    let pipelines_ready =
-        !facts.has_world || working.is_some_and(|set| set.hits > 0 && set.pipeline_not_ready == 0);
+    let (facts, pipelines_ready) = readiness.sample();
     queue.settled_frames = if facts.content_up() && pipelines_ready {
         queue.settled_frames.saturating_add(1)
     } else {
@@ -334,10 +363,7 @@ pub(crate) fn capture_frame(
     // The flag stays up while a worker is still writing so that the frames a
     // capture was in flight over are marked, and so a frame-performance pair
     // can be read with those frames left out.
-    perf::frames::set_state(
-        perf::frames::flag::SCREENSHOT,
-        !queue.pending.is_empty() || queue.writing > 0,
-    );
+    perf::frames::screenshot(!queue.pending.is_empty() || queue.writing > 0);
 
     if queue.write_completed {
         queue.write_completed = false;
@@ -354,7 +380,10 @@ fn take_ready_capture(commands: &mut Commands, queue: &mut CaptureQueue, facts: 
     front.waited_frames = front.waited_frames.saturating_add(1);
     let waited = front.waited_frames;
 
-    match capture_wait(facts, settled_frames) {
+    let wait = (!front.request.any_screen)
+        .then(|| capture_wait(facts, settled_frames))
+        .flatten();
+    match wait {
         Some(wait) => {
             if front.queued_at.elapsed() >= CAPTURE_WAIT_LIMIT {
                 let failed = queue.pending.pop_front().expect("front exists");
@@ -400,7 +429,7 @@ fn take_ready_capture(commands: &mut Commands, queue: &mut CaptureQueue, facts: 
                     // move of the pixels out of the event; the PNG encode and
                     // the file write are an I/O worker's, and the completion
                     // comes back through `writes`.
-                    perf::frames::mark(perf::frames::flag::SCREENSHOT);
+                    perf::instant!("screenshot", "iw4l.frame");
                     let image =
                         std::mem::replace(&mut captured.event_mut().image, emptied_readback());
                     let path = path.clone();

@@ -16,6 +16,7 @@ mod postfx_dof;
 mod products;
 mod resolved_scene;
 pub(crate) mod scene_depth;
+pub(crate) mod scope;
 mod script_grade;
 mod shadowmap_spot_gpu;
 mod shadowmap_sun_gpu;
@@ -54,11 +55,11 @@ pub use gpu_prepare::{
 
 pub use colour_submit::{
     CODE_TEXTURE_FLOATZ, CODE_TEXTURE_RESOLVED_POST_SUN, CODE_TEXTURE_SHADOWMAP_SPOT,
-    CODE_TEXTURE_SHADOWMAP_SUN, ExtractedStaticGeometry, FocusedOwnerSubmitState,
-    InstalledRenderWorld, PublishedRenderFrame, RenderFrameData, RenderWorldData,
-    bind_group_layout_from_entries, cached_lighting_port_variant, colour_ports_static,
-    colour_world_smodel_static, dump_shader_program_names, dump_sorted_material_names,
-    emit_focused_owner_submit, vertex_layouts_from_contract,
+    CODE_TEXTURE_SHADOWMAP_SUN, ExtractedStaticGeometry, FocusedOwnerSubmitReport,
+    FocusedOwnerSubmitState, InstalledRenderWorld, PublishedRenderFrame, RenderFrameData,
+    RenderWorldData, StaticGeometryIdentity, bind_group_layout_from_entries,
+    cached_lighting_port_variant, colour_ports_static, dump_shader_program_names,
+    dump_sorted_material_names, surface_bounds, vertex_layouts_from_contract,
 };
 pub(crate) use draw::register_drawsurf_render;
 pub use geometry_diagnostic::{ExtractedDiagnosticGeometry, geometry_diagnostic_enabled};
@@ -73,3 +74,5 @@ pub use sm3_wgsl::{
 };
 pub use smodel_cache_gpu::*;
 pub use state::{ChangeState0Host, ChangeState1Host, GfxPassState};
+
+pub use colour_submit::exit_clip_mode;

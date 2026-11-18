@@ -24,9 +24,12 @@ pub fn script_model_lighting_box_half(
     let mut parents = [DOBJ_RADIUS_PARENT_ROOT; DOBJ_COMPUTE_BOUNDS_MODEL_LIMIT];
     for (i, model) in models.iter().enumerate() {
         let asset = catalog.get(&MapXModelAssetKey(model.model.clone()))?;
-        let MapXModelSceneAsset::Iw4(skel) = asset else {
+        let MapXModelSceneAsset::Captured { family, skel } = asset else {
             return None;
         };
+        if *family != asset_model::FamilyId::IW4 {
+            return None;
+        }
         radii[i] = skel.radius?;
         parents[i] = match model.parent_model {
             None => DOBJ_RADIUS_PARENT_ROOT,

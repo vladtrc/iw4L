@@ -198,13 +198,18 @@ impl CueRelease {
 
 #[derive(Clone)]
 pub(crate) struct RenderMedia {
+    pub master_slave: Option<crate::master::MasterVoice>,
+    pub eq_channel: Option<u8>,
+    pub eq_entity: Option<u32>,
+    pub room: Option<crate::room_mix::RoomVoice>,
     pcm: PcmBuffer,
     pub pan: Option<LivePan>,
     pub output_gain: [f32; 2],
     pub gain: Option<LiveGain>,
     pub channel_gain: Option<LiveGain>,
+    pub rate_scale: Option<Arc<std::sync::atomic::AtomicU32>>,
     pub release: Option<Arc<CueRelease>>,
-    pub bus: asset_core::AssetNamespace,
+    pub bus: asset_core::FamilyId,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -217,6 +222,22 @@ pub enum PcmError {
     NonFinite,
     MemoryLimit,
 }
+
+impl std::fmt::Display for PcmError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::UnsupportedChannels => "unsupported PCM channel count",
+            Self::UnsupportedBitDepth => "unsupported PCM bit depth",
+            Self::InvalidRate => "invalid PCM sample rate",
+            Self::Empty => "PCM contains no samples",
+            Self::PartialFrame => "PCM ends with an incomplete sample frame",
+            Self::NonFinite => "PCM contains a non-finite sample",
+            Self::MemoryLimit => "PCM memory budget exceeded",
+        })
+    }
+}
+
+impl std::error::Error for PcmError {}
 
 #[derive(Clone, Debug)]
 pub(crate) struct PcmBuffer {
@@ -399,6 +420,11 @@ impl PcmBuffer {
 }
 
 impl RenderMedia {
+    pub(crate) fn playback_rate_scale(&self) -> f32 {
+        self.rate_scale
+            .as_ref()
+            .map_or(1.0, |rate| f32::from_bits(rate.load(Ordering::Relaxed)))
+    }
     pub fn from_pcm(samples: Arc<[f32]>, channels: u16, rate: u32) -> Result<Self, PcmError> {
         PcmBuffer::from_pcm(samples, channels, rate).map(Self::from_buffer)
     }
@@ -406,12 +432,17 @@ impl RenderMedia {
     pub(crate) fn from_buffer(pcm: PcmBuffer) -> Self {
         Self {
             pcm,
+            master_slave: None,
+            room: None,
+            eq_channel: None,
+            eq_entity: None,
             pan: None,
             output_gain: [1.0; 2],
             gain: None,
             channel_gain: None,
+            rate_scale: None,
             release: None,
-            bus: asset_core::AssetNamespace::Iw4,
+            bus: asset_core::FamilyId::IW4,
         }
     }
 

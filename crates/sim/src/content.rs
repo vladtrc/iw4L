@@ -2,7 +2,10 @@ use crate::spawn::{AuthoredSpawnPoint, MatchBootstrap};
 use crate::world::SimBrush;
 use weapon_iw4::WeaponCombatFacts;
 
-pub const CONTENT_DIGEST_SCHEME: u64 = 21;
+mod scene;
+pub(crate) use scene::digest as scene_geometry_digest;
+
+pub const CONTENT_DIGEST_SCHEME: u64 = 30;
 
 #[derive(Clone, Copy)]
 struct Digest(u64);
@@ -93,6 +96,7 @@ fn hash_combat(h: &mut Digest, combat: &[WeaponCombatFacts]) {
             weapon_iw4::EmptyReloadPolicy::Authored => 1,
         });
         h.i32(row.clip_size);
+        h.bool(row.clip_only);
         h.i32(row.start_ammo);
         h.i32(row.max_ammo);
         h.i32(row.ammo_index);
@@ -102,6 +106,7 @@ fn hash_combat(h: &mut Digest, combat: &[WeaponCombatFacts]) {
         h.i32(row.shots_per_fire);
         h.i32(row.burst_cooldown_ms);
         h.bool(row.bolt_action);
+        h.bool(row.silenced);
         h.i32(row.rechamber_time_ms);
         h.i32(row.rechamber_bolt_time_ms);
         h.i32(row.rechamber_bolt_delay_ms);
@@ -184,6 +189,131 @@ fn hash_weapon_admission(h: &mut Digest, runnable: &[bool], transition_groups: &
     }
 }
 
+fn hash_weapon_script_facts(h: &mut Digest, content: &crate::SimWeaponContent) {
+    h.u64(content.weapon_world_models.len() as u64);
+    for (model, tags) in &content.weapon_world_models {
+        h.bytes(model.as_bytes());
+        h.u64(tags.len() as u64);
+        for tag in tags {
+            h.bytes(tag.as_bytes());
+        }
+    }
+    h.u64(content.weapon_world_model_attachments.len() as u64);
+    for attachments in &content.weapon_world_model_attachments {
+        h.u64(attachments.len() as u64);
+        for (model, tag) in attachments {
+            h.bytes(model.as_bytes());
+            h.bytes(tag.as_bytes());
+        }
+    }
+    h.u64(content.weapon_world_model_variants.len() as u64);
+    for variants in &content.weapon_world_model_variants {
+        h.u64(variants.len() as u64);
+        for (slot, model) in variants {
+            h.byte(*slot);
+            h.bytes(model.as_bytes());
+        }
+    }
+    h.u64(content.weapon_world_knife_models.len() as u64);
+    for model in &content.weapon_world_knife_models {
+        h.bool(model.is_some());
+        if let Some(model) = model {
+            h.bytes(model.as_bytes());
+        }
+    }
+    h.u64(content.weapon_thermal_scopes.len() as u64);
+    for &thermal in &content.weapon_thermal_scopes {
+        h.bool(thermal);
+    }
+    h.u64(content.weapon_items.len() as u64);
+    for item in &content.weapon_items {
+        h.bool(item.is_some());
+        if let Some(item) = item {
+            h.u32(item.alternate);
+            let ammo = item.ammo;
+            for value in [
+                ammo.clip_size,
+                ammo.total_min,
+                ammo.total_max,
+                ammo.clip_percent_min,
+                ammo.clip_percent_max,
+            ] {
+                h.i32(value);
+            }
+            h.bool(ammo.shared_ammo);
+            h.bool(ammo.allow_dual_wield);
+        }
+    }
+}
+
+fn hash_player_model_animation(h: &mut Digest, content: &crate::SimContent) {
+    h.u32(content.character_kits().len() as u32);
+    for ((client, world), kit) in content.character_kits() {
+        h.u32(*client);
+        h.u32(world.map_or(u32::MAX, |world| world as u32));
+        h.bytes(kit.body_key.as_bytes());
+        h.bytes(kit.head_key.as_bytes());
+        for model in [&kit.body, &kit.head] {
+            h.bool(model.is_some());
+            if let Some(model) = model {
+                h.u32(model.pose.num_bones as u32);
+                h.u32(model.pose.num_root_bones as u32);
+                h.f32(model.pose.scale);
+                for name in &model.pose.bone_names {
+                    h.bytes(name.as_bytes());
+                }
+                for parent in &model.pose.parent_list {
+                    h.byte(*parent);
+                }
+                for (rotation, translation) in &model.pose.base_mat {
+                    for value in rotation
+                        .to_array()
+                        .into_iter()
+                        .chain(translation.to_array())
+                    {
+                        h.f32(value);
+                    }
+                }
+                h.bool(model.pose.animation_reference.is_some());
+                if let Some(reference) = &model.pose.animation_reference {
+                    h.bytes(reference.name.as_bytes());
+                    h.u32(reference.num_bones as u32);
+                    for name in &reference.bone_names {
+                        h.bytes(name.as_bytes());
+                    }
+                    for parent in &reference.parent_list {
+                        h.byte(*parent);
+                    }
+                    for (rotation, translation) in &reference.base_mat {
+                        for value in rotation
+                            .to_array()
+                            .into_iter()
+                            .chain(translation.to_array())
+                        {
+                            h.f32(value);
+                        }
+                    }
+                }
+                h.u32(model.bone_collision.len() as u32);
+                for bone in &model.bone_collision {
+                    h.bool(bone.is_some());
+                    if let Some(bone) = bone {
+                        for value in bone.midpoint.into_iter().chain(bone.half_size) {
+                            h.f32(value);
+                        }
+                        h.f32(bone.radius_sq);
+                        h.byte(bone.part_classification);
+                    }
+                }
+            }
+        }
+    }
+    h.u64(content.player_anim_properties().len() as u64);
+    for properties in content.player_anim_properties() {
+        h.bool(properties.knife_melee);
+    }
+}
+
 fn hash_class_catalog(h: &mut Digest) {
     for perk in crate::match_state::CLASS_CATALOG_PERKS {
         h.bytes(perk.as_bytes());
@@ -249,6 +379,9 @@ fn hash_equipment(h: &mut Digest, rows: &[crate::EquipmentRuntimeFacts]) {
         h.i32(row.explosion_outer_damage);
         h.f32(row.damage_cone_angle);
         h.i32(row.missile_guidance);
+        h.f32(row.missile_drift_interval_s);
+        h.f32(row.missile_drift_rate_deg_s);
+        h.i32(row.missile_drift_start_distance);
         h.i32(row.ignition_delay_ms);
         h.bool(row.require_lock_to_fire);
         h.i32(row.projectile_speed);
@@ -358,33 +491,40 @@ fn hash_camouflage_slots(h: &mut Digest, slots: &[Vec<u8>]) {
 }
 
 pub fn content_digest(
-    combat: &[WeaponCombatFacts],
-    penetration: &[weapon_iw4::BulletPenFacts],
-    runnable: &[bool],
-    unlocks: &[Result<gamemode_iw4::progression::UnlockRequirement, String>],
-    ranks: &gamemode_iw4::progression::RankProgression,
-    transition_groups: &[u32],
-    camouflage_slots: &[Vec<u8>],
-    equipment: &[crate::EquipmentRuntimeFacts],
+    content: &crate::SimContent,
     bootstrap: &MatchBootstrap,
-    clip_brushes: &[SimBrush],
     script_models: &[crate::EntityCollisionCapabilities],
-    map_content: &asset_core::MapContentDefinition,
 ) -> u64 {
+    let weapon_content = content.weapons();
     let mut h = Digest::new();
     h.u64(CONTENT_DIGEST_SCHEME);
-    hash_combat(&mut h, combat);
-    hash_penetration(&mut h, penetration);
-    hash_weapon_admission(&mut h, runnable, transition_groups);
-    hash_camouflage_slots(&mut h, camouflage_slots);
-    hash_equipment(&mut h, equipment);
-    hash_unlocks(&mut h, unlocks);
-    hash_ranks(&mut h, ranks);
+    if let Some(channels) = content.script_sound_channels() {
+        h.bool(true);
+        h.u64(channels.len() as u64);
+        for channel in channels {
+            h.bytes(channel.as_bytes());
+        }
+    } else {
+        h.bool(false);
+    }
+    hash_combat(&mut h, &weapon_content.weapon_combat);
+    hash_weapon_script_facts(&mut h, weapon_content);
+    hash_penetration(&mut h, &weapon_content.bullet_pen);
+    hash_weapon_admission(
+        &mut h,
+        &weapon_content.weapon_runnable,
+        &weapon_content.weapon_transition_groups,
+    );
+    hash_camouflage_slots(&mut h, &weapon_content.weapon_camouflage_slots);
+    hash_equipment(&mut h, &weapon_content.equipment_runtime);
+    hash_unlocks(&mut h, &weapon_content.unlock_requirements);
+    hash_ranks(&mut h, &weapon_content.rank_progression);
     hash_class_catalog(&mut h);
     hash_spawns(&mut h, &bootstrap.spawns);
-    hash_collision(&mut h, clip_brushes);
-    hash_map_content(&mut h, map_content);
+    h.u64(content.geometry_digest());
+    hash_map_content(&mut h, content.map());
     hash_script_models(&mut h, script_models);
+    hash_player_model_animation(&mut h, content);
     h.finish()
 }
 
@@ -400,19 +540,11 @@ pub struct ContentComponents {
 }
 
 pub fn content_components(
-    combat: &[WeaponCombatFacts],
-    penetration: &[weapon_iw4::BulletPenFacts],
-    runnable: &[bool],
-    unlocks: &[Result<gamemode_iw4::progression::UnlockRequirement, String>],
-    ranks: &gamemode_iw4::progression::RankProgression,
-    transition_groups: &[u32],
-    camouflage_slots: &[Vec<u8>],
-    equipment: &[crate::EquipmentRuntimeFacts],
+    content: &crate::SimContent,
     bootstrap: &MatchBootstrap,
-    clip_brushes: &[SimBrush],
     script_models: &[crate::EntityCollisionCapabilities],
-    map_content: &asset_core::MapContentDefinition,
 ) -> ContentComponents {
+    let weapon_content = content.weapons();
     let component = |tag: u8| {
         let mut h = Digest::new();
         h.u64(CONTENT_DIGEST_SCHEME);
@@ -422,20 +554,26 @@ pub fn content_components(
 
     let mut map = component(b'M');
     hash_spawns(&mut map, &bootstrap.spawns);
-    hash_collision(&mut map, clip_brushes);
-    hash_map_content(&mut map, map_content);
+    map.u64(content.geometry_digest());
+    hash_map_content(&mut map, content.map());
 
     let mut models = component(b'D');
     hash_script_models(&mut models, script_models);
+    hash_player_model_animation(&mut models, content);
 
     let mut weapons = component(b'W');
-    hash_combat(&mut weapons, combat);
-    hash_penetration(&mut weapons, penetration);
-    hash_weapon_admission(&mut weapons, runnable, transition_groups);
-    hash_camouflage_slots(&mut weapons, camouflage_slots);
-    hash_equipment(&mut weapons, equipment);
-    hash_unlocks(&mut weapons, unlocks);
-    hash_ranks(&mut weapons, ranks);
+    hash_combat(&mut weapons, &weapon_content.weapon_combat);
+    hash_weapon_script_facts(&mut weapons, weapon_content);
+    hash_penetration(&mut weapons, &weapon_content.bullet_pen);
+    hash_weapon_admission(
+        &mut weapons,
+        &weapon_content.weapon_runnable,
+        &weapon_content.weapon_transition_groups,
+    );
+    hash_camouflage_slots(&mut weapons, &weapon_content.weapon_camouflage_slots);
+    hash_equipment(&mut weapons, &weapon_content.equipment_runtime);
+    hash_unlocks(&mut weapons, &weapon_content.unlock_requirements);
+    hash_ranks(&mut weapons, &weapon_content.rank_progression);
 
     let mut classes = component(b'C');
     hash_class_catalog(&mut classes);
@@ -472,7 +610,11 @@ fn hash_unlocks(
     }
 }
 
-fn hash_ranks(h: &mut Digest, ranks: &gamemode_iw4::progression::RankProgression) {
+fn hash_ranks(h: &mut Digest, ranks: &Option<gamemode_iw4::progression::RankProgression>) {
+    let Some(ranks) = ranks else {
+        h.u64(0);
+        return;
+    };
     h.u64(ranks.thresholds().len() as u64);
     for &(rank, xp) in ranks.thresholds() {
         h.u32(rank);

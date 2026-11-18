@@ -327,10 +327,11 @@ impl<S: IndexSpace> BoundTarget<S> {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum AssetEdge<S: IndexSpace> {
     Bound(BoundTarget<S>),
     Unresolved(AssetEdgeReason),
+    #[default]
     Absent,
 }
 
@@ -357,12 +358,6 @@ impl AssetEdgeCensus {
         self.bound += other.bound;
         self.unresolved += other.unresolved;
         self.absent += other.absent;
-    }
-}
-
-impl<S: IndexSpace> Default for AssetEdge<S> {
-    fn default() -> Self {
-        Self::Absent
     }
 }
 

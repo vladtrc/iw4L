@@ -1,4 +1,3 @@
-use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 pub use xmodel_runtime::{ClientAnimSample, overlay_legs_clip};
@@ -243,14 +242,27 @@ pub fn radii(
     )
 }
 
-#[derive(Resource, Default)]
-pub struct RemoteSkinPoseHashes {
-    geometry_revision: u64,
-    last: HashMap<u32, u64>,
-    skinned: HashMap<u32, CachedSkinnedBody>,
-    reskinning: HashMap<u32, (u64, u64)>,
+#[derive(Component, Default)]
+pub struct RemoteBodyState {
+    pub(crate) tree: Option<PersistentRemoteTree>,
+    pub(crate) skin: RemoteSkinCache,
+}
 
-    last_cache_hits: HashSet<u32>,
+impl RemoteBodyState {
+    pub fn has_tree(&self) -> bool {
+        self.tree.is_some()
+    }
+}
+
+#[derive(Resource, Default)]
+pub struct RemoteGeometryRevision(pub u64);
+
+#[derive(Default)]
+pub struct RemoteSkinCache {
+    last: Option<u64>,
+    skinned: Option<CachedSkinnedBody>,
+    reskinning: Option<(u64, u64)>,
+    pub(crate) last_cache_hit: bool,
 }
 
 #[derive(Clone, Default)]
@@ -320,41 +332,22 @@ impl RemoteBodySkinnedQueue {
     }
 }
 
-impl RemoteSkinPoseHashes {
-    pub fn take_last_cache_hits(&mut self) -> HashSet<u32> {
-        std::mem::take(&mut self.last_cache_hits)
-    }
-
-    pub fn retain_live(&mut self, live: &HashSet<u32>) {
-        self.last.retain(|ent, _| live.contains(ent));
-        self.skinned.retain(|ent, _| live.contains(ent));
-        self.reskinning.retain(|ent, _| live.contains(ent));
-        self.last_cache_hits.retain(|ent| live.contains(ent));
-    }
-
-    pub fn has_lods(&self, persist_key: u32, lods: (Option<u8>, Option<u8>, Option<u8>)) -> bool {
+impl RemoteSkinCache {
+    pub fn has_lods(&self, lods: (Option<u8>, Option<u8>, Option<u8>)) -> bool {
         self.skinned
-            .get(&persist_key)
+            .as_ref()
             .is_some_and(|cached| cached.lods == lods)
     }
-
-    pub fn remember_pose_hash(&mut self, persist_key: u32, hash: u64) -> bool {
-        let pose_same = self
-            .last
-            .get(&persist_key)
-            .is_some_and(|&prev| prev == hash);
-        self.last.insert(persist_key, hash);
-        pose_same
+    pub fn remember_pose_hash(&mut self, hash: u64) -> bool {
+        self.last.replace(hash) == Some(hash)
     }
 }
 
-pub fn take_unique_geom(pose_hashes: &mut RemoteSkinPoseHashes, persist_key: u32) -> CpuBodyGeom {
-    let Some(cached) = pose_hashes.skinned.remove(&persist_key) else {
+pub fn take_unique_geom(pose_hashes: &mut RemoteSkinCache) -> CpuBodyGeom {
+    let Some(cached) = pose_hashes.skinned.take() else {
         return CpuBodyGeom::default();
     };
-    pose_hashes
-        .reskinning
-        .insert(persist_key, (cached.geometry_revision, cached.layout));
+    pose_hashes.reskinning = Some((cached.geometry_revision, cached.layout));
     match Arc::try_unwrap(cached.geom) {
         Ok(mut geom) => {
             geom.packed.clear();
@@ -397,19 +390,19 @@ pub fn hash_skin_matrices(skin: &[Mat4]) -> u64 {
 }
 
 pub fn push_cached_surfaces(
-    persist_key: u32,
+    number: u32,
     transform: &Transform,
-    pose_hashes: &mut RemoteSkinPoseHashes,
+    pose_hashes: &mut RemoteSkinCache,
     submit: &mut RemoteBodySkinnedQueue,
 ) {
-    pose_hashes.last_cache_hits.insert(persist_key);
+    pose_hashes.last_cache_hit = true;
     let cached = pose_hashes
         .skinned
-        .get(&persist_key)
+        .as_ref()
         .expect("caller checked contains_key");
     submit.items.push(RemoteBodySkinnedItem {
         geometry_revision: cached.geometry_revision,
-        client: persist_key,
+        client: number,
         origin: transform.translation.to_array(),
         world_from_local: transform.to_matrix(),
         geom: Arc::clone(&cached.geom),
@@ -418,48 +411,62 @@ pub fn push_cached_surfaces(
     });
 }
 
-pub fn commit_assembled_body(
-    persist_key: u32,
-    transform: &Transform,
-    geom: CpuBodyGeom,
-    radii: Vec<f32>,
-    radius_parents: Vec<u8>,
-    lods: (Option<u8>, Option<u8>, Option<u8>),
-    submit: &mut RemoteBodySkinnedQueue,
-    pose_hashes: &mut RemoteSkinPoseHashes,
-) {
-    let layout = geom_layout(&geom);
-    let geometry_revision = match pose_hashes.reskinning.remove(&persist_key) {
-        Some((revision, prior)) if prior == layout => revision,
-        _ => {
-            pose_hashes.geometry_revision = pose_hashes
-                .geometry_revision
-                .checked_add(1)
-                .expect("remote geometry revision exhausted");
-            pose_hashes.geometry_revision
-        }
-    };
-    let geom = Arc::new(geom);
-    pose_hashes.skinned.insert(
-        persist_key,
-        CachedSkinnedBody {
+pub(crate) struct AssembledRemoteBody {
+    pub(crate) entity: Entity,
+    pub(crate) number: u32,
+    pub(crate) transform: Transform,
+    pub(crate) geom: CpuBodyGeom,
+    pub(crate) radii: Vec<f32>,
+    pub(crate) radius_parents: Vec<u8>,
+    pub(crate) lods: (Option<u8>, Option<u8>, Option<u8>),
+}
+
+impl AssembledRemoteBody {
+    pub(crate) fn commit(
+        self,
+        submit: &mut RemoteBodySkinnedQueue,
+        pose_hashes: &mut RemoteSkinCache,
+        revision: &mut RemoteGeometryRevision,
+    ) {
+        let Self {
+            entity: _,
+            number,
+            transform,
+            geom,
+            radii,
+            radius_parents,
+            lods,
+        } = self;
+        let layout = geom_layout(&geom);
+        let geometry_revision = match pose_hashes.reskinning.take() {
+            Some((revision, prior)) if prior == layout => revision,
+            _ => {
+                revision.0 = revision
+                    .0
+                    .checked_add(1)
+                    .expect("remote geometry revision exhausted");
+                revision.0
+            }
+        };
+        let geom = Arc::new(geom);
+        pose_hashes.skinned = Some(CachedSkinnedBody {
             geometry_revision,
             layout,
             geom: Arc::clone(&geom),
             radii: radii.clone(),
             radius_parents: radius_parents.clone(),
             lods,
-        },
-    );
-    submit.items.push(RemoteBodySkinnedItem {
-        geometry_revision,
-        client: persist_key,
-        origin: transform.translation.to_array(),
-        world_from_local: transform.to_matrix(),
-        geom,
-        radii,
-        radius_parents,
-    });
+        });
+        submit.items.push(RemoteBodySkinnedItem {
+            geometry_revision,
+            client: number,
+            origin: transform.translation.to_array(),
+            world_from_local: transform.to_matrix(),
+            geom,
+            radii,
+            radius_parents,
+        });
+    }
 }
 
 pub fn named_surfaces(

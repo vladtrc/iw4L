@@ -382,37 +382,60 @@ pub(super) fn load_phys_collmap(
     let count = s.u32_at(p, s.layout(4, 8))? as usize;
 
     s.push(XFILE_BLOCK_VIRTUAL)?;
-    follow_name(s, p, 0)?;
-
-    if s.begin_body(p.at(s.layout(8, 16)))? {
-        let arr = s.alloc_load(4, s.layout(sz::PHYS_GEOM_INFO, 72) * count)?;
+    let name = s.follow_string(p, 0)?;
+    let geoms = s.plain_array(
+        p,
+        s.layout(8, 16),
+        4,
+        s.layout(sz::PHYS_GEOM_INFO, 72),
+        count,
+    )?;
+    if let Some(arr) = geoms {
         for i in 0..count {
             let g = arr.at(i * s.layout(sz::PHYS_GEOM_INFO, 72));
             if s.begin_body(g.at(0))? {
-                load_brush_wrapper(s)?;
+                let wrapper = load_brush_wrapper(s)?;
+                s.fixup_slot(g, wrapper)?;
             }
         }
     }
 
+    let bounds_at = s.layout(48, 60);
+    let vector = |at| -> Result<[f32; 3]> {
+        Ok([s.f32_at(p, at)?, s.f32_at(p, at + 4)?, s.f32_at(p, at + 8)?])
+    };
+    let bounds = (vector(bounds_at)?, vector(bounds_at + 12)?);
+    s.record_phys_collmap(crate::PhysCollmapGeometry {
+        name,
+        geoms,
+        count,
+        bounds,
+    });
     s.pop()
 }
 
-fn load_brush_wrapper(s: &mut ZoneStream<'_>) -> Result<()> {
+fn load_brush_wrapper(s: &mut ZoneStream<'_>) -> Result<Ptr> {
     let p = s.alloc_load(4, s.layout(sz::BRUSH_WRAPPER, 88))?;
     let numsides = s.u16_at(p, 24)? as usize;
     let total_edge_count = s.i32_at(p, s.layout(60, 72))?.max(0) as usize;
 
-    if s.begin_body(p.at(s.layout(28, 32)))? {
-        let sides = s.alloc_load(4, s.layout(sz::CBRUSH_SIDE, 16) * numsides)?;
+    if let Some(sides) = s.plain_array(
+        p,
+        s.layout(28, 32),
+        4,
+        s.layout(sz::CBRUSH_SIDE, 16),
+        numsides,
+    )? {
         for i in 0..numsides {
             let sp = sides.at(i * s.layout(sz::CBRUSH_SIDE, 16));
             if s.begin_body(sp.at(0))? {
-                s.alloc_load(4, sz::CPLANE)?;
+                let plane = s.alloc_load(4, sz::CPLANE)?;
+                s.fixup_slot(sp, plane)?;
             }
         }
     }
 
     s.plain_array(p, s.layout(32, 40), 1, 1, total_edge_count)?;
     s.plain_array(p, s.layout(64, 80), 4, sz::CPLANE, numsides)?;
-    Ok(())
+    Ok(p)
 }

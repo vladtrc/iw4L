@@ -536,9 +536,9 @@ impl ViewmodelController {
         } else {
             timer_ms
                 .filter(|time| *time > 0)
-                .and_then(|time| {
+                .map(|time| {
                     let len_ms = (duration * 1000.0).round() as i32;
-                    Some(playback_rate(len_ms, time))
+                    playback_rate(len_ms, time)
                 })
                 .unwrap_or(1.0)
         };
@@ -592,8 +592,10 @@ impl ViewmodelController {
             let Some(clip) = self.weapon.clip_at(node) else {
                 continue;
             };
+            // A loop never finishes; deferring idle to it would hold e.g.
+            // SprintLoop forever when the sim skips SprintOut.
             if clip.looping {
-                return true;
+                continue;
             }
             let time = self.tree.time(node).unwrap_or(0.0);
             if time < clip.duration() {

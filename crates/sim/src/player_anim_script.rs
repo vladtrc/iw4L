@@ -324,6 +324,18 @@ fn play_anim(
     }
 }
 
+pub(crate) fn apply_turret_pose(content: &crate::SimContent, ps: &mut PlayerState) -> bool {
+    if ps.viewlocked == 0 || ps.e_flags & playerstate_iw4::eflags::TURRET_ACTIVE_DUCK == 0 {
+        return false;
+    }
+    let Some(clip) = content.turret_operator_clip(ps.viewangles[0]) else {
+        return false;
+    };
+    play_anim(ps, clip, true, 0, false, true, true);
+    reset_stance_torso(ps);
+    true
+}
+
 pub(crate) fn reset_stance_torso(ps: &mut PlayerState) {
     play_anim(ps, 0, false, 0, false, true, true);
     ps.torso_timer = 0;

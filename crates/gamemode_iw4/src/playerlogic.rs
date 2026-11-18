@@ -6,20 +6,45 @@ pub enum TimeUntilSpawn {
     WaveBased,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RespawnStatus {
+    pub in_grace: bool,
+    pub has_spawned: bool,
+    pub game_ended: bool,
+    pub on_respawn_delay: Option<f32>,
+    pub team_kill_punish: bool,
+    pub elapsed_since_timer_s: Option<f32>,
+    pub tactical_insertion: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RespawnRules {
+    pub player_respawn_delay: f32,
+    pub teamkill_delay: f32,
+    pub tactical_insertion_delay: f32,
+    pub wave_based: bool,
+}
+
 pub fn time_until_spawn(
-    in_grace: bool,
-    has_spawned: bool,
-    game_ended: bool,
-    on_respawn_delay: Option<f32>,
-    playerrespawndelay: f32,
+    status: RespawnStatus,
+    rules: RespawnRules,
     include_teamkill_delay: bool,
-    team_kill_punish: bool,
-    teamkill_delay: f32,
-    elapsed_since_timer_s: Option<f32>,
-    tactical_insertion: bool,
-    ti_spawn_delay: f32,
-    wave_based: bool,
 ) -> TimeUntilSpawn {
+    let RespawnStatus {
+        in_grace,
+        has_spawned,
+        game_ended,
+        on_respawn_delay,
+        team_kill_punish,
+        elapsed_since_timer_s,
+        tactical_insertion,
+    } = status;
+    let RespawnRules {
+        player_respawn_delay: playerrespawndelay,
+        teamkill_delay,
+        tactical_insertion_delay: ti_spawn_delay,
+        wave_based,
+    } = rules;
     if (in_grace && !has_spawned) || game_ended {
         return TimeUntilSpawn::Seconds(0.0);
     }

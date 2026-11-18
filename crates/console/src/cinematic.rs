@@ -33,18 +33,28 @@ pub(crate) struct Cinematic {
     kind: Kind,
 }
 
+#[derive(Clone, Copy)]
 enum Kind {
     Console,
-    Script,
+    Script { request_id: u64 },
     Load,
 }
 
-fn remove(c: &Cinematic, commands: &mut Commands) {
+#[derive(Resource, Default)]
+pub(crate) struct ScriptPlayback {
+    shown: Option<sim::ScriptCinematic>,
+    finished: Option<u64>,
+}
+
+fn remove(c: &Cinematic, commands: &mut Commands, playback: &mut ScriptPlayback) {
+    if let Kind::Script { request_id } = c.kind {
+        playback.finished = Some(request_id);
+    }
     commands.entity(c.root).despawn();
     commands.remove_resource::<Cinematic>();
     match c.kind {
         Kind::Load => commands.remove_resource::<frame::LoadCinematicPlaying>(),
-        Kind::Console | Kind::Script => {}
+        Kind::Console | Kind::Script { .. } => {}
     }
 }
 
@@ -72,12 +82,16 @@ pub(crate) fn register(registry: &mut ConsoleRegistry) {
             .usage("cinematic <name>|stop — play video/<name>.bik fullscreen")
             .arg(crate::StaticCompleter::new(names)),
     );
+    registry.register(
+        crate::CommandSpec::new("skipvideo")
+            .usage("skipvideo — skip the current briefing or cinematic"),
+    );
 }
 
 fn video_dirs() -> Vec<PathBuf> {
-    asset_transport::games_root_from_env()
+    asset_transport::games_root()
         .map(|root| asset_transport::video_dirs(&root.0))
-        .unwrap_or_default()
+        .unwrap_or_else(|_| Vec::new())
 }
 
 fn find_video(name: &str) -> Option<PathBuf> {
@@ -98,24 +112,34 @@ pub(crate) fn route(
     mut images: ResMut<Assets<Image>>,
     audio: Option<Res<audio::AudioRuntime>>,
     playing: Option<Res<Cinematic>>,
+    mut playback: ResMut<ScriptPlayback>,
 ) {
     let capacity = settings.log_capacity;
     for cmd in events.read() {
-        if cmd.name != "cinematic" {
+        if !matches!(cmd.name.as_str(), "cinematic" | "skipvideo") {
             continue;
         }
-        let msg = match cmd.args.as_slice() {
-            [arg] if arg == "stop" => {
+        let msg = match (cmd.name.as_str(), cmd.args.as_slice()) {
+            ("skipvideo", []) => {
                 if let Some(c) = &playing {
-                    remove(c, &mut commands);
+                    remove(c, &mut commands, &mut playback);
+                    "video skipped".to_owned()
+                } else {
+                    "skipvideo: no video playing".to_owned()
+                }
+            }
+            ("skipvideo", _) => "usage: skipvideo".to_owned(),
+            ("cinematic", [arg]) if arg == "stop" => {
+                if let Some(c) = &playing {
+                    remove(c, &mut commands, &mut playback);
                 }
                 "cinematic stopped".to_owned()
             }
-            [name] => match find_video(name) {
+            ("cinematic", [name]) => match find_video(name) {
                 None => format!("cinematic: video/{name}.bik not found"),
                 Some(path) => {
                     if let Some(c) = &playing {
-                        remove(c, &mut commands);
+                        remove(c, &mut commands, &mut playback);
                     }
                     match start(
                         &path,
@@ -255,7 +279,7 @@ fn decode(
     mut bink: bink::Bink,
     again: Option<PathBuf>,
     size: usize,
-    stream: Option<audio::PcmStream>,
+    mut stream: Option<audio::PcmStream>,
     frames: SyncSender<Msg>,
     recycle: Receiver<Vec<u8>>,
     stop: &AtomicBool,
@@ -278,13 +302,20 @@ fn decode(
         }
         match next {
             Ok(true) => {}
-            Ok(false) => return,
+            Ok(false) => {
+                if let Some(stream) = &stream {
+                    while !stream.is_empty() && !stop.load(Ordering::Relaxed) {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                }
+                return;
+            }
             Err(e) => {
                 let _ = frames.send(Msg::Failed(e.to_string()));
                 return;
             }
         }
-        if let (Some(stream), Some(r)) = (&stream, &mut resample) {
+        if let (Some(stream), Some(r)) = (&mut stream, &mut resample) {
             stereo.clear();
             r.run(&pcm, &mut stereo);
             let mut rest = stereo.as_slice();
@@ -352,6 +383,7 @@ impl Resampler {
 pub(crate) fn tick(
     mut commands: Commands,
     mut c: ResMut<Cinematic>,
+    mut playback: ResMut<ScriptPlayback>,
     mut images: ResMut<Assets<Image>>,
     mut console: ResMut<ConsoleState>,
     settings: Res<ConsoleSettings>,
@@ -361,7 +393,7 @@ pub(crate) fn tick(
 ) {
     let skippable = match c.kind {
         Kind::Console => true,
-        Kind::Script => false,
+        Kind::Script { .. } => false,
         Kind::Load => readiness.is_some_and(|r| r.presentation_allowed),
     };
     let skip = !c.console_was_open
@@ -442,78 +474,120 @@ pub(crate) fn tick(
         let _ = c.recycle.try_send(old);
     }
     if ended {
-        remove(&c, &mut commands);
+        remove(&c, &mut commands, &mut playback);
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn sync_script_cinematic(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
     audio: Option<Res<audio::AudioRuntime>>,
     authority: Option<Res<net::AuthorityWorld>>,
     playing: Option<Res<Cinematic>>,
-    mut shown: Local<Option<sim::ScriptCinematic>>,
+    mut playback: ResMut<ScriptPlayback>,
+    role: Res<frame::RuntimeRole>,
+    local: Res<net::LocalPresentClient>,
+    mut actions: Option<ResMut<net::ClientActionInbox>>,
 ) {
-    let current = match &authority {
-        Some(authority) => authority.0.cinematic(),
-        None => None,
-    };
-    if current == *shown {
+    let current = authority
+        .as_ref()
+        .and_then(|authority| authority.0.cinematic());
+    if let Some(request_id) = playback.finished
+        && (current
+            .as_ref()
+            .is_none_or(|request| request.request_id != request_id)
+            || *role == frame::RuntimeRole::Replay
+            || current
+                .as_ref()
+                .is_some_and(|request| request.completion_client != local.0)
+            || actions.as_mut().is_some_and(|actions| {
+                actions
+                    .push(local.0, sim::ClientAction::CinematicDone { request_id })
+                    .is_ok()
+            }))
+    {
+        playback.finished = None;
+    }
+    if current == playback.shown {
         return;
     }
     if let Some(c) = &playing
-        && (current.is_some() || matches!(c.kind, Kind::Script))
+        && (current.is_some() || matches!(c.kind, Kind::Script { .. }))
     {
-        remove(c, &mut commands);
+        remove(c, &mut commands, &mut playback);
     }
     if let Some(next) = &current {
         match find_video(&next.name) {
-            None => diag::warn!(Console, "cinematic: video/{}.bik not found", next.name),
+            None => {
+                diag::warn!(Console, "cinematic: video/{}.bik not found", next.name);
+                playback.finished = Some(next.request_id);
+            }
             Some(path) => match start_looped(
                 &path,
                 &mut commands,
                 &mut images,
                 audio.as_deref(),
-                Kind::Script,
+                Kind::Script {
+                    request_id: next.request_id,
+                },
                 next.looped,
                 next.fullscreen,
             ) {
                 Ok(info) => diag::info!(Console, "script {info}"),
-                Err(e) => diag::warn!(Console, "cinematic: {e}"),
+                Err(error) => {
+                    diag::warn!(Console, "cinematic: {error}");
+                    playback.finished = Some(next.request_id);
+                }
             },
         }
     }
-    *shown = current;
+    playback.shown = current;
 }
 
+pub(crate) fn clear_script_cinematic(
+    mut commands: Commands,
+    playing: Option<Res<Cinematic>>,
+    mut playback: ResMut<ScriptPlayback>,
+) {
+    if let Some(c) = &playing
+        && matches!(c.kind, Kind::Script { .. })
+    {
+        remove(c, &mut commands, &mut playback);
+    }
+    *playback = ScriptPlayback::default();
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 pub(crate) fn start_load_cinematic(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
     audio: Option<Res<audio::AudioRuntime>>,
-    load: Option<Res<assets::MapLoadProcess>>,
+    mut approved: MessageReader<frame::MapLoadApproved>,
     signon: Option<Res<net::SignonState>>,
+    scope: Option<Res<State<frame::MatchScope>>>,
     playing: Option<Res<Cinematic>>,
-    mut seen: Local<Option<u64>>,
+    mut playback: ResMut<ScriptPlayback>,
 ) {
+    let request = approved.read().last();
     if let Some(c) = &playing
-        && matches!(c.kind, Kind::Load)
-        && signon.is_some_and(|s| s.phase.is_failed())
+        && (request.is_some()
+            || (matches!(c.kind, Kind::Load)
+                && (signon.is_some_and(|s| s.phase.is_failed())
+                    || scope.is_some_and(|s| *s.get() == frame::MatchScope::Absent))))
     {
-        remove(c, &mut commands);
+        remove(c, &mut commands, &mut playback);
     }
-    let Some(load) = load else {
+    let Some(request) = request else {
         return;
     };
-    if *seen == Some(load.request_id) {
-        return;
-    }
-    *seen = Some(load.request_id);
-    let Some(path) = find_video(&format!("{}_load", load.zone)) else {
+    let (_, zone) = asset_transport::split_zone_key(&request.zone);
+    let Some(path) = find_video(&format!("{zone}_load")) else {
         return;
     };
-    if let Some(c) = &playing {
-        remove(c, &mut commands);
-    }
     match start(
         &path,
         &mut commands,

@@ -27,6 +27,27 @@ pub enum ModelLightingCacheGlobError {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ModelLightingCadence {
+    pub frame: u32,
+    pub period: u32,
+    pub max_distance: f32,
+}
+
+impl ModelLightingCadence {
+    fn reuses(self, slot: u32, sampled: [f32; 3], origin: [f32; 3]) -> bool {
+        let delta = core::array::from_fn::<_, 3, _>(|i| sampled[i] - origin[i]);
+        let distance_sq = delta[1] * delta[1] + delta[0] * delta[0] + delta[2] * delta[2];
+        const STATIONARY_DISTANCE_SQ: f32 = 0.01 * 0.01;
+        distance_sq < STATIONARY_DISTANCE_SQ
+            || (!self
+                .frame
+                .wrapping_add(slot)
+                .is_multiple_of(self.period.max(1))
+                && distance_sq < self.max_distance * self.max_distance)
+    }
+}
+
 pub const MODEL_LIGHTING_PIXEL_FREE_BITS_BUFFERS: usize = 4;
 
 #[inline]
@@ -124,6 +145,13 @@ pub const fn model_lighting_cache_bit_mask(slot: u32) -> u32 {
 }
 
 #[derive(Debug)]
+pub struct ModelLightingFreeFrames<'a> {
+    pub prev_prev: &'a [u32],
+    pub prev: &'a [u32],
+    pub curr: &'a mut [u32],
+}
+
+#[derive(Debug)]
 pub struct ModelLightingCacheGlob<'a> {
     base_index: u32,
     xmodel_entry_limit: u32,
@@ -131,9 +159,7 @@ pub struct ModelLightingCacheGlob<'a> {
     alloc_fail: &'a mut bool,
     origins: &'a mut [[f32; 3]],
     lighting_info: &'a mut [u16],
-    prev_prev: &'a [u32],
-    prev: &'a [u32],
-    curr: &'a mut [u32],
+    free_frames: ModelLightingFreeFrames<'a>,
 }
 
 impl<'a> ModelLightingCacheGlob<'a> {
@@ -144,9 +170,7 @@ impl<'a> ModelLightingCacheGlob<'a> {
         alloc_fail: &'a mut bool,
         origins: &'a mut [[f32; 3]],
         lighting_info: &'a mut [u16],
-        prev_prev: &'a [u32],
-        prev: &'a [u32],
-        curr: &'a mut [u32],
+        free_frames: ModelLightingFreeFrames<'a>,
     ) -> Result<Self, ModelLightingCacheGlobError> {
         if xmodel_entry_limit == 0
             || model_lighting_cache_handle(base_index, xmodel_entry_limit.saturating_sub(1))
@@ -165,10 +189,17 @@ impl<'a> ModelLightingCacheGlob<'a> {
                 got: origins.len().min(lighting_info.len()),
             });
         }
-        if prev_prev.len() < words || prev.len() < words || curr.len() < words {
+        if free_frames.prev_prev.len() < words
+            || free_frames.prev.len() < words
+            || free_frames.curr.len() < words
+        {
             return Err(ModelLightingCacheGlobError::FreeBitsWordCountMismatch {
                 needed: words,
-                got: curr.len().min(prev.len()).min(prev_prev.len()),
+                got: free_frames
+                    .curr
+                    .len()
+                    .min(free_frames.prev.len())
+                    .min(free_frames.prev_prev.len()),
             });
         }
         Ok(Self {
@@ -178,9 +209,7 @@ impl<'a> ModelLightingCacheGlob<'a> {
             alloc_fail,
             origins,
             lighting_info,
-            prev_prev,
-            prev,
-            curr,
+            free_frames,
         })
     }
 
@@ -194,27 +223,33 @@ impl<'a> ModelLightingCacheGlob<'a> {
         current_handle: u16,
         origin: [f32; 3],
         allow_moved_reuse: bool,
+        cadence: Option<ModelLightingCadence>,
     ) -> ModelLightingCacheAlloc {
-        if let Some(slot) = model_lighting_cache_slot(self.base_index, current_handle) {
-            if slot < self.xmodel_entry_limit {
-                let same = self.origins[slot as usize] == origin;
-                let word = (slot >> 5) as usize;
-                let mask = model_lighting_cache_bit_mask(slot);
-                if same {
-                    self.curr[word] &= !mask;
-                    return ModelLightingCacheAlloc::Reused {
-                        handle: current_handle,
-                        info: self.lighting_info[slot as usize],
-                    };
-                }
-                if allow_moved_reuse {
-                    self.curr[word] &= !mask;
-                    self.origins[slot as usize] = origin;
-                    return ModelLightingCacheAlloc::Assigned {
-                        handle: current_handle,
-                        slot,
-                    };
-                }
+        if let Some(slot) = model_lighting_cache_slot(self.base_index, current_handle)
+            && slot < self.xmodel_entry_limit
+        {
+            // Reuse keeps the last sampled origin, so small movements accumulate
+            // toward the immediate-relight distance instead of resetting it.
+            let same = cadence.map_or_else(
+                || self.origins[slot as usize] == origin,
+                |cadence| cadence.reuses(slot, self.origins[slot as usize], origin),
+            );
+            let word = (slot >> 5) as usize;
+            let mask = model_lighting_cache_bit_mask(slot);
+            if same {
+                self.free_frames.curr[word] &= !mask;
+                return ModelLightingCacheAlloc::Reused {
+                    handle: current_handle,
+                    info: self.lighting_info[slot as usize],
+                };
+            }
+            if allow_moved_reuse {
+                self.free_frames.curr[word] &= !mask;
+                self.origins[slot as usize] = origin;
+                return ModelLightingCacheAlloc::Assigned {
+                    handle: current_handle,
+                    slot,
+                };
             }
         }
 
@@ -231,16 +266,16 @@ impl<'a> ModelLightingCacheGlob<'a> {
         let start = *self.rover % word_count;
         let mut word_i = start;
         loop {
-            let free = self.prev_prev[word_i as usize]
-                & self.prev[word_i as usize]
-                & self.curr[word_i as usize];
+            let free = self.free_frames.prev_prev[word_i as usize]
+                & self.free_frames.prev[word_i as usize]
+                & self.free_frames.curr[word_i as usize];
             if free != 0 {
                 let high = 31u32 - free.leading_zeros();
                 let bit = high ^ 0x1f;
                 let slot = word_i * 32 + bit;
                 if slot < self.xmodel_entry_limit {
                     let mask = model_lighting_cache_bit_mask(slot);
-                    self.curr[word_i as usize] &= !mask;
+                    self.free_frames.curr[word_i as usize] &= !mask;
                     *self.rover = word_i;
                     self.origins[slot as usize] = origin;
                     let Some(handle) = model_lighting_cache_handle(self.base_index, slot) else {

@@ -1,4 +1,3 @@
-use bevy_ecs::prelude::Component;
 use std::sync::Arc;
 
 use crate::script::value::Value;
@@ -20,7 +19,7 @@ pub(crate) enum ThreadState {
     Complete,
 }
 
-#[derive(Component, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Thread {
     pub(crate) serial: u64,
     pub(crate) frames: Vec<Frame>,

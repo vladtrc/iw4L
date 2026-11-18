@@ -6,13 +6,11 @@ use lighting_iw4::{
     smodel_lighting_bits_words,
 };
 
-use crate::prepare::scene::cull::smodel_cull_dist_skips_slot;
+use crate::prepare::scene::cull::StaticModelCullView;
 use crate::prepare::scene::model_lighting_atlas::{
     WorldModelLightingAtlas, model_lighting_atlas_write_tile,
 };
 use crate::prepare::scene::model_lighting_cache::ModelLightingAtlasTileWrites;
-use crate::prepare::scene::smodel_geom_cache::LodRampDvar;
-use crate::prepare::scene::view_parms::PreparedSceneView;
 use crate::prepare::scene::world::{WorldScene, WorldSmodelLightingSample};
 
 fn smodel_lighting_enabled() -> bool {
@@ -186,9 +184,7 @@ pub(crate) fn update_smodel_lighting(
     scene: Res<WorldScene>,
     mut images: ResMut<Assets<Image>>,
     mut tile_writes: ResMut<ModelLightingAtlasTileWrites>,
-    prepared: Res<PreparedSceneView>,
-    lock_pvs: Res<crate::prepare::scene::view_parms::RLockPvs>,
-    lod_ramp: Res<LodRampDvar>,
+    cull_view: StaticModelCullView,
 ) {
     let Some(lighting) = lighting.as_mut() else {
         return;
@@ -201,8 +197,9 @@ pub(crate) fn update_smodel_lighting(
         return;
     };
 
+    let portal = scene.portal_view.as_ref();
     let mut visible: Vec<usize> = Vec::new();
-    let eye = prepared.ready.then_some(lock_pvs.dpvs_eye(&prepared));
+    let eyes = cull_view.eyes(&scene);
     for slot in 0..lighting.tiles.len() {
         if lighting.tiles.get(slot).is_none_or(|t| t.is_none()) {
             continue;
@@ -220,18 +217,23 @@ pub(crate) fn update_smodel_lighting(
             .and_then(|slot| slot.as_ref())
             .map(|inst| inst.origin)
             .unwrap_or([0.0; 3]);
-        if smodel_cull_dist_skips_slot(
-            &cull.static_model_cull_dists,
-            slot,
-            origin,
-            eye,
-            lod_ramp.scale_last,
-        ) {
+        if cull_view.distance_skips(&cull.static_model_cull_dists, slot, origin, &eyes) {
             continue;
         }
         visible.push(slot);
     }
 
+    if let Some(view) = &portal {
+        visible.sort_by_key(|&slot| {
+            scene
+                .static_model_instances
+                .get(slot)
+                .and_then(Option::as_ref)
+                .is_some_and(|instance| {
+                    view.point_tag(instance.origin) as usize != view.camera_world + 1
+                })
+        });
+    }
     let mut assigned = 0u32;
     let mut reused = 0u32;
     let mut evicted = 0u32;

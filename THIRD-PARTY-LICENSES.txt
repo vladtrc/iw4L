@@ -1547,6 +1547,9 @@ Apache License
 Apache License 2.0 (Apache-2.0)
 --------------------------------------------------------------------------------
 Used by:
+  bootstrap 0.1.0
+  desktop 0.1.0
+  launcher 0.1.0
   anim_iw4 0.1.0
   asset_anim 0.1.0
   asset_audio 0.1.0
@@ -1559,9 +1562,9 @@ Used by:
   asset_world 0.1.0
   assets 0.1.0
   audio 0.1.0
-  bootstrap 0.1.0
   bots 0.1.0
   clipmap_iw4 0.1.0
+  community 0.1.0
   console 0.1.0
   d3d9_decl 0.1.0
   d3d9_sm3 0.1.0
@@ -1571,18 +1574,15 @@ Used by:
   dxbc_sm5 0.1.0
   entity_iw4 0.1.0
   fastfile_iw4 0.1.0
-  fastfile_iw5 0.1.0
-  fastfile_t5 0.1.0
-  fastfile_t6 0.1.0
   frame 0.1.0
   fx 0.1.0
   fx_iw4 0.1.0
+  game_family 0.1.0
   gamemode_iw4 0.1.0
   hud 0.1.0
   hud_iw4 0.1.0
   input_iw4 0.1.0
   killcam_iw4 0.1.0
-  launcher 0.1.0
   lighting_iw4 0.1.0
   marks_iw4 0.1.0
   master_protocol 0.1.0
@@ -1610,6 +1610,31 @@ Used by:
   updater 0.1.0
   weapon_iw4 0.1.0
   xmodel_runtime 0.1.0
+  ext_iw5 0.1.0
+  ext_iw5_audio 0.1.0
+  ext_iw5_fastfile 0.1.0
+  ext_iw5_gameplay 0.1.0
+  ext_iw5_load 0.1.0
+  ext_iw5_material 0.1.0
+  ext_iw5_world 0.1.0
+  ext_iw5_zone 0.1.0
+  ext_t5 0.1.0
+  ext_t5_audio 0.1.0
+  ext_t5_fastfile 0.1.0
+  ext_t5_gameplay 0.1.0
+  ext_t5_load 0.1.0
+  ext_t5_material 0.1.0
+  ext_t5_script 0.1.0
+  ext_t5_world 0.1.0
+  ext_t5_zone 0.1.0
+  ext_t6 0.1.0
+  ext_t6_audio 0.1.0
+  ext_t6_fastfile 0.1.0
+  ext_t6_gameplay 0.1.0
+  ext_t6_load 0.1.0
+  ext_t6_material 0.1.0
+  ext_t6_world 0.1.0
+  ext_t6_zone 0.1.0
   accesskit_winit 0.33.2 — https://github.com/AccessKit/accesskit
   blake3 1.8.5 — https://github.com/BLAKE3-team/BLAKE3
   constant_time_eq 0.4.2 — https://github.com/cesarb/constant_time_eq
@@ -6528,6 +6553,7 @@ Used by:
   gilrs 0.11.2 — https://gitlab.com/gilrs-project/gilrs
   libm 0.2.16 — https://github.com/rust-lang/compiler-builtins
   mutants 0.0.3 — https://github.com/sourcefrog/cargo-mutants
+  mwmatching 0.1.1 — https://github.com/ahenshaw/mwmatching
   profiling 1.0.18 — https://github.com/aclysma/profiling
   taffy 0.14.0 — https://github.com/DioxusLabs/taffy
   wesl-core 0.1.0 — https://github.com/webgpu-tools/wesl-rs

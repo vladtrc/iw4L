@@ -291,7 +291,7 @@ impl Drop for ArchiveLease {
         parked()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .entry(self.path.clone())
+            .entry(std::mem::take(&mut self.path))
             .or_default()
             .push(archive);
     }
@@ -601,15 +601,6 @@ impl IwdSoundIndex {
     pub fn read_sound(&self, relative: &str) -> Option<Result<Vec<u8>, String>> {
         let (archive, entry) = self.sounds.get(&sound_key(relative))?;
         Some(read_pooled_entry(archive, entry, None))
-    }
-
-    pub fn read_sound_header(
-        &self,
-        relative: &str,
-        limit: usize,
-    ) -> Option<Result<Vec<u8>, String>> {
-        let (archive, entry) = self.sounds.get(&sound_key(relative))?;
-        Some(read_pooled_entry(archive, entry, Some(limit)))
     }
 }
 

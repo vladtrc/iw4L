@@ -89,7 +89,7 @@ pub(crate) fn generate(
         };
         let Ok(request) = owner
             .dobj_state
-            .resolve_request(|name| xanims?.0.clip(asset_core::AssetNamespace::Iw4, name))
+            .resolve_request(|name| xanims?.0.clip(asset_core::FamilyId::IW4, name))
         else {
             state.unsupported_receivers += requested;
             continue;
@@ -188,10 +188,6 @@ pub(crate) fn generate(
             state.unsupported_receivers - before_receivers
         );
     }
-    host.gfx_mark_surf_n = Some(mesh.budget.surf_n);
-    host.gfx_mark_vert_n = Some(mesh.budget.vert_n);
-    host.gfx_mark_index_n = Some(mesh.budget.index_n);
-    host.gfx_mark_packed_n = Some(mesh.packed.len() as u32);
     host.last_mark_mesh = Some(mesh);
 }
 
@@ -239,7 +235,7 @@ fn stage(
             continue;
         }
         let material = models.surface_material(&model_key, surface);
-        let (flags, bits) = super::world_mark::receiver_allow_inputs(scene, surface, material);
+        let (flags, bits) = super::world_mark::receiver_allow_inputs(scene, material);
         if !marks_iw4::mark_include_in_world_clip(marks_iw4::mark_allow(flags, bits, mark_bits)) {
             continue;
         }
@@ -249,7 +245,7 @@ fn stage(
         let Some(indices) = skel.indices.get(start..start + count) else {
             continue;
         };
-        for triangle in indices.chunks_exact(3) {
+        for triangle in indices.as_chunks::<3>().0 {
             let ids = [
                 triangle[0] as usize,
                 triangle[1] as usize,
@@ -328,22 +324,27 @@ fn stage(
                 state.unsupported_triangles += 1;
                 continue;
             };
-            match marks_iw4::mark_emit_brush_fragment(
-                used_t,
-                used_p,
-                marks_iw4::R_MARK_FRAGMENTS_MAX_TRIS,
-                marks_iw4::R_MARK_FRAGMENTS_MAX_POINTS,
-                &fragment[..n],
-                [0.0; 2],
-                [0.0; 2],
-                [0.0; 2],
-                n0,
-                n1,
-                n2,
-                context,
-                tris,
-                points,
-            ) {
+            let fragment_result = {
+                let mut staging_output = marks_iw4::MarkStagingBuffer {
+                    used_tri: used_t,
+                    used_point: used_p,
+                    max_tris: marks_iw4::R_MARK_FRAGMENTS_MAX_TRIS,
+                    max_points: marks_iw4::R_MARK_FRAGMENTS_MAX_POINTS,
+                    tris,
+                    points,
+                };
+                staging_output
+                    .emit_fragment(
+                        &fragment[..n],
+                        marks_iw4::MarkTriangleAttributes {
+                            lightmap_uvs: [[0.0; 2], [0.0; 2], [0.0; 2]],
+                            normals: [n0, n1, n2],
+                        },
+                        context,
+                    )
+                    .map(|()| (staging_output.used_tri, staging_output.used_point))
+            };
+            match fragment_result {
                 Ok((t, p)) => {
                     tris.truncate(t as usize);
                     points.truncate(p as usize);

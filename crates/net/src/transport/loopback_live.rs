@@ -4,7 +4,7 @@ use sim::{ClientId, Snapshot};
 use crate::client::predict::CmdSeq;
 use crate::transport::delta::{SnapshotDecoder, SnapshotEncoder};
 use crate::transport::frame::{
-    Frame, LoopbackTransport, Transport, TransportError, frame_from_acked_tick,
+    Frame, FrameTail, LoopbackTransport, Transport, TransportError, frame_from_acked_tick,
 };
 
 #[derive(Resource, Debug, Default)]
@@ -20,8 +20,6 @@ pub struct ListenLoopback {
     pub last_backlog: usize,
 
     pub peak_backlog: usize,
-
-    direct: std::collections::VecDeque<ReceivedTick>,
 }
 
 impl ListenLoopback {
@@ -30,44 +28,24 @@ impl ListenLoopback {
     }
 
     pub fn pending(&self) -> usize {
-        self.transport.pending() + self.direct.len()
+        self.transport.pending()
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn send_tick(
         &mut self,
         snapshot: &Snapshot,
         acks: Vec<(ClientId, CmdSeq)>,
-        svc_sounds: Vec<crate::SvcSound>,
-        svc_scores: Option<String>,
-        svc_card_slots: Vec<crate::SvcCardSlot>,
-        svc_open_menus: Vec<crate::SvcOpenMenu>,
-        svc_hud_splashes: Vec<crate::SvcHudSplash>,
-        svc_game_notifies: Vec<crate::SvcGameNotify>,
-        reliable: crate::ReliablePayload,
+        tail: FrameTail,
     ) -> Result<(), TransportError> {
-        if asset_transport::campaign_zone_set() {
-            self.direct.push_back(ReceivedTick {
-                snapshot: snapshot.clone(),
-                frame: Frame {
-                    tick: snapshot.tick,
-                    state_hash: 0,
-                    acks,
-                    snapshot_delta: crate::transport::delta::SnapshotDelta::empty(snapshot.tick),
-                    snapshot_meta: Default::default(),
-                    world_objects_wire: Vec::new(),
-                    reliable,
-                    svc_sounds,
-                    svc_scores,
-                    svc_card_slots,
-                    svc_open_menus,
-                    svc_hud_splashes,
-                    svc_game_notifies,
-                },
-            });
-            self.sent = self.sent.saturating_add(1);
-            return Ok(());
-        }
+        let FrameTail {
+            svc_sounds,
+            svc_scores,
+            svc_card_slots,
+            svc_open_menus,
+            svc_hud_splashes,
+            svc_game_notifies,
+            reliable,
+        } = tail;
         let mut frame = frame_from_acked_tick(&mut self.encoder, snapshot, acks);
         frame.svc_sounds = svc_sounds;
         frame.svc_scores = svc_scores;
@@ -83,10 +61,6 @@ impl ListenLoopback {
     }
 
     pub fn recv_tick(&mut self) -> Result<Option<ReceivedTick>, TransportError> {
-        if let Some(tick) = self.direct.pop_front() {
-            self.received = self.received.saturating_add(1);
-            return Ok(Some(tick));
-        }
         let Some(frame) = self.transport.recv()? else {
             return Ok(None);
         };
@@ -97,7 +71,7 @@ impl ListenLoopback {
     }
 
     pub fn recv_all(&mut self, out: &mut Vec<ReceivedTick>) -> Result<(), TransportError> {
-        self.last_backlog = self.transport.pending() + self.direct.len();
+        self.last_backlog = self.transport.pending();
         self.peak_backlog = self.peak_backlog.max(self.last_backlog);
         loop {
             match self.recv_tick() {

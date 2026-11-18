@@ -53,20 +53,16 @@ const FLAG_ALPHA: u32 = 0x0010_0000;
 const AUD_STEREO: u16 = 0x2000;
 const AUD_DCT: u16 = 0x1000;
 
-pub struct Bink {
-    file: File,
+struct ContainerHeader {
     header: Header,
-    index: Vec<(u64, u32)>,
-    next: usize,
-    video: video::Video,
-    audio: Option<audio::Audio>,
+    file_size: u64,
+    alpha: bool,
     tracks: usize,
-    packet: Vec<u8>,
+    audio_dct: bool,
 }
 
-impl Bink {
-    pub fn open(path: &Path) -> Result<Self, Error> {
-        let mut file = File::open(path)?;
+impl ContainerHeader {
+    fn read(file: &mut impl Read) -> Result<Self, Error> {
         let mut h = [0u8; 44];
         file.read_exact(&mut h)?;
         let word = |i: usize| u32::from_le_bytes(h[i * 4..i * 4 + 4].try_into().unwrap());
@@ -108,41 +104,81 @@ impl Bink {
             }
         }
 
-        let mut raw = vec![0u8; frames as usize * 4];
-        file.read_exact(&mut raw)?;
-        let offsets: Vec<u64> = raw
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|&c| u64::from(u32::from_le_bytes(c) & !1))
-            .chain(std::iter::once(file_size))
-            .collect();
-        let mut index = Vec::with_capacity(frames as usize);
-        for w in offsets.windows(2) {
-            if w[1] <= w[0] {
-                return Err(Error::Format("frame index"));
-            }
-            index.push((w[0], (w[1] - w[0]) as u32));
-        }
+        Ok(Self {
+            header: Header {
+                revision,
+                width,
+                height,
+                fps_num,
+                fps_den,
+                frames,
+                audio: audio_track.map(|(track, _)| track),
+            },
+            file_size,
+            alpha: flags & FLAG_ALPHA != 0,
+            tracks,
+            audio_dct: audio_track.is_some_and(|(_, dct)| dct),
+        })
+    }
 
-        let header = Header {
-            revision,
-            width,
-            height,
-            fps_num,
-            fps_den,
-            frames,
-            audio: audio_track.map(|(a, _)| a),
+    fn read_index(&self, file: &mut impl Read) -> Result<Vec<(u64, u32)>, Error> {
+        let mut index = Vec::with_capacity(self.header.frames as usize);
+        let mut previous = None;
+        let mut next = |offset: u64| -> Result<(), Error> {
+            if let Some(start) = previous.replace(offset) {
+                if offset <= start {
+                    return Err(Error::Format("frame index"));
+                }
+                index.push((start, (offset - start) as u32));
+            }
+            Ok(())
         };
+        let mut buffer = [0u8; 4096];
+        let mut remaining = self.header.frames as usize;
+        while remaining > 0 {
+            let words = remaining.min(buffer.len() / 4);
+            let bytes = &mut buffer[..words * 4];
+            file.read_exact(bytes)?;
+            for word in bytes.as_chunks::<4>().0 {
+                next(u64::from(u32::from_le_bytes(*word) & !1))?;
+            }
+            remaining -= words;
+        }
+        next(self.file_size)?;
+        Ok(index)
+    }
+}
+
+pub struct Bink {
+    file: File,
+    header: Header,
+    index: Vec<(u64, u32)>,
+    next: usize,
+    video: video::Video,
+    audio: Option<audio::Audio>,
+    tracks: usize,
+    packet: Vec<u8>,
+}
+
+impl Bink {
+    pub fn open(path: &Path) -> Result<Self, Error> {
+        let mut file = File::open(path)?;
+        let container = ContainerHeader::read(&mut file)?;
+        let header = container.header;
+        let tracks = container.tracks;
+        let index = container.read_index(&mut file)?;
+
         Ok(Self {
             file,
             video: video::Video::new(
-                width as usize,
-                height as usize,
-                revision,
-                flags & FLAG_ALPHA != 0,
+                header.width as usize,
+                header.height as usize,
+                header.revision,
+                container.alpha,
             ),
-            audio: audio_track.map(|(a, dct)| audio::Audio::new(a.rate, a.channels, dct)),
+            audio: header
+                .audio
+                .map(|a| audio::Audio::new(a.rate, a.channels, container.audio_dct)),
             header,
             index,
             next: 0,
@@ -188,7 +224,6 @@ impl Bink {
     }
 
     pub fn rgba(&self, out: &mut [u8]) {
-        let (w, h) = (self.header.width as usize, self.header.height as usize);
-        video::to_rgba(&self.video.cur, w, h, out);
+        self.video.rgba(out);
     }
 }

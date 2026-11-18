@@ -1,11 +1,10 @@
-use bevy_ecs::entity::Entity;
 use bevy_ecs::prelude::World;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::script::host;
 use crate::script::{
-    Fault, LevelData, Location, NativeRegistry, Program, RoundScript, Thread, ThreadState, Value,
+    Fault, LevelData, Location, NativeRegistry, Program, RoundScript, ThreadState, Value,
 };
 
 use super::{INSTRUCTION_BUDGET, execute, new_thread};
@@ -13,28 +12,10 @@ use super::{INSTRUCTION_BUDGET, execute, new_thread};
 /// Runs during install, before the map's `script_struct` blocks are appended to `level.struct`.
 pub const STRUCT_INIT: &str = "codescripts/struct::initstructs";
 
-pub(crate) fn copy_state(source: &World, target: &mut World) {
-    target.insert_resource(source.resource::<RoundScript>().clone());
-    target.insert_resource(source.resource::<crate::script::MatchScript>().clone());
-    target.insert_resource(source.resource::<host::mechanics::Mechanics>().clone());
-    target.insert_resource(source.resource::<NativeRegistry>().clone());
-    for entity in source.iter_entities() {
-        if let Some(thread) = entity.get::<Thread>() {
-            target.spawn(thread.clone());
-        }
-    }
-}
-
 pub(crate) fn reset_round(world: &mut World) {
-    let ids: Vec<_> = world
-        .query_filtered::<Entity, bevy_ecs::query::With<Thread>>()
-        .iter(world)
-        .collect();
-    for id in ids {
-        world.despawn(id);
-    }
-    let round = RoundScript::new(world.resource::<crate::script::MatchScript>());
-    world.insert_resource(round);
+    world.remove_resource::<crate::campaign_checkpoint::SaveMemory>();
+    world.remove_resource::<crate::campaign_reload::CampaignReload>();
+    world.insert_resource(RoundScript::default());
     world.insert_resource(host::mechanics::Mechanics::default());
 }
 
@@ -50,6 +31,12 @@ pub(crate) fn install(
     level: LevelData,
 ) -> Result<(), Fault> {
     let plan = host::restart::RestartPlan {
+        anim_trees: level.anim_trees,
+        profile: level.profile,
+        campaign_player: level.campaign_player,
+        presentation_requests: Default::default(),
+        path_nodes: level.path_nodes,
+        path_visibility: level.path_visibility,
         absent_effects: level.absent_effects,
         natives: natives.clone(),
         entities: Arc::new(level.entities),
@@ -58,10 +45,6 @@ pub(crate) fn install(
         entries: Vec::new(),
         schemas: level.schemas,
         player_data_defaults: level.player_data_defaults.map(Arc::new),
-        videos: Arc::new(level.videos),
-        turret_ai_scripts: Arc::new(level.turret_ai_scripts),
-        anim: Arc::new(level.anim),
-        path_nodes: Arc::new(level.path_nodes),
     };
     install_level(world, Arc::new(program), plan)
 }
@@ -71,31 +54,24 @@ pub(crate) fn install_level(
     program: Arc<Program>,
     plan: host::restart::RestartPlan,
 ) -> Result<(), Fault> {
-    let natives = plan.natives.clone();
+    let mut natives = plan.natives.clone();
     let location = Location {
         module: "<runtime>".into(),
         function: "install".into(),
         line: 0,
         column: 0,
     };
+    let family = crate::script::families::script_family(program.rules())
+        .map_err(|message| Fault::at(&location, message))?;
+    (family.register_natives)(&mut natives);
     if world.resource::<RoundScript>().program.is_some() {
         return Err(Fault::at(
             &location,
             "program already installed; reset the match before replacing scripts",
         ));
     }
-    let mut unbound: Vec<_> = program
-        .natives
-        .iter()
-        .filter(|b| natives.get(b.namespace, b.name).is_none())
-        .map(|b| b.name)
-        .collect();
-    unbound.sort_unstable();
-    if !unbound.is_empty() {
-        return Err(Fault::at(
-            &location,
-            format!("{} unbound natives: {}", unbound.len(), unbound.join(" ")),
-        ));
+    if plan.profile != asset_core::RuntimeProfile::Campaign {
+        natives.validate_program(&program)?;
     }
     world
         .resource_mut::<crate::PersistentDataStore>()
@@ -107,9 +83,12 @@ pub(crate) fn install_level(
     let bound = program
         .natives
         .iter()
-        .map(|b| natives.get(b.namespace, b.name).unwrap())
+        .map(|b| natives.get(b.namespace, b.name))
         .collect();
     let mut runtime = world.resource_mut::<RoundScript>();
+    (family.initialize_round)(&mut runtime.extensions);
+    runtime.anim_trees = plan.anim_trees.clone();
+    runtime.profile = plan.profile;
     runtime.program = Some(program.clone());
     runtime.natives = bound;
     runtime.objects.insert(0, BTreeMap::new());
@@ -118,13 +97,14 @@ pub(crate) fn install_level(
     runtime.next_object = 3;
     runtime.next_entity_number = playerstate_iw4::GENTITY_SPAWN_BASE;
     runtime.tables = plan.tables.clone();
-    runtime.campaign.videos = plan.videos.clone();
-    runtime.campaign.turret_ai_scripts = plan.turret_ai_scripts.clone();
-    runtime.campaign.anim_library = plan.anim.clone();
-    runtime.campaign.active = !plan.path_nodes.is_empty();
     runtime.rng = u32::from_le_bytes(program.fingerprint()[..4].try_into().unwrap()) | 1;
     runtime.loading = true;
     world.insert_resource(natives);
+    if world.resource::<RoundScript>().profile == asset_core::RuntimeProfile::Campaign {
+        host::natives::iw4::saved::install(world);
+        world.init_resource::<crate::campaign_checkpoint::SaveMemory>();
+        crate::campaign_reload::reset(world);
+    }
     if let Some(&function) = program.names.get(STRUCT_INIT) {
         let mut thread = new_thread(world, &program, function, Value::Object(0), Vec::new())
             .map_err(|m| Fault::at(&location, m))?;
@@ -143,13 +123,37 @@ pub(crate) fn install_level(
     let entities = plan.entities.clone();
     let keys = plan.keys.clone();
     let path_nodes = plan.path_nodes.clone();
+    let path_visibility = plan.path_visibility.clone();
+    let campaign_player = plan.campaign_player;
     world.resource_mut::<RoundScript>().restart = Some(Arc::new(plan));
     world
         .resource_mut::<RoundScript>()
         .spawn_map_entities(&entities, &keys)
         .map_err(|m| Fault::at(&location, m))?;
-    host::actors::spawn_path_nodes(world, &path_nodes, &entities, &keys)
-        .map_err(|m| Fault::at(&location, m))?;
+    host::weapons::items::initialize_map(world).map_err(|m| Fault::at(&location, m))?;
+    host::turrets::initialize_map(world).map_err(|m| Fault::at(&location, m))?;
+    host::path_nodes::install(
+        world.resource_mut::<RoundScript>().into_inner(),
+        path_nodes,
+        path_visibility,
+    )
+    .map_err(|message| Fault::at(&location, message))?;
+    host::path_nodes::install_spawn_fields(
+        world.resource_mut::<RoundScript>().into_inner(),
+        &entities,
+        &keys,
+    )
+    .map_err(|message| Fault::at(&location, message))?;
+    // Map actors run animscripts/init during finish_spawning. Its firstInit
+    // enumerates players and initializes shared AI state through level.player.
+    // The authored map-entry script runs later, so its player must exist now.
+    if let Some(client) = campaign_player {
+        host::players::campaign::initialize(world, client)
+            .map_err(|message| Fault::at(&location, message))?;
+    }
+    host::spawners::finish_spawning(world)?;
     host::presence::initialize_map_models(world);
+    host::path_nodes::blockers::initialize(world)
+        .map_err(|message| Fault::at(&location, message))?;
     Ok(())
 }

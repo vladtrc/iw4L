@@ -10,7 +10,12 @@ use crate::world::ClientId;
 use bevy_ecs::prelude::World;
 use glam::Vec3;
 
-pub(crate) mod campaign;
+mod operator;
+pub(super) use operator::toggle;
+mod spawn;
+mod spin;
+pub(crate) use spawn::initialize_map;
+const MAX_TURRETS: usize = 32;
 
 const TURN_RATE_DEG_PER_S: f32 = 360.0;
 const SCAN_RATE_DEG_PER_S: f32 = 30.0;
@@ -21,12 +26,20 @@ const TARGET_HEIGHT: f32 = 40.0;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Turret {
-    weapon: u32,
+    pub(crate) weapon: u32,
     mode: Arc<str>,
     pub(super) owner: Option<u64>,
+    pub(crate) active_user: Option<u64>,
+    pub(crate) ignore_goals: bool,
+    pub(crate) operable: bool,
+    pub(super) can_ai_detach: bool,
+    pub(super) drop_hint: i32,
+    player_position_dist: f32,
+    pub(super) aim_column_degrees: f32,
     team: Option<Arc<str>>,
     pub(super) carried: bool,
     fire_enabled: bool,
+    manual_firing: bool,
     manual: Option<(u64, [f32; 3])>,
     target: Option<u64>,
     firing: bool,
@@ -37,28 +50,84 @@ pub(crate) struct Turret {
     arcs: [f32; 4],
     drop_pitch: f32,
     convergence: [f32; 2],
+    suppression_seconds: f32,
+    ai_spread_degrees: f32,
+    player_spread_degrees: f32,
+    max_range: f32,
+    acquired_at: i32,
+    last_seen_at: i32,
+    last_seen_point: Option<[f32; 3]>,
+    next_fire_at: i32,
     minimap: bool,
-    solid: bool,
     minigun: bool,
+    auto_rotation_stop_delay: i32,
     mode_change_wait: f32,
+    spin: spin::Spin,
 }
 
 impl Turret {
-    pub(super) fn model_rotations(&self, base: [f32; 3]) -> Vec<xmodel_runtime::TagRotation> {
-        if !self.aim_initialized || self.carried || &*self.mode == "sentry_offline" {
-            return Vec::new();
+    fn new(weapon: u32, settings: weapon_iw4::TurretSettings) -> Self {
+        Self {
+            weapon,
+            mode: "manual".into(),
+            owner: None,
+            active_user: None,
+            ignore_goals: false,
+            operable: true,
+            can_ai_detach: true,
+            drop_hint: -1,
+            player_position_dist: settings.player_position_dist,
+            aim_column_degrees: settings.aim_column_degrees,
+            team: None,
+            carried: false,
+            fire_enabled: true,
+            manual_firing: false,
+            manual: None,
+            target: None,
+            firing: false,
+            on_target: false,
+            aim: [1., 0., 0.],
+            aim_initialized: false,
+            scan_direction: 1.,
+            arcs: settings.arcs.map(|value| value.clamp(0., 180.)),
+            drop_pitch: -90.,
+            convergence: settings.convergence_seconds.map(|value| value.max(0.)),
+            suppression_seconds: settings.suppression_seconds.max(0.),
+            ai_spread_degrees: settings.ai_spread_degrees.max(0.),
+            player_spread_degrees: settings.player_spread_degrees.max(0.),
+            max_range: if settings.max_range > 0. {
+                settings.max_range
+            } else {
+                f32::MAX
+            },
+            acquired_at: 0,
+            last_seen_at: 0,
+            last_seen_point: None,
+            next_fire_at: 0,
+            minimap: false,
+            minigun: false,
+            auto_rotation_stop_delay: 1000,
+            mode_change_wait: 0.,
+            spin: spin::Spin::new(settings.barrel_spin),
         }
-        let axis = math_iw4::angles_to_axis(base);
-        let aim = Vec3::from_array(self.aim);
-        let local = axis.map(|axis| aim.dot(Vec3::from_array(axis)));
-        vec![xmodel_runtime::TagRotation {
-            tag: "tag_aim".into(),
-            angles: math_iw4::vect_to_angles(local),
-        }]
+    }
+    pub(super) fn model_rotations(&self, base: [f32; 3]) -> Vec<xmodel_runtime::TagRotation> {
+        let mut rotations = Vec::new();
+        if self.aim_initialized && !self.carried && &*self.mode != "sentry_offline" {
+            let axis = math_iw4::angles_to_axis(base);
+            let aim = Vec3::from_array(self.aim);
+            let local = axis.map(|axis| aim.dot(Vec3::from_array(axis)));
+            rotations.push(xmodel_runtime::TagRotation {
+                tag: "tag_aim".into(),
+                angles: math_iw4::vect_to_angles(local),
+            });
+        }
+        rotations.extend(self.spin.rotation());
+        rotations
     }
 }
 
-fn turret_of(world: &World, receiver: &Value) -> Result<u64, String> {
+pub(super) fn turret_of(world: &World, receiver: &Value) -> Result<u64, String> {
     let runtime = world.resource::<RoundScript>();
     match runtime.entity(receiver) {
         Some((object, _)) if runtime.engine.turrets.contains_key(&object) => Ok(object),
@@ -81,16 +150,6 @@ fn edit(
             .unwrap(),
     );
     Ok(Value::Undefined)
-}
-
-fn player_object(world: &World, value: &Value) -> Result<Option<u64>, String> {
-    match value {
-        Value::Undefined => Ok(None),
-        Value::Object(id) if world.resource::<RoundScript>().player_client(*id).is_some() => {
-            Ok(Some(*id))
-        }
-        _ => Err("owner is not a player".into()),
-    }
 }
 
 fn field_vector(world: &mut World, object: u64, name: &str) -> [f32; 3] {
@@ -128,49 +187,13 @@ fn weapon_range(world: &mut World, weapon: u32) -> f32 {
 }
 
 pub(crate) fn register(registry: &mut NativeRegistry) {
-    registry.register(Function, "spawnturret", |world, _, args| {
-        let classname = string(args, 0)?;
-        let origin = vector(args, 1)?;
-        let weaponinfo = string(args, 2)?;
-        let weapon =
-            crate::script_player::weapon_named(&FrameWorld::from_world(world), &weaponinfo)?;
-        let presence = super::presence::spawn_presence(world, origin)?;
-        let birthtime = super::players::now_ms(world) as i32;
-        let mut runtime = world.resource_mut::<RoundScript>();
-        let id = runtime.create_entity(EntityKind::Spawned, &classname)?;
-        runtime.set_object_field(id, "birthtime", Value::Int(birthtime));
-        runtime.set_object_field(id, "origin", Value::Vector(origin));
-        runtime.set_object_field(id, "angles", Value::Vector([0.0; 3]));
-        runtime.set_object_field(id, "weaponinfo", Value::String(weaponinfo.into()));
-        runtime.entities.get_mut(&id).unwrap().presence = Some(presence);
-        runtime.engine.turrets.insert(
-            id,
-            Turret {
-                weapon,
-                mode: "manual".into(),
-                owner: None,
-                team: None,
-                carried: false,
-                fire_enabled: true,
-                manual: None,
-                target: None,
-                firing: false,
-                on_target: false,
-                aim: [1.0, 0.0, 0.0],
-                aim_initialized: false,
-                scan_direction: 1.0,
-                arcs: [180.0, 180.0, 90.0, 90.0],
-                drop_pitch: 0.0,
-                convergence: [0.0; 2],
-                minimap: false,
-                solid: false,
-                minigun: false,
-                mode_change_wait: 0.0,
-            },
-        );
-        Ok(Value::Object(id))
+    spin::register(registry);
+    registry.register(Function, "spawnturret", spawn::dynamic);
+    registry.register(Function, "canspawnturret", |world, _, _| {
+        Ok(Value::Int(i32::from(
+            world.resource::<RoundScript>().engine.turrets.len() < MAX_TURRETS,
+        )))
     });
-    registry.register(Function, "canspawnturret", |_, _, _| Ok(Value::Int(1)));
 
     registry.register(Method, "setmode", |world, receiver, args| {
         let mode: Arc<str> = string(args, 0)?.into();
@@ -182,6 +205,15 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         }
         edit(world, receiver, |t| t.mode = mode)
     });
+    registry.register(Method, "getmode", |world, receiver, _| {
+        let object = turret_of(world, receiver)?;
+        Ok(Value::String(
+            world.resource::<RoundScript>().engine.turrets[&object]
+                .mode
+                .clone()
+                .into(),
+        ))
+    });
     fn set_target(world: &mut World, receiver: &Value, args: &[Value]) -> Result<Value, String> {
         let target = entity_id(world, arg(args, 0)?)?;
         let offset = optional(args, 1, vector)?.unwrap_or([0.0; 3]);
@@ -191,6 +223,26 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         }
         edit(world, receiver, |t| t.manual = Some((target, offset)))
     }
+    registry.register(Method, "setturretignoregoals", |world, receiver, args| {
+        let ignore = int(args, 0)? != 0;
+        edit(world, receiver, |t| t.ignore_goals = ignore)
+    });
+    registry.register(Method, "setturretcanaidetach", |world, receiver, args| {
+        let allowed = int(args, 0)? != 0;
+        edit(world, receiver, |t| t.can_ai_detach = allowed)
+    });
+    registry.register(Function, "isturretactive", |world, _, args| {
+        if args.len() != 1 {
+            return Err("IsTurretActive requires exactly one entity".into());
+        }
+        let object = turret_of(world, arg(args, 0)?)?;
+        Ok(Value::Int(
+            world.resource::<RoundScript>().engine.turrets[&object]
+                .active_user
+                .is_some()
+                .into(),
+        ))
+    });
     registry.register(Method, "settargetentity", set_target);
     registry.register(Method, "setturrettargetent", set_target);
     registry.register(Method, "cleartargetentity", |world, receiver, _| {
@@ -207,7 +259,7 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
     registry.register(Method, "getturretowner", |world, receiver, _| {
         let object = turret_of(world, receiver)?;
         Ok(world.resource::<RoundScript>().engine.turrets[&object]
-            .owner
+            .active_user
             .map_or(Value::Undefined, Value::Object))
     });
     registry.register(Method, "isfiringturret", |world, receiver, _| {
@@ -222,7 +274,7 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
     });
     registry.register(Method, "shootturret", |world, receiver, _| {
         let object = turret_of(world, receiver)?;
-        shoot(world, object);
+        shoot(world, object)?;
         Ok(Value::Undefined)
     });
     registry.register(Method, "setturretteam", |world, receiver, args| {
@@ -230,7 +282,17 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         edit(world, receiver, |t| t.team = Some(team))
     });
     registry.register(Method, "setsentryowner", |world, receiver, args| {
-        let owner = player_object(world, arg(args, 0)?)?;
+        let object = turret_of(world, receiver)?;
+        if !matches!(
+            &*world.resource::<RoundScript>().engine.turrets[&object].mode,
+            "sentry" | "sentry_offline"
+        ) {
+            return Err("SetSentryOwner requires a sentry turret".into());
+        }
+        let owner = match arg(args, 0)? {
+            Value::Undefined => None,
+            value => Some(entity_id(world, value)?),
+        };
         edit(world, receiver, |t| t.owner = owner)
     });
     registry.register(Method, "setsentrycarried", |world, receiver, args| {
@@ -238,10 +300,16 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         edit(world, receiver, |t| t.carried = carried)
     });
     registry.register(Method, "maketurretinoperable", |world, receiver, _| {
-        edit(world, receiver, |_| {})
+        edit(world, receiver, |t| t.operable = false)
     });
     registry.register(Method, "maketurretoperable", |world, receiver, _| {
-        edit(world, receiver, |_| {})
+        edit(world, receiver, |t| t.operable = true)
+    });
+    registry.register(Method, "startfiring", |world, receiver, _| {
+        edit(world, receiver, |t| t.manual_firing = true)
+    });
+    registry.register(Method, "stopfiring", |world, receiver, _| {
+        edit(world, receiver, |t| t.manual_firing = false)
     });
     registry.register(Method, "turretfiredisable", |world, receiver, _| {
         edit(world, receiver, |t| t.fire_enabled = false)
@@ -250,7 +318,29 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         edit(world, receiver, |t| t.fire_enabled = true)
     });
     registry.register(Method, "maketurretsolid", |world, receiver, _| {
-        edit(world, receiver, |t| t.solid = true)
+        let object = turret_of(world, receiver)?;
+        let contents = world.resource::<RoundScript>().entities[&object].contents as u32
+            | crate::bullet_collision::CONTENTS_SOLID;
+        spawn::set_body(
+            world,
+            object,
+            crate::EntityBodyBounds {
+                midpoint: [0., 0., 28.],
+                half_size: [14., 14., 28.],
+                contents,
+            },
+        )?;
+        Ok(Value::Undefined)
+    });
+    registry.register(Method, "setautorotationdelay", |world, receiver, args| {
+        let seconds = float(args, 0)?;
+        if !seconds.is_finite() || seconds < 0. {
+            return Err("auto rotation delay must be finite and nonnegative".into());
+        }
+        let delay = (seconds * 1000. + 0.5).floor() as i32;
+        edit(world, receiver, |turret| {
+            turret.auto_rotation_stop_delay = delay
+        })
     });
     registry.register(Method, "setsentryminigun", |world, receiver, _| {
         edit(world, receiver, |t| t.minigun = true)
@@ -278,10 +368,36 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
     registry.register(Method, "setconvergencetime", |world, receiver, args| {
         let seconds = float(args, 0)?;
         let axis = optional(args, 1, string)?;
-        edit(world, receiver, |t| match axis.as_deref() {
-            Some("pitch") => t.convergence[0] = seconds,
-            _ => t.convergence[1] = seconds,
-        })
+        let index = match axis.as_deref() {
+            None | Some("yaw") => 1,
+            Some("pitch") => 0,
+            _ => return Err("convergence axis must be pitch or yaw".into()),
+        };
+        if !seconds.is_finite() {
+            return Err("convergence time must be finite".into());
+        }
+        edit(world, receiver, |t| t.convergence[index] = seconds.max(0.))
+    });
+    registry.register(Method, "setsuppressiontime", |world, receiver, args| {
+        let seconds = float(args, 0)?;
+        if !seconds.is_finite() {
+            return Err("suppression time must be finite".into());
+        }
+        edit(world, receiver, |t| t.suppression_seconds = seconds.max(0.))
+    });
+    registry.register(Method, "setaispread", |world, receiver, args| {
+        let spread = float(args, 0)?;
+        if !spread.is_finite() || !(0.0..90.0).contains(&spread) {
+            return Err("AI spread must be finite, nonnegative and below 90 degrees".into());
+        }
+        edit(world, receiver, |t| t.ai_spread_degrees = spread)
+    });
+    registry.register(Method, "setplayerspread", |world, receiver, args| {
+        let spread = float(args, 0)?;
+        if !spread.is_finite() || !(0.0..90.0).contains(&spread) {
+            return Err("player spread must be finite, nonnegative and below 90 degrees".into());
+        }
+        edit(world, receiver, |t| t.player_spread_degrees = spread)
     });
     fn arc(
         world: &mut World,
@@ -326,7 +442,7 @@ fn aim_point(world: &mut World, object: u64, offset: [f32; 3]) -> Option<Vec3> {
 }
 
 fn hostile(world: &mut World, turret: &Turret, target: u64) -> bool {
-    if Some(target) == turret.owner {
+    if Some(target) == turret.owner || Some(target) == turret.active_user {
         return false;
     }
     let team = |world: &mut World, object: u64| match super::players::entity_field(
@@ -335,10 +451,12 @@ fn hostile(world: &mut World, turret: &Turret, target: u64) -> bool {
         Value::String(team) => Some(Arc::<str>::from(team)),
         _ => None,
     };
-    let own = turret
-        .team
-        .clone()
-        .or_else(|| turret.owner.and_then(|o| team(world, o)));
+    let own = turret.team.clone().or_else(|| {
+        turret
+            .owner
+            .or(turret.active_user)
+            .and_then(|o| team(world, o))
+    });
     match own.as_deref() {
         None | Some("free") => true,
         Some(own) => team(world, target).as_deref() != Some(own),
@@ -363,6 +481,58 @@ fn within_arcs(turret: &Turret, base: [f32; 3], dir: Vec3) -> bool {
     (-right..=left).contains(&yaw) && (-top..=bottom).contains(&pitch)
 }
 
+pub(super) fn actor_can_engage(world: &mut World, actor: u64, object: u64) -> Result<bool, String> {
+    let turret = world.resource::<RoundScript>().engine.turrets[&object].clone();
+    let target = world
+        .resource::<RoundScript>()
+        .sentients
+        .get(&actor)
+        .and_then(|state| state.target);
+    let Some(target) = target else {
+        return Ok(true);
+    };
+    let Some(at) = aim_point(world, target, [0.; 3]) else {
+        return Ok(true);
+    };
+    let actor_origin = Vec3::from_array(field_vector(world, actor, "origin"));
+    const CLOSE_THREAT_UNITS: f32 = 256.;
+    if matches!(&*turret.mode, "manual" | "manual_ai")
+        && actor_origin.distance_squared(at) >= CLOSE_THREAT_UNITS.powi(2)
+    {
+        return Ok(true);
+    }
+    let from = muzzle(world, object);
+    let delta = at - Vec3::from_array(from);
+    if delta.length_squared() > turret.max_range * turret.max_range {
+        return Ok(true);
+    }
+    let visible_to_actor = world.resource::<RoundScript>().actors[&actor]
+        .sentient_info
+        .get(&target)
+        .is_some_and(|info| info.visible);
+    if !visible_to_actor {
+        return Ok(true);
+    }
+    let Some(direction) = delta.try_normalize() else {
+        return Ok(false);
+    };
+    let base = field_vector(world, object, "angles");
+    Ok(within_arcs(&turret, base, direction)
+        && visible(world, from, at, ignore_self(world, object), target))
+}
+
+pub(super) fn actor_should_detach(
+    world: &mut World,
+    actor: u64,
+    object: u64,
+) -> Result<bool, String> {
+    let turret = &world.resource::<RoundScript>().engine.turrets[&object];
+    if !turret.can_ai_detach || !matches!(&*turret.mode, "sentry" | "auto_ai" | "auto_nonai") {
+        return Ok(false);
+    }
+    actor_can_engage(world, actor, object).map(|can_engage| !can_engage)
+}
+
 fn acquire(world: &mut World, object: u64, turret: &Turret, from: [f32; 3]) -> Option<(u64, Vec3)> {
     if let Some((target, offset)) = turret.manual {
         return aim_point(world, target, offset).map(|at| (target, at));
@@ -371,36 +541,41 @@ fn acquire(world: &mut World, object: u64, turret: &Turret, from: [f32; 3]) -> O
         return None;
     }
     let base = field_vector(world, object, "angles");
-    let range = weapon_range(world, turret.weapon);
-    let ignore = ignore_self(world, object);
-    let candidates: Vec<(u32, u64)> = world
-        .resource::<RoundScript>()
-        .players
-        .iter()
-        .filter(|(_, slot)| &*slot.sessionstate == "playing")
-        .map(|(client, slot)| (*client, slot.object))
-        .collect();
-    let mut targets: Vec<(u64, Vec3)> = {
-        let frame = FrameWorld::from_world(world);
-        candidates
-            .into_iter()
-            .filter_map(|(client, player)| {
-                let ps = frame.player(ClientId(client))?;
-                (ps.health > 0).then(|| {
-                    (
-                        player,
-                        Vec3::from_array(ps.origin) + Vec3::Z * TARGET_HEIGHT,
-                    )
-                })
-            })
-            .collect()
+    let range = match world
+        .resource_mut::<RoundScript>()
+        .object_field(object, "maxrange")
+    {
+        Value::Float(value) => value,
+        Value::Int(value) => value as f32,
+        Value::String(value) => value.parse::<f32>().unwrap_or(turret.max_range),
+        _ => turret.max_range,
     };
-    targets.extend(campaign::sentient_targets(world, turret));
+    if !range.is_finite() {
+        return None;
+    }
+    let range = if range > 0. { range } else { f32::MAX };
+    let ignore = ignore_self(world, object);
+    let runtime = world.resource::<RoundScript>();
+    let candidates: std::collections::BTreeSet<u64> = runtime
+        .players
+        .values()
+        .filter(|slot| &*slot.sessionstate == "playing")
+        .map(|slot| slot.object)
+        .chain(runtime.actors.keys().copied())
+        .collect();
     let mut best: Option<(f32, u64, Vec3)> = None;
-    for (player, at) in targets {
+    for player in candidates {
+        let health = super::players::entity_field(world, player, "health");
+        if !matches!(health,Value::Int(n) if n>0) && !matches!(health,Value::Float(n) if n>0.) {
+            continue;
+        }
+        let Value::Vector(origin) = super::players::entity_field(world, player, "origin") else {
+            continue;
+        };
         if !hostile(world, turret, player) {
             continue;
         }
+        let at = Vec3::from_array(origin) + Vec3::Z * TARGET_HEIGHT;
         let delta = at - Vec3::from_array(from);
         let distance = delta.length();
         if distance > range || best.is_some_and(|(d, ..)| d <= distance) {
@@ -418,9 +593,7 @@ fn acquire(world: &mut World, object: u64, turret: &Turret, from: [f32; 3]) -> O
 }
 
 pub(crate) fn advance(world: &mut World) {
-    campaign::player_turrets(world);
-    campaign::gunner_turrets(world);
-    campaign::scripted_fire(world);
+    let now = super::players::now_ms(world) as i32;
     let objects: Vec<u64> = world
         .resource::<RoundScript>()
         .engine
@@ -442,6 +615,9 @@ pub(crate) fn advance(world: &mut World) {
             continue;
         }
         let mut turret = world.resource::<RoundScript>().engine.turrets[&object].clone();
+        if operator::advance(world, object, &mut turret, now) {
+            continue;
+        }
         let base = field_vector(world, object, "angles");
         if !turret.aim_initialized || turret.carried || &*turret.mode == "sentry_offline" {
             turret.aim = math_iw4::angles_to_axis(base)[0];
@@ -449,29 +625,51 @@ pub(crate) fn advance(world: &mut World) {
         }
         let from = muzzle(world, object);
         let active = !turret.carried && &*turret.mode != "sentry_offline";
-        let found = if active {
+        let mut found = if active {
             acquire(world, object, &turret, from)
         } else {
             None
         };
-        let found = if active {
-            campaign::suppression(world, object, from, found)
-        } else {
-            None
-        };
+        if let Some((_, point)) = found {
+            turret.last_seen_at = now;
+            turret.last_seen_point = Some(point.to_array());
+        } else if active
+            && (now - turret.last_seen_at) as f32 <= turret.suppression_seconds * 1000.
+            && let Some(target) = turret
+                .target
+                .filter(|target| world.resource::<RoundScript>().live(target))
+            && let Some(point) = turret.last_seen_point
+        {
+            let health = super::players::entity_field(world, target, "health");
+            if matches!(health,Value::Int(n) if n>0) || matches!(health,Value::Float(n) if n>0.) {
+                found = Some((target, Vec3::from_array(point)));
+            }
+        }
         let was_firing = turret.firing;
         let was_on_target = turret.on_target;
         match found {
             Some((target, at)) => {
                 if turret.target != Some(target) {
                     turret.on_target = false;
+                    turret.acquired_at = now;
                 }
                 turret.target = Some(target);
                 if let Some(wanted) = (at - Vec3::from_array(from)).try_normalize() {
-                    let step =
-                        TURN_RATE_DEG_PER_S.to_radians() * crate::MATCH_TICK_MS as f32 * 0.001;
-                    let aim =
-                        super::guidance::turn_toward(Vec3::from_array(turret.aim), wanted, step);
+                    let mut facing = math_iw4::vect_to_angles(turret.aim);
+                    let desired = math_iw4::vect_to_angles(wanted.to_array());
+                    for axis in 0..2 {
+                        let delta = math_iw4::angle_subtract(desired[axis], facing[axis]);
+                        let duration = turret.convergence[axis] * 1000.;
+                        let step = if duration > 0. {
+                            let remaining = (duration - (now - turret.acquired_at) as f32)
+                                .max(crate::MATCH_TICK_MS as f32);
+                            delta.abs() * crate::MATCH_TICK_MS as f32 / remaining
+                        } else {
+                            TURN_RATE_DEG_PER_S * crate::MATCH_TICK_MS as f32 * 0.001
+                        };
+                        facing[axis] += delta.clamp(-step, step);
+                    }
+                    let aim = Vec3::from_array(math_iw4::angles_to_axis(facing)[0]);
                     turret.aim = aim.to_array();
                     turret.on_target = aim.angle_between(wanted) <= ON_TARGET_DEGREES.to_radians();
                 }
@@ -508,7 +706,12 @@ pub(crate) fn advance(world: &mut World) {
                 }
             }
         }
-        turret.firing = turret.on_target && turret.fire_enabled;
+        turret.firing = turret.on_target
+            && turret.fire_enabled
+            && (!matches!(&*turret.mode, "manual" | "manual_ai") || turret.manual_firing);
+        turret
+            .spin
+            .advance(i64::from(now), turret.firing || turret.manual_firing);
         let raise_on_target = turret.on_target && !was_on_target;
         let raise_state = turret.firing != was_firing;
         world
@@ -530,18 +733,78 @@ pub(crate) fn advance(world: &mut World) {
     }
 }
 
-fn shoot(world: &mut World, object: u64) {
+fn attack_credit(
+    runtime: &RoundScript,
+    turret: &Turret,
+) -> (Option<ClientId>, Option<crate::ScriptModelId>) {
+    let owner = turret.owner.or(turret.active_user);
+    let client = owner.and_then(|id| runtime.player_client(id)).map(ClientId);
+    let entity = owner
+        .and_then(|id| runtime.entities.get(&id))
+        .and_then(|entity| entity.presence);
+    (client, entity.filter(|_| client.is_none()))
+}
+
+fn shoot(world: &mut World, object: u64) -> Result<(), String> {
     let turret = world.resource::<RoundScript>().engine.turrets[&object].clone();
+    let now = super::players::now_ms(world) as i32;
+    if !turret.fire_enabled
+        || turret.carried
+        || &*turret.mode == "sentry_offline"
+        || now < turret.next_fire_at
+    {
+        return Ok(());
+    }
+    let interval = FrameWorld::from_world(world)
+        .combat_facts_for(turret.weapon)
+        .ok_or("turret weapon has no firing facts")?
+        .fire_time_ms
+        .max(1);
     let from = muzzle(world, object);
-    let attacker = {
-        let runtime = world.resource::<RoundScript>();
-        turret
-            .owner
-            .and_then(|o| runtime.player_client(o))
-            .map(ClientId)
+    let (attacker, attacker_entity) = attack_credit(world.resource::<RoundScript>(), &turret);
+    // Script-controlled manual fire can have a player owner; autonomous sentries
+    // use the AI cone even when their kill credit belongs to a player.
+    let player_controlled = attacker.is_some() && &*turret.mode == "manual" && turret.manual_firing;
+    let spread = if player_controlled {
+        turret.player_spread_degrees
+    } else {
+        turret.ai_spread_degrees
     };
-    let aim = campaign::spread(world, object, campaign::AI_SPREAD, from, turret.aim);
-    fire_bullet(world, object, from, aim, turret.weapon, attacker);
+    let direction =
+        super::natives::math::sample_shot_direction(world, Vec3::from_array(turret.aim), spread)?;
+    fire_bullet(
+        world,
+        object,
+        from,
+        direction.to_array(),
+        turret.weapon,
+        attacker,
+        attacker_entity,
+    )?;
+    let number = world.resource::<RoundScript>().entities[&object].number;
+    let tick = world.resource::<crate::step::StepRequest>().tick;
+    FrameWorld::from_world(world).push_entity_event(
+        tick,
+        crate::EventAudience::All,
+        entity_iw4::EntityEventKind::FIRE_WEAPON,
+        crate::EntityEventPayload {
+            number,
+            attacker_entity_num: number,
+            weapon: turret.weapon,
+            origin: from,
+            direction: direction.to_array(),
+            ..Default::default()
+        },
+    );
+    if let Some(turret) = world
+        .resource_mut::<RoundScript>()
+        .engine
+        .turrets
+        .get_mut(&object)
+    {
+        turret.next_fire_at = now.saturating_add(interval);
+    }
+    Ok(())
 }
 
 pub(crate) fn fire_bullet(
@@ -551,29 +814,71 @@ pub(crate) fn fire_bullet(
     dir: [f32; 3],
     weapon: u32,
     attacker: Option<ClientId>,
-) {
-    campaign::fire_event(world, object, from, weapon);
+    attacker_entity: Option<crate::ScriptModelId>,
+) -> Result<(), String> {
+    let facts = FrameWorld::from_world(world)
+        .combat_facts_for(weapon)
+        .ok_or("bullet weapon has no executable firing facts")?;
     let range = weapon_range(world, weapon);
     let end = (Vec3::from_array(from) + Vec3::from_array(dir) * range).to_array();
-    let ignore = ignore_self(world, object);
+    let mut ignore = ignore_self(world, object);
+    if world
+        .resource::<RoundScript>()
+        .engine
+        .turrets
+        .get(&object)
+        .is_some_and(|t| t.active_user.is_some())
+    {
+        ignore.client = attacker;
+    }
+    let outcome = entity_trace(world, from, end, MASK_SHOT, ignore);
+    if let TraceOutcome::Invalid { reason } = outcome {
+        return Err(format!("bullet trace is unavailable: {reason:?}"));
+    }
+    if attacker_entity.is_some() && world.resource::<RoundScript>().actors.contains_key(&object) {
+        let reached = match &outcome {
+            TraceOutcome::Hit { end, .. }
+            | TraceOutcome::Miss { end }
+            | TraceOutcome::StartSolid { end, .. } => *end,
+            TraceOutcome::Invalid { .. } => unreachable!(),
+        };
+        super::ai_events::bullet(world, object, from, reached, facts.silenced, false);
+        super::actors::suppression::bullet_line(
+            world,
+            object,
+            from,
+            reached,
+            super::players::now_ms(world) as i32,
+        )?;
+    }
     let TraceOutcome::Hit {
         collider,
         end,
         normal,
         ..
-    } = entity_trace(world, from, end, MASK_SHOT, ignore)
+    } = outcome
     else {
-        return;
+        return Ok(());
     };
-    let Some(facts) = FrameWorld::from_world(world).combat_facts_for(weapon) else {
-        return;
+    let distance = (0..3)
+        .map(|i| (end[i] - from[i]).powi(2))
+        .sum::<f32>()
+        .sqrt();
+    let hitloc = match collider {
+        ColliderId::Player { hitloc, .. } => hitloc,
+        ColliderId::EntityDObjBone {
+            part_classification,
+            ..
+        } => part_classification,
+        _ => 0,
     };
-    let amount = facts.damage;
+    let amount = (crate::bullet::bullet_damage_at_distance(&facts, distance) as f32
+        * facts.location_scale(hitloc)) as i32;
     let hit = match collider {
         ColliderId::Player { .. } | ColliderId::World { .. } => None,
         _ => match collider_entity(world, collider) {
             Value::Object(hit) => Some(hit),
-            _ => return,
+            _ => return Ok(()),
         },
     };
     let runtime = world.resource::<RoundScript>();
@@ -589,6 +894,7 @@ pub(crate) fn fire_bullet(
         | ColliderId::EntityDObjBone { surface_flags, .. }
         | ColliderId::EntityLinkedBrush { surface_flags, .. } => surface_flags,
         ColliderId::Player { .. } => 0,
+        ColliderId::EntityBody { .. } => weapon_iw4::SURF_TYPE_FLESH << 20,
     };
     let surf_type = if matches!(collider, ColliderId::Player { .. }) {
         weapon_iw4::SURF_TYPE_FLESH as u8
@@ -633,13 +939,13 @@ pub(crate) fn fire_bullet(
     let runtime = world.resource::<RoundScript>();
     let target = match collider {
         ColliderId::Player { client, .. } => crate::script::HitTarget::Player(client),
-        ColliderId::World { .. } => return,
+        ColliderId::World { .. } => return Ok(()),
         _ => match hit.and_then(|hit| runtime.entities.get(&hit)) {
             Some(e) if e.can_damage => match e.presence {
                 Some(presence) => crate::script::HitTarget::Entity(presence),
-                None => return,
+                None => return Ok(()),
             },
-            _ => return,
+            _ => return Ok(()),
         },
     };
     let inflictor = runtime.entities.get(&object).and_then(|e| e.presence);
@@ -652,10 +958,12 @@ pub(crate) fn fire_bullet(
             amount,
             origin: from,
             attacker,
+            attacker_entity,
             inflictor,
             means: "MOD_RIFLE_BULLET",
             weapon,
             flags: 0,
-            hitloc: 0,
+            hitloc,
         });
+    Ok(())
 }

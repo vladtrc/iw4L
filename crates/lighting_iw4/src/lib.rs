@@ -9,6 +9,8 @@ mod entry;
 mod expand;
 mod fragment;
 mod glow;
+mod hero;
+pub use hero::{HeroOnlyLight, add_hero_only_lights};
 mod isvalid;
 mod light_probe;
 mod lit_tech;
@@ -32,10 +34,11 @@ mod viewmodel_origin;
 
 pub use accumulate::{
     LIGHT_GRID_COLORS_ACCUM_COUNT, LIGHT_GRID_COLORS_BYTE_COUNT, LIGHT_GRID_COMPRESS_R_OFFSETS,
-    LIGHT_GRID_PACK_BIAS, LIGHT_GRID_TWEAK_ACCUM_CLAMP, LightGridCompressedColor,
-    light_grid_accumulate_colors, light_grid_add_colors, light_grid_apply_contrast_tweaks,
-    light_grid_apply_intensity_tweaks, light_grid_compress_colors, light_grid_expand_colors,
-    light_grid_pack_colors, light_grid_tweak_fixed_from_float,
+    LIGHT_GRID_PACK_BIAS, LIGHT_GRID_TWEAK_ACCUM_CLAMP, LightGridCompressedColor, LightGridTweaks,
+    light_grid_accumulate_colors, light_grid_accumulate_colors_with_tweaks, light_grid_add_colors,
+    light_grid_apply_contrast_tweaks, light_grid_apply_intensity_tweaks,
+    light_grid_compress_colors, light_grid_expand_colors, light_grid_pack_colors,
+    light_grid_tweak_fixed_from_float,
 };
 pub use atapoint::{
     LIGHT_GRID_ATPOINT_EMPTY_PRIMARY, LIGHT_GRID_COLORS_STRIDE, LIGHT_GRID_FIXED_WEIGHT_SCALE,
@@ -116,6 +119,7 @@ pub use lit_tech::{
     LIT_TECH_SHADOW_SPOT_SLOTS, LIT_TECH_STANDARD_ROW, LIT_TECH_STANDARD_ROW_DFOG,
     LIT_TECH_SURF_ROWS, TECHNIQUE_LIGHT_OMNI, TECHNIQUE_LIGHT_SPOT, TECHNIQUE_LIGHT_SPOT_SHADOW,
     TECHNIQUE_NONE, additional_light_tech_type, is_lit_remap_slot, lit_tech_column, lit_tech_type,
+    without_sun_shadow,
 };
 pub use lookup::{
     LightGridLookupColorAccum, LightGridLookupCorner, LightGridLookupWeights,
@@ -124,10 +128,11 @@ pub use lookup::{
 };
 pub use model_lighting_cache::{
     MODEL_LIGHTING_PIXEL_FREE_BITS_BUFFERS, ModelLightingCacheAlloc, ModelLightingCacheGlob,
-    ModelLightingCacheGlobError, dyn_pixel_free_bits_index, lighting_info_from_bytes,
-    lighting_info_reflection_probe_index, lighting_info_scene_light_index,
-    model_lighting_cache_bit_mask, model_lighting_cache_free_bits_words,
-    model_lighting_cache_free_slot_count, model_lighting_cache_handle, model_lighting_cache_slot,
+    ModelLightingCacheGlobError, ModelLightingCadence, ModelLightingFreeFrames,
+    dyn_pixel_free_bits_index, lighting_info_from_bytes, lighting_info_reflection_probe_index,
+    lighting_info_scene_light_index, model_lighting_cache_bit_mask,
+    model_lighting_cache_free_bits_words, model_lighting_cache_free_slot_count,
+    model_lighting_cache_handle, model_lighting_cache_slot,
     model_lighting_pixel_free_bits_size_bytes, model_lighting_pixel_free_bits_word_count,
     toggle_dyn_model_lighting_frame,
 };
@@ -195,9 +200,9 @@ pub use smodel_cache::{
 };
 pub use smodel_cmd::{
     SMODEL_CACHED_CMD_MAX_BYTES, SMODEL_PRETESS_CMD_BYTES, SmodelCachedCmdPlan, SmodelCmdKind,
-    SmodelPretessAlloc, SmodelPretessAllocError, smodel_cached_cmd_bytes, smodel_cached_cmd_plan,
-    smodel_cmd_reserve, smodel_pretess_indices_copy, smodel_same_bank_count,
-    write_smodel_cached_cmd, write_smodel_pretess_cmd,
+    SmodelPretessAlloc, SmodelPretessAllocError, SmodelPretessSpace, smodel_cached_cmd_bytes,
+    smodel_cached_cmd_plan, smodel_cmd_reserve, smodel_pretess_indices_copy,
+    smodel_same_bank_count, write_smodel_cached_cmd, write_smodel_pretess_cmd,
 };
 pub use smodel_inst::GfxStaticModelInst;
 pub use smodel_lighting::{
@@ -245,16 +250,15 @@ pub use spot_shadow::{
     spot_shadow_link_dyn_brush_vis, spot_shadow_link_entity, spot_shadow_link_extra_entity,
     spot_shadow_link_extra_player, spot_shadow_link_player, spot_shadow_link_primary_vis,
     spot_shadow_lookup_matrix, spot_shadow_mark_ent, spot_shadow_near_bias,
-    spot_shadow_overlay_atlas_y, spot_shadow_overlay_matrix, spot_shadow_packed_lists_ready,
-    spot_shadow_player_vis_link_allows, spot_shadow_primary_vis_bit,
-    spot_shadow_primary_vis_bit_index, spot_shadow_primary_vis_word_count,
-    spot_shadow_primary_vis_write, spot_shadow_scene_dobj_vis, spot_shadow_scene_dobj_vis_write,
-    spot_shadow_scene_model_vis, spot_shadow_scene_model_vis_write, spot_shadow_slot_plan,
-    spot_shadow_smodel_casts, spot_shadow_take_slot, spot_shadow_tan_half_fov,
-    spot_shadow_tess_bsp_surfs, spot_shadow_tess_scene_dobj_indices,
-    spot_shadow_tess_scene_model_indices, spot_shadow_tess_smodel_ids, spot_shadow_view_axis,
-    spot_shadow_view_parms, spot_shadow_walk_casters, spot_shadow_xmodel_is_caster,
-    spot_shadow_z_near,
+    spot_shadow_overlay_atlas_y, spot_shadow_overlay_matrix, spot_shadow_player_vis_link_allows,
+    spot_shadow_primary_vis_bit, spot_shadow_primary_vis_bit_index,
+    spot_shadow_primary_vis_word_count, spot_shadow_primary_vis_write, spot_shadow_scene_dobj_vis,
+    spot_shadow_scene_dobj_vis_write, spot_shadow_scene_model_vis,
+    spot_shadow_scene_model_vis_write, spot_shadow_slot_plan, spot_shadow_smodel_casts,
+    spot_shadow_take_slot, spot_shadow_tan_half_fov, spot_shadow_tess_bsp_surfs,
+    spot_shadow_tess_scene_dobj_indices, spot_shadow_tess_scene_model_indices,
+    spot_shadow_tess_smodel_ids, spot_shadow_view_axis, spot_shadow_view_parms,
+    spot_shadow_walk_casters, spot_shadow_xmodel_is_caster, spot_shadow_z_near,
 };
 pub use spot_shadow_choose::{
     GFX_WORLD_LIGHT_REGION_OFF, SM_ENABLE_DEFAULT, SM_SUN_ENABLE_DEFAULT,
@@ -263,13 +267,13 @@ pub use spot_shadow_choose::{
     SPOT_SHADOW_SCORE_LUMA, SPOT_SHADOW_SCORE_ONE, SPOT_SHADOW_SM_LIGHT_CAP, SPOT_SHADOW_TIME_WRAP,
     SPOT_SHADOW_VIEW_LIGHT_INDEX_BIAS, SpotShadowCandidateSkip, SpotShadowChoose,
     SpotShadowChooseDvars, SpotShadowEmit, SpotShadowEmittedSlot, SpotShadowFrontend,
-    SpotShadowHistory, SpotShadowHistoryEntry, SpotShadowUsedForce, SpotShadowableLight,
-    clear_used_bit, clear_used_bits_1_through_sun, generate_clears_used_bits_through_sun,
-    generate_primary_light_copy_bytes, generate_runs_choose, set_used_bit,
-    spot_shadow_add_candidate, spot_shadow_choose, spot_shadow_dist_cull,
-    spot_shadow_dist_cull_extra, spot_shadow_emit_from_history, spot_shadow_emit_frontend,
-    spot_shadow_fade_delta, spot_shadow_fade_out_history, spot_shadow_history_add,
-    spot_shadow_score, spot_shadow_sun_in_front, used_bit,
+    SpotShadowHistory, SpotShadowHistoryEntry, SpotShadowScene, SpotShadowSelectionPolicy,
+    SpotShadowUsedForce, SpotShadowView, SpotShadowableLight, clear_used_bit,
+    clear_used_bits_1_through_sun, generate_clears_used_bits_through_sun,
+    generate_primary_light_copy_bytes, generate_runs_choose, set_used_bit, spot_shadow_choose,
+    spot_shadow_dist_cull, spot_shadow_dist_cull_extra, spot_shadow_emit_from_history,
+    spot_shadow_emit_frontend, spot_shadow_fade_delta, spot_shadow_fade_out_history,
+    spot_shadow_history_add, spot_shadow_score, spot_shadow_sun_in_front, used_bit,
 };
 pub use trace::{
     LIGHT_GRID_TRACE_ALWAYS_ALLOW_TYPE, light_grid_trace_allows, light_grid_trace_corner_pos,

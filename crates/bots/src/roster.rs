@@ -105,6 +105,14 @@ impl BotAddQueue {
         });
     }
 
+    pub fn push_dummy_side(&mut self, count: u32, side: BotSide) {
+        self.0.push(BotAddRequest {
+            count: count.max(1),
+            dummy: true,
+            side: Some(side),
+        });
+    }
+
     pub fn drain(&mut self) -> Vec<BotAddRequest> {
         core::mem::take(&mut self.0)
     }

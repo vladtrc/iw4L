@@ -45,7 +45,7 @@ impl FamilyContent for EditorWeaponCatalog {
     fn published_handle(&self, id: u32) -> Option<crate::WeaponHandle> {
         FamilyContent::published_handle(self.registry.as_ref(), id)
     }
-    fn lookup(&self, ns: crate::AssetNamespace, name: &str) -> Option<u32> {
+    fn lookup(&self, ns: crate::FamilyId, name: &str) -> Option<u32> {
         FamilyContent::lookup(self.registry.as_ref(), ns, name)
     }
     fn offhand_class(&self, id: u32) -> i32 {
@@ -54,7 +54,7 @@ impl FamilyContent for EditorWeaponCatalog {
     fn admission(&self, id: u32) -> Result<(), crate::ConfigurationRefusal> {
         self.registry.native_configuration_admission(id)
     }
-    fn names_in(&self, ns: crate::AssetNamespace) -> Vec<(u32, String)> {
+    fn names_in(&self, ns: crate::FamilyId) -> Vec<(u32, String)> {
         FamilyContent::names_in(self.registry.as_ref(), ns)
     }
     fn prepared_all(&self) -> Vec<(u32, crate::WeaponSelection)> {
@@ -76,7 +76,7 @@ impl EditorWeaponCatalog {
     }
     pub fn item_unlock_requirement(
         &self,
-        namespace: crate::AssetNamespace,
+        namespace: crate::FamilyId,
         name: &str,
     ) -> Result<gamemode_iw4::progression::UnlockRequirement, &'static str> {
         self.registry.item_unlock_requirement(namespace, name)
@@ -85,7 +85,10 @@ impl EditorWeaponCatalog {
     pub fn len(&self) -> usize {
         self.registry.len()
     }
-    pub fn namespace_count(&self, ns: crate::AssetNamespace) -> usize {
+    pub fn is_empty(&self) -> bool {
+        self.registry.is_empty()
+    }
+    pub fn namespace_count(&self, ns: crate::FamilyId) -> usize {
         self.registry.namespace_count(ns)
     }
     pub fn weapon_families(&self) -> &crate::WeaponFamilies {
@@ -116,7 +119,7 @@ impl EditorWeaponCatalog {
     pub fn describe_configuration(&self, id: u32) -> Option<&crate::WeaponSelection> {
         self.families.describe(id)
     }
-    pub fn identity_namespace_of(&self, id: u32) -> Option<crate::AssetNamespace> {
+    pub fn identity_namespace_of(&self, id: u32) -> Option<crate::FamilyId> {
         self.registry.identity_namespace_of(id)
     }
     pub fn camouflage_slot(&self, id: u32, name: &str) -> Option<u8> {

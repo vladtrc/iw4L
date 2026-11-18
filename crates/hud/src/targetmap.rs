@@ -5,16 +5,14 @@ use assets::PreparedLocalizedStrings;
 use bevy::prelude::*;
 use frame::ViewSubject;
 use hud_iw4::{ExprError, ExprHost, Operand};
-use net::{LocalPresentClient, LocationCursor, PresentedSnapshot};
+use net::LocationCursor;
 
 use crate::chrome::{
     ChromeAssets, ChromeFrame, ChromeMenuAnim, MenuVisOnError, OwnerDrawArgs, OwnerDrawPaint,
-    execute_chrome_menu_overrides,
 };
 use crate::compass::DrawableCompass;
 use crate::draw2d::{Draw2dCmd, Draw2dList, Draw2dOp, Draw2dProvenance, tessellate_fonts};
 use crate::font_overlay;
-use crate::gaps::{GapCause, HudPresentationGaps};
 use crate::gpu_list::{HudTessPass, TessJob};
 use crate::images::{HUD_CHROME_NAMESPACE, HudImages};
 use crate::scorebar::milliseconds;
@@ -34,10 +32,6 @@ const ARROW_SIZE: f32 = 24.0;
 pub(crate) struct TargetmapRaster;
 pub(crate) fn spawn_targetmap(root: &mut ChildSpawnerCommands) {
     font_overlay::spawn_overlay(root, TargetmapRaster);
-}
-
-fn hide(pass: &mut HudTessPass) {
-    pass.targetmap = TessJob::Hide;
 }
 
 struct TargetmapExprHost<'a> {
@@ -132,7 +126,7 @@ fn pic(
     rect: [f32; 4],
     st: [f32; 4],
     material: &str,
-    namespace: asset_core::AssetNamespace,
+    namespace: asset_core::FamilyId,
     color: [f32; 4],
 ) -> Draw2dCmd {
     let applied = args.surface.apply_rect(
@@ -223,7 +217,7 @@ fn selector_rect(map: [f32; 4], at: [f32; 2], fraction: f32) -> Option<([f32; 4]
 
 struct Scene<'a> {
     compass: &'a DrawableCompass,
-    map_namespace: asset_core::AssetNamespace,
+    map_namespace: asset_core::FamilyId,
     selection: &'a sim::LocationSelection,
     cursor: LocationCursor,
     origin: [f32; 2],
@@ -306,119 +300,144 @@ fn owner_draw(
     OwnerDrawPaint::Painted
 }
 
-#[allow(clippy::too_many_arguments)]
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct TargetmapRenderer<'w> {
+    catalog: Option<Res<'w, MenuCatalog>>,
+    strings: Option<Res<'w, PreparedLocalizedStrings>>,
+    hud_images: ResMut<'w, HudImages>,
+    images: ResMut<'w, Assets<Image>>,
+    exprs: ResMut<'w, crate::expr_cache::MenuExprCache>,
+    pass: ResMut<'w, HudTessPass>,
+}
+
+impl TargetmapRenderer<'_> {
+    fn hide(&mut self) {
+        self.pass.targetmap = TessJob::Hide;
+    }
+
+    fn update(
+        &mut self,
+        surface: Res<crate::surface::Hud2dSurface>,
+        view: Option<Res<ViewSubject>>,
+        presentation: net::LocalPresentation,
+        cursor: Res<LocationCursor>,
+        compass: Option<Res<assets::SessionCompass>>,
+    ) {
+        if !surface.is_ready() || view.as_deref().is_some_and(|v| v.in_killcam()) {
+            self.hide();
+            return;
+        }
+        let Some(snapshot) = presentation.snapshot() else {
+            self.hide();
+            return;
+        };
+        let Some(selection) = snapshot
+            .meta
+            .for_client(presentation.client_id())
+            .and_then(|meta| meta.location_selection.as_ref())
+        else {
+            self.hide();
+            return;
+        };
+        let Some(ps) = presentation.player() else {
+            self.hide();
+            return;
+        };
+        let Some(catalog) = self.catalog.as_ref() else {
+            diag::warn_once!(Ui, "MenuCatalog is not loaded; Font_s cannot be walked");
+            self.hide();
+            return;
+        };
+        let Some(menu) = catalog.get(MENU) else {
+            self.hide();
+            return;
+        };
+        let Some(drawable) = crate::compass::resolve(
+            compass.as_deref().and_then(|c| c.at(ps.origin)),
+            &mut self.hud_images,
+        ) else {
+            self.hide();
+            return;
+        };
+        let host = TargetmapExprHost {
+            menu,
+            ms: milliseconds() as i32,
+            directing: i32::from(cursor.directing),
+            dvars: snapshot.meta.script_dvars(presentation.client_id()),
+            kind: snapshot.meta.kind,
+            localize: self.strings.as_ref().map(|s| &s.0),
+        };
+        let map_namespace = drawable.namespace;
+        let scene = Scene {
+            compass: &drawable,
+            map_namespace,
+            selection,
+            cursor: *cursor,
+            origin: [ps.origin[0], ps.origin[1]],
+            view_yaw: ps.viewangles[1],
+        };
+        let mut rotated = Vec::new();
+        let frame = {
+            let mut hook = |args: OwnerDrawArgs<'_>, frame: &mut ChromeFrame| {
+                owner_draw(&scene, &mut rotated, args, frame)
+            };
+            crate::chrome::ChromeMenuPainter::new(
+                menu,
+                &host,
+                &surface,
+                ChromeAssets {
+                    catalog: Some(catalog),
+                    localize: self.strings.as_ref().map(|s| &s.0),
+                },
+                ChromeMenuAnim::IDENTITY,
+                &mut self.exprs,
+            )
+            .paint(
+                MenuVisOnError::HideAll,
+                Some(&mut hook),
+                crate::chrome::ChromeMenuOverrides {
+                    skip: Some(&|item| item.background.to_ascii_lowercase().contains("stencil")),
+                    ..Default::default()
+                },
+            )
+        };
+        let mut fonts: HashMap<String, &asset_game::FontDef> = HashMap::new();
+        for cmd in &frame.list.cmds {
+            let _ = self
+                .hud_images
+                .get(cmd.material_namespace, &cmd.material, &mut self.images);
+            if let Draw2dOp::TextRun { font, .. } = &cmd.op
+                && !fonts.contains_key(font)
+                && let Some(def) = catalog.font(font)
+            {
+                fonts.insert(font.clone(), def);
+            }
+        }
+        for quad in &rotated {
+            let _ = self
+                .hud_images
+                .get(quad.material_namespace, &quad.material, &mut self.images);
+        }
+        let list = Draw2dList {
+            cmds: frame.list.cmds,
+        };
+        let (mut quads, _) = tessellate_fonts(&list, &fonts);
+        quads.extend(rotated);
+        if quads.is_empty() {
+            self.hide();
+            return;
+        }
+        self.pass.targetmap = TessJob::Quads(quads);
+    }
+}
+
 pub(crate) fn update_targetmap(
     surface: Res<crate::surface::Hud2dSurface>,
-    catalog: Option<Res<MenuCatalog>>,
-    strings: Option<Res<PreparedLocalizedStrings>>,
     view: Option<Res<ViewSubject>>,
-    local: Res<LocalPresentClient>,
-    presented: Res<PresentedSnapshot>,
+    presentation: net::LocalPresentation,
     cursor: Res<LocationCursor>,
     compass: Option<Res<assets::SessionCompass>>,
-    mut hud_images: ResMut<HudImages>,
-    mut images: ResMut<Assets<Image>>,
-    mut gaps: ResMut<HudPresentationGaps>,
-    mut pass: ResMut<HudTessPass>,
-    mut exprs: ResMut<crate::expr_cache::MenuExprCache>,
+    mut renderer: TargetmapRenderer,
 ) {
-    if !surface.is_ready() || view.as_deref().is_some_and(|v| v.in_killcam()) {
-        hide(&mut pass);
-        return;
-    }
-    let Some(snapshot) = presented.snapshot() else {
-        hide(&mut pass);
-        return;
-    };
-    let Some(selection) = snapshot
-        .meta
-        .for_client(local.0)
-        .and_then(|meta| meta.location_selection.as_ref())
-    else {
-        hide(&mut pass);
-        return;
-    };
-    let Some(ps) = presented.player(local.0) else {
-        hide(&mut pass);
-        return;
-    };
-    let Some(catalog) = catalog.as_ref() else {
-        gaps.raise(GapCause::NoFontCatalog);
-        hide(&mut pass);
-        return;
-    };
-    let Some(menu) = catalog.get(MENU) else {
-        hide(&mut pass);
-        return;
-    };
-    let Some(drawable) = crate::compass::resolve(compass.as_deref(), &mut hud_images, &mut gaps)
-    else {
-        hide(&mut pass);
-        return;
-    };
-    let host = TargetmapExprHost {
-        menu,
-        ms: milliseconds() as i32,
-        directing: i32::from(cursor.directing),
-        dvars: snapshot.meta.script_dvars(local.0),
-        kind: snapshot.meta.kind,
-        localize: strings.as_ref().map(|s| &s.0),
-    };
-    let Some(map_namespace) = hud_images.map_namespace() else {
-        return;
-    };
-    let scene = Scene {
-        compass: &drawable,
-        map_namespace,
-        selection,
-        cursor: *cursor,
-        origin: [ps.origin[0], ps.origin[1]],
-        view_yaw: ps.viewangles[1],
-    };
-    let mut rotated = Vec::new();
-    let frame = {
-        let mut hook = |args: OwnerDrawArgs<'_>, frame: &mut ChromeFrame| {
-            owner_draw(&scene, &mut rotated, args, frame)
-        };
-        execute_chrome_menu_overrides(
-            menu,
-            &host,
-            &surface,
-            ChromeAssets {
-                catalog: Some(catalog),
-                localize: strings.as_ref().map(|s| &s.0),
-            },
-            ChromeMenuAnim::IDENTITY,
-            &mut exprs,
-            MenuVisOnError::HideAll,
-            Some(&mut hook),
-            crate::chrome::ChromeMenuOverrides {
-                skip: Some(&|item| item.background.to_ascii_lowercase().contains("stencil")),
-                ..Default::default()
-            },
-        )
-    };
-    let mut fonts: HashMap<String, &asset_game::FontDef> = HashMap::new();
-    for cmd in &frame.list.cmds {
-        let _ = hud_images.get(cmd.material_namespace, &cmd.material, &mut images);
-        if let Draw2dOp::TextRun { font, .. } = &cmd.op
-            && !fonts.contains_key(font)
-            && let Some(def) = catalog.font(font)
-        {
-            fonts.insert(font.clone(), def);
-        }
-    }
-    for quad in &rotated {
-        let _ = hud_images.get(quad.material_namespace, &quad.material, &mut images);
-    }
-    let list = Draw2dList {
-        cmds: frame.list.cmds,
-    };
-    let (mut quads, _) = tessellate_fonts(&list, &fonts);
-    quads.extend(rotated);
-    if quads.is_empty() {
-        hide(&mut pass);
-        return;
-    }
-    pass.targetmap = TessJob::Quads(quads);
+    renderer.update(surface, view, presentation, cursor, compass);
 }

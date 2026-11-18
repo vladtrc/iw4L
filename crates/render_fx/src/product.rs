@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use fx::{FxGenerateVertsOut, GfxMarkMeshCensus};
+use fx::{FxGenerateVertsOut, GfxMarkMesh};
 use fx_iw4::FxPostLight;
 
 use crate::present::FxVertsGaps;
@@ -13,7 +13,7 @@ pub enum FxUnavailableCause {
 pub struct FxGeneratedFrame {
     pub out: FxGenerateVertsOut,
     pub verts_gaps: FxVertsGaps,
-    pub mark_mesh: Option<GfxMarkMeshCensus>,
+    pub mark_mesh: Option<GfxMarkMesh>,
     pub post_lights: Vec<FxPostLight>,
     pub tracers: TracerWorld,
     pub cam_tf: Transform,
@@ -23,6 +23,10 @@ pub struct FxGeneratedFrame {
     pub world_present: bool,
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "The frame product is moved once into its consumer and stays inline."
+)]
 pub enum FxFrameOutcome {
     Generated(FxGeneratedFrame),
     Unavailable(FxUnavailableCause),

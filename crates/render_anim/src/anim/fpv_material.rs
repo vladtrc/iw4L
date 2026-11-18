@@ -1,6 +1,5 @@
 use super::*;
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn admit_surface(
     global: &RuntimeMaterialCatalog,
     images: &[Option<Handle<Image>>],

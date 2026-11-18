@@ -6,6 +6,7 @@ license.workspace = true
 description = "Domain `session`: installing and tearing down a match, and which phase the client is in."
 
 [dependencies]
+serde_json.workspace = true
 diag.workspace = true
 bevy.workspace = true
 frame.workspace = true
@@ -20,6 +21,7 @@ asset_world.workspace = true
 assets.workspace = true
 audio.workspace = true
 net.workspace = true
+render_frame.workspace = true
 render_frontend.workspace = true
 render_fx.workspace = true
 sim.workspace = true

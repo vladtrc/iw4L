@@ -94,7 +94,7 @@ impl BloodPortGpu {
                 }),
             }],
         );
-        let host_state = state.apply_change_state_0_host(AlphaMode::Blend, false);
+        let host_state = state.apply_change_state_0_host(false);
         let pipeline = cache.queue_render_pipeline(RenderPipelineDescriptor {
             label: Some("iw4_blood".into()),
             layout: vec![constants_layout, textures_layout.clone()],

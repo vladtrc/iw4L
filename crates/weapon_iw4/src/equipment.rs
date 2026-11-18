@@ -1,5 +1,13 @@
 pub const WEAPCLASS_THROWINGKNIFE: i32 = 9;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ProjectilePickup {
+    #[default]
+    AmmoUse,
+    ItemUse,
+    ItemTouch,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct EquipmentRuntimeFacts {
     pub offhand_class: i32,
@@ -17,6 +25,7 @@ pub struct EquipmentRuntimeFacts {
     pub detonate_delay_ms: i32,
     pub detonate_time_ms: i32,
     pub projectile_rotates: bool,
+    pub pickup: ProjectilePickup,
     pub stickiness: i32,
     pub timed_detonation: bool,
 
@@ -30,6 +39,9 @@ pub struct EquipmentRuntimeFacts {
     pub explosion_outer_damage: i32,
     pub damage_cone_angle: f32,
     pub missile_guidance: i32,
+    pub missile_drift_interval_s: f32,
+    pub missile_drift_rate_deg_s: f32,
+    pub missile_drift_start_distance: i32,
     pub ignition_delay_ms: i32,
     pub require_lock_to_fire: bool,
     pub projectile_speed: i32,

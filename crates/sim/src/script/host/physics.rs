@@ -84,9 +84,6 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         );
         Ok(Value::Undefined)
     });
-    if let Some(sphere) = registry.get(Function, "physicsexplosionsphere") {
-        registry.register(Function, "physicsexplosioncylinder", sphere);
-    }
     for name in ["physicslaunchserver", "physicslaunchclient"] {
         registry.register(Method, name, |world, receiver, args| {
             let object = object_of(world, receiver)?;
@@ -150,7 +147,22 @@ pub(crate) fn select_usables(world: &mut World) {
                 .filter_map(|(object, e)| {
                     Some((
                         *object,
-                        e.usable.clone().filter(|u| u.enabled)?,
+                        e.usable
+                            .clone()
+                            .or_else(|| {
+                                // Authored use triggers start enabled even before
+                                // a script supplies a custom cursor/hint string.
+                                (&*e.classname != "trigger_use_touch"
+                                    && (&*e.classname == "trigger_use"
+                                        || e.classname.starts_with("trigger_use_")))
+                                .then(|| super::entities::Usable {
+                                    cursor: 1,
+                                    hint: -1,
+                                    enabled: true,
+                                    barred: Default::default(),
+                                })
+                            })
+                            .filter(|u| u.enabled)?,
                         e.trigger_policy.clone(),
                     ))
                 })
@@ -171,11 +183,30 @@ pub(crate) fn select_usables(world: &mut World) {
         .keys()
         .copied()
         .collect();
-    let radius = if world.resource::<RoundScript>().campaign.active {
+    let radius = if world.resource::<RoundScript>().profile == asset_core::RuntimeProfile::Campaign
+    {
         CAMPAIGN_USE_RADIUS
     } else {
         USE_RADIUS
     };
+    let runtime = world.resource::<RoundScript>();
+    let mounted: std::collections::BTreeMap<_, _> = runtime
+        .engine
+        .turrets
+        .iter()
+        .filter_map(|(&object, t)| {
+            Some((
+                runtime.player_client(t.active_user?)?,
+                (object, t.drop_hint),
+            ))
+        })
+        .collect();
+    let turret_numbers: std::collections::BTreeMap<_, _> = runtime
+        .engine
+        .turrets
+        .keys()
+        .filter_map(|id| Some((*id, runtime.entities.get(id)?.number)))
+        .collect();
     let mut selected = std::collections::BTreeMap::new();
     let mut frame = FrameWorld::from_world(world);
     for client in clients {
@@ -188,6 +219,14 @@ pub(crate) fn select_usables(world: &mut World) {
         let Some(ps) = frame.player(id).copied() else {
             continue;
         };
+        if let Some(&(object, hint)) = mounted.get(&client) {
+            selected.insert(client, object);
+            let ps = frame.player_mut(id).unwrap();
+            ps.cursor_hint = 1;
+            ps.cursor_hint_ent_index = ps.viewlocked_ent_num;
+            ps.cursor_hint_string = hint;
+            continue;
+        }
         let eye = [
             ps.origin[0],
             ps.origin[1],
@@ -197,6 +236,10 @@ pub(crate) fn select_usables(world: &mut World) {
             .iter()
             .filter(|(_, _, usable, policy)| {
                 !usable.barred.contains(&client) && policy.allows(&frame, client)
+            })
+            .filter(|(_, at, _, _)| {
+                frame.content().atlas().is_none()
+                    || crate::world_graph::world_at(*at) == crate::world_graph::world_at(ps.origin)
             })
             .map(|(object, at, usable, _)| {
                 let d2: f32 = (0..3).map(|i| (at[i] - eye[i]).powi(2)).sum();
@@ -211,6 +254,9 @@ pub(crate) fn select_usables(world: &mut World) {
         if let Some(ps) = frame.player_mut(id)
             && ps.cursor_hint == 0
         {
+            if let Some(number) = turret_numbers.get(&object) {
+                ps.cursor_hint_ent_index = *number;
+            }
             ps.cursor_hint = usable.cursor;
             ps.cursor_hint_string = usable.hint;
         }

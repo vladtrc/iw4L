@@ -6,7 +6,8 @@ pub struct ScriptSources {
     tables: BTreeMap<String, ScriptTable>,
     schemas: BTreeMap<String, std::sync::Arc<structured_data_iw4::DefinitionSet>>,
     entities: Option<String>,
-    path_nodes: Vec<asset_world::PathNode>,
+    path_nodes: Option<std::sync::Arc<[asset_core::PathNode]>>,
+    path_visibility: std::sync::Arc<[u8]>,
     configs: BTreeMap<String, String>,
 }
 
@@ -34,6 +35,24 @@ fn normalize(name: &str) -> String {
 }
 
 impl ScriptSources {
+    pub(crate) fn set_path_nodes(&mut self, nodes: Vec<asset_core::PathNode>, visibility: Vec<u8>) {
+        self.path_nodes = Some(nodes.into());
+        self.path_visibility = visibility.into();
+    }
+    pub fn path_visibility(&self) -> std::sync::Arc<[u8]> {
+        self.path_visibility.clone()
+    }
+    pub fn path_nodes(&self) -> std::sync::Arc<[asset_core::PathNode]> {
+        self.path_nodes
+            .clone()
+            .unwrap_or_else(|| std::sync::Arc::from([]))
+    }
+
+    pub fn text(&self, module: &str) -> Option<&str> {
+        let bytes = self.sources.get(module)?.bytes.as_ref().ok()?;
+        std::str::from_utf8(bytes).ok()
+    }
+
     pub fn read(&self, module: &str) -> Result<Vec<u8>, String> {
         self.sources
             .get(module)
@@ -122,6 +141,30 @@ impl ScriptSources {
     }
 
     pub(crate) fn fx_references(&self) -> BTreeMap<String, String> {
+        self.call_string_references(b"loadfx")
+    }
+
+    pub(crate) fn script_models(&self) -> BTreeSet<String> {
+        self.call_string_references(b"setmodel")
+            .into_keys()
+            .collect()
+    }
+
+    pub(crate) fn script_viewmodels(&self) -> BTreeSet<String> {
+        let mut names: BTreeSet<_> = self
+            .call_string_references(b"setviewmodel")
+            .into_keys()
+            .collect();
+        names.extend(
+            self.asset_names()
+                .into_iter()
+                .map(|name| normalize(&name))
+                .filter(|name| asset_model::is_arms_model(name)),
+        );
+        names
+    }
+
+    fn call_string_references(&self, function: &[u8]) -> BTreeMap<String, String> {
         let mut references = BTreeMap::new();
         for (module, source) in &self.sources {
             let Ok(bytes) = &source.bytes else {
@@ -152,7 +195,7 @@ impl ScriptSources {
                     {
                         at += 1;
                     }
-                    if !bytes[start..at].eq_ignore_ascii_case(b"loadfx") {
+                    if !bytes[start..at].eq_ignore_ascii_case(function) {
                         continue;
                     }
                     let mut value = at;
@@ -189,11 +232,7 @@ impl ScriptSources {
         &self.schemas
     }
 
-    pub(crate) fn capture_schema(
-        &mut self,
-        name: String,
-        schema: structured_data_iw4::DefinitionSet,
-    ) {
+    pub fn capture_schema(&mut self, name: String, schema: structured_data_iw4::DefinitionSet) {
         self.schemas
             .insert(normalize(&name), std::sync::Arc::new(schema));
     }
@@ -204,14 +243,6 @@ impl ScriptSources {
 
     pub fn entities(&self) -> Option<&str> {
         self.entities.as_deref()
-    }
-
-    pub fn path_nodes(&self) -> &[asset_world::PathNode] {
-        &self.path_nodes
-    }
-
-    pub(crate) fn set_path_nodes(&mut self, nodes: Vec<asset_world::PathNode>) {
-        self.path_nodes = nodes;
     }
 
     pub fn config(&self, name: &str) -> Option<&str> {
@@ -225,7 +256,7 @@ impl ScriptSources {
         })
     }
 
-    pub(crate) fn capture(&mut self, name: &str, data: &[u8], compressed: bool) {
+    pub fn capture(&mut self, name: &str, data: &[u8], compressed: bool) {
         let name = normalize(name);
         if name.ends_with(".cfg")
             || name.ends_with(".shock")
@@ -260,7 +291,7 @@ impl ScriptSources {
         );
     }
 
-    pub(crate) fn capture_table(&mut self, table: &asset_game::CapturedStringTable) {
+    pub fn capture_table(&mut self, table: &asset_game::CapturedStringTable) {
         self.tables.insert(
             normalize(&table.name),
             ScriptTable {
@@ -296,7 +327,7 @@ impl ScriptSources {
         true
     }
 
-    pub(crate) fn insert_source(&mut self, module: &str, source: String) {
+    pub fn insert_source(&mut self, module: &str, source: String) {
         self.sources.insert(
             normalize(module),
             ScriptSource {
@@ -306,7 +337,7 @@ impl ScriptSources {
         );
     }
 
-    pub(crate) fn set_entities(&mut self, entities: String) {
+    pub fn set_entities(&mut self, entities: String) {
         self.entities = Some(entities);
     }
 
@@ -315,11 +346,12 @@ impl ScriptSources {
         self.tables.extend(other.tables);
         self.schemas.extend(other.schemas);
         self.configs.extend(other.configs);
+        if other.path_nodes.is_some() {
+            self.path_nodes = other.path_nodes;
+            self.path_visibility = other.path_visibility;
+        }
         if other.entities.is_some() {
             self.entities = other.entities;
-        }
-        if !other.path_nodes.is_empty() {
-            self.path_nodes = other.path_nodes;
         }
     }
 }

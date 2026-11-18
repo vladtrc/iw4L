@@ -19,7 +19,7 @@ dpvs_iw4.workspace = true
 frame.workspace = true
 fx_iw4.workspace = true
 hud_iw4.workspace = true
-hud = { path = "../hud" }
+hud = { workspace = true }
 lighting_iw4.workspace = true
 perf.workspace = true
 render_backend.workspace = true
@@ -27,6 +27,10 @@ render_frame.workspace = true
 render_scene.workspace = true
 render_material.workspace = true
 bevy.workspace = true
+wgpu = { version = "30", default-features = false, features = ["std", "vulkan", "wgsl"] }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+naga = { version = "30", features = ["wgsl-in", "spv-out"] }

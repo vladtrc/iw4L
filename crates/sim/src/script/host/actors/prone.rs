@@ -1,129 +1,356 @@
-use bevy_ecs::prelude::World;
+use super::*;
+use xmodel_runtime::XAnimNodeId;
 
-use super::super::args::{arg, float};
-use super::super::script_anim::set_weight;
-use super::{actor, brain, store};
-use crate::script::{Namespace, NativeRegistry, Value};
+mod ground;
 
-const SLOPE_WEIGHT_MAX: f32 = 0.99;
-const SLOPE_BLEND: f32 = 0.05;
-const SLOPE_REACH: f32 = 15.0;
-const SLOPE_DROP: f32 = 48.0;
-const SLOPE_MAX_DEG: f32 = 45.0;
+#[derive(Clone, Debug)]
+pub(crate) struct ProneNodes {
+    pub inverse_pitch: [f32; 2],
+    pub nodes: [XAnimNodeId; 3],
+}
 
-fn slope_weights(rise: f32, (inv_down, inv_up): (f32, f32)) -> [f32; 3] {
-    let (down, up) = if rise >= 0.0 {
-        (0.0, (rise * inv_up).min(SLOPE_WEIGHT_MAX))
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Prone {
+    pub active: bool,
+    pub started_at: i32,
+    pub transition_ms: i32,
+    pub feet_forward: bool,
+    pub valid: bool,
+    pub pitch: [f32; 2],
+    last_pitch: f32,
+    sampled_pose: Option<([f32; 3], [f32; 3])>,
+}
+
+impl Prone {
+    fn is_prone(&mut self, now: i32) -> bool {
+        if !self.active {
+            return false;
+        }
+        if self.transition_ms < 0 {
+            if self.started_at.wrapping_sub(self.transition_ms) < now {
+                self.active = false;
+                return false;
+            }
+        } else if self.transition_ms > 0 && self.started_at.wrapping_add(self.transition_ms) < now {
+            self.transition_ms = 0;
+        }
+        true
+    }
+
+    fn fraction(&mut self, now: i32) -> f32 {
+        if !self.is_prone(now) {
+            return 0.;
+        }
+        match self.transition_ms {
+            0 => 1.,
+            ms if ms > 0 => now.wrapping_sub(self.started_at) as f32 / ms as f32,
+            ms => 1. - now.wrapping_sub(self.started_at) as f32 / ms.wrapping_neg() as f32,
+        }
+    }
+
+    fn enter(&mut self, now: i32, ms: i32, feet_forward: bool) -> bool {
+        if !self.is_prone(now) {
+            self.active = true;
+            self.started_at = now;
+            self.transition_ms = ms;
+            self.feet_forward = feet_forward;
+            return true;
+        }
+        if self.transition_ms != 0 && ms != self.transition_ms {
+            let fraction = self.fraction(now);
+            if fraction < 1. {
+                self.started_at = now.wrapping_sub((ms as f32 * fraction) as i32);
+            }
+            self.transition_ms = ms;
+            self.feet_forward = feet_forward;
+        }
+        false
+    }
+
+    fn exit(&mut self, now: i32, ms: i32) {
+        if !self.is_prone(now) {
+            return;
+        }
+        self.started_at = if self.transition_ms == 0 || ms == self.transition_ms {
+            now
+        } else {
+            now.wrapping_sub((ms as f32 * self.fraction(now)) as i32)
+        };
+        self.transition_ms = ms.wrapping_neg();
+    }
+}
+
+fn now(world: &World) -> i32 {
+    crate::level_time_ms(world.resource::<crate::step::StepRequest>().tick)
+}
+
+fn check_ground(world: &mut World, id: u64) -> Result<(), String> {
+    let (origin, angles, feet_forward) = {
+        let mut runtime = world.resource_mut::<RoundScript>();
+        let Value::Vector(origin) = runtime.object_field(id, "origin") else {
+            return Err("actor origin is not a vector".into());
+        };
+        let Value::Vector(angles) = runtime.object_field(id, "angles") else {
+            return Err("actor angles are not a vector".into());
+        };
+        (origin, angles, runtime.actors[&id].prone.feet_forward)
+    };
+    let result = ground::check(
+        origin,
+        angles[1],
+        feet_forward,
+        &mut |start, end, midpoint, half| {
+            super::super::trace::capsule(
+                world,
+                movement_iw4::GroundTraceInput {
+                    start,
+                    end,
+                    mins: std::array::from_fn(|i| midpoint[i] - half[i]),
+                    maxs: std::array::from_fn(|i| midpoint[i] + half[i]),
+                    tracemask: 0x820015,
+                },
+                &[id],
+            )
+        },
+    );
+    let mut runtime = world.resource_mut::<RoundScript>();
+    let prone = &mut runtime.actors.get_mut(&id).unwrap().prone;
+    prone.valid = result.valid;
+    prone.sampled_pose = Some((origin, angles));
+    if let Some(pitch) = result.pitch {
+        prone.pitch = pitch;
+    }
+    Ok(())
+}
+
+fn update_weights(world: &mut World, id: u64, force: bool) -> Result<(), String> {
+    let mut runtime = world.resource_mut::<RoundScript>();
+    let actor = runtime.actors.get_mut(&id).unwrap();
+    let Some(nodes) = actor.prone_nodes.clone() else {
+        return Err("prone animation nodes have not been set".into());
+    };
+    let pitch = math_iw4::angle_subtract(actor.prone.pitch[1], actor.prone.pitch[0]);
+    if !force && actor.prone.last_pitch == pitch {
+        return Ok(());
+    }
+    let (down, up) = if pitch < 0. {
+        ((nodes.inverse_pitch[0] * pitch).min(0.99), 0.)
     } else {
-        ((rise * inv_down).min(SLOPE_WEIGHT_MAX), 0.0)
+        (0., (nodes.inverse_pitch[1] * pitch).min(0.99))
     };
-    [down, 1.0 - down.max(up), up]
-}
-
-fn ground_rise(world: &mut World, id: u64) -> f32 {
-    let mut runtime = world.resource_mut::<crate::script::RoundScript>();
-    let origin = super::campaign::vector_field(&mut runtime, id, "origin").unwrap_or([0.0; 3]);
-    let yaw = super::campaign::vector_field(&mut runtime, id, "angles").map_or(0.0, |a| a[1]);
-    drop(runtime);
-    let (sin, cos) = yaw.to_radians().sin_cos();
-    let collision = super::super::presence::settled(world);
-    let ground = |side: f32| {
-        let at = [
-            origin[0] + cos * SLOPE_REACH * side,
-            origin[1] + sin * SLOPE_REACH * side,
-            origin[2] + SLOPE_DROP,
-        ];
-        let below = [at[0], at[1], origin[2] - SLOPE_DROP];
-        let trace = collision.trace_world(
-            at,
-            below,
-            [0.0; 3],
-            [0.0; 3],
-            crate::bullet_collision::MASK_PLAYER_SOLID,
-        );
-        (trace.startsolid == 0 && trace.fraction < 1.0).then_some(trace.endpos[2])
-    };
-    match (ground(-1.0), ground(1.0)) {
-        (Some(back), Some(ahead)) => (ahead - back)
-            .atan2(2.0 * SLOPE_REACH)
-            .to_degrees()
-            .clamp(-SLOPE_MAX_DEG, SLOPE_MAX_DEG),
-        _ => 0.0,
+    let animator = runtime
+        .animators
+        .get_mut(&id)
+        .ok_or("actor has no animation tree")?;
+    for (node, weight) in nodes.nodes.into_iter().zip([down, 1. - down - up, up]) {
+        animator.goal(node, weight, 0.05, 1., false)?;
     }
+    runtime.actors.get_mut(&id).unwrap().prone.last_pitch = pitch;
+    Ok(())
 }
 
-fn blend_nodes(world: &mut World, receiver: &Value, weight: f32, blend: f32) -> Result<(), String> {
-    let id = actor(world, receiver)?;
-    let nodes = brain(world, id)
-        .prone_nodes
-        .ok_or("Must call SetProneAnimNodes before calling EnterProne")?;
-    for node in &nodes {
-        set_weight(world, receiver, node, weight, blend, 1.0)?;
+fn is_ragdoll(world: &mut World, id: u64) -> bool {
+    super::super::entities::is_ragdoll(world, id)
+}
+
+pub(crate) fn advance(world: &mut World, now: i32) -> Result<(), String> {
+    let _span = perf::span_handle!("actor_prone", "iw4l.sim").enter();
+    let ids: Vec<_> = world
+        .resource::<RoundScript>()
+        .actors
+        .iter()
+        .filter(|(_, actor)| actor.prone.active)
+        .map(|(&id, _)| id)
+        .collect();
+    for id in ids {
+        if is_ragdoll(world, id) {
+            continue;
+        }
+        let active = world
+            .resource_mut::<RoundScript>()
+            .actors
+            .get_mut(&id)
+            .unwrap()
+            .prone
+            .is_prone(now);
+        let root = if active {
+            let moved = {
+                let mut runtime = world.resource_mut::<RoundScript>();
+                let origin = runtime.object_field(id, "origin");
+                let angles = runtime.object_field(id, "angles");
+                match (origin, angles) {
+                    (Value::Vector(origin), Value::Vector(angles)) => {
+                        runtime.actors[&id].prone.sampled_pose != Some((origin, angles))
+                    }
+                    _ => return Err("actor placement is not a vector".into()),
+                }
+            };
+            if moved {
+                check_ground(world, id)?;
+                update_weights(world, id, false)?;
+            }
+            let mut runtime = world.resource_mut::<RoundScript>();
+            let prone = &mut runtime.actors.get_mut(&id).unwrap().prone;
+            let pitch = prone.pitch[0] * prone.fraction(now);
+            Some(xmodel_runtime::RootBonePose {
+                rotation: xmodel_runtime::set_angles([pitch, 0., 0.]),
+                translation: [0.; 3],
+            })
+        } else {
+            None
+        };
+        let presence = world.resource::<RoundScript>().entities[&id].presence;
+        if let Some(presence) = presence
+            && let Some(dobj) = crate::frame::FrameWorld::from_world(world)
+                .collision_owner_mut(presence)
+                .and_then(|row| row.dobj.as_mut())
+        {
+            dobj.set_root_override(root);
+        }
     }
     Ok(())
 }
 
-fn set_prone(world: &mut World, receiver: &Value, prone: bool) -> Result<(), String> {
-    let id = actor(world, receiver)?;
-    let mut state = brain(world, id);
-    state.prone = prone;
-    store(world, id, state);
-    Ok(())
+fn clear_pitch(world: &mut World, id: u64) {
+    let presence = {
+        let mut r = world.resource_mut::<RoundScript>();
+        let actor = r.actors.get_mut(&id).unwrap();
+        actor.prone.active = false;
+        if let Some(dog) = actor
+            .initial_state
+            .as_mut()
+            .and_then(|s| s.dog_prone.as_mut())
+        {
+            dog.orient_pitch = false;
+            dog.prone = false;
+        }
+        r.entities[&id].presence
+    };
+    if let Some(presence) = presence
+        && let Some(dobj) = crate::frame::FrameWorld::from_world(world)
+            .collision_owner_mut(presence)
+            .and_then(|r| r.dobj.as_mut())
+    {
+        dobj.set_root_override(None);
+    }
 }
 
 pub(super) fn register(registry: &mut NativeRegistry) {
-    use Namespace::Method;
-    registry.register(Method, "setproneanimnodes", |world, receiver, args| {
-        let id = actor(world, receiver)?;
-        let (down, up) = (float(args, 0)?, float(args, 1)?);
-        if down >= 0.0 {
-            return Err("Down angle (parameter 1) must be set to be less than 0.".into());
-        }
-        if up <= 0.0 {
-            return Err("Up angle (parameter 2) must be set to be greater than 0.".into());
-        }
-        let nodes = [
-            arg(args, 2)?.clone(),
-            arg(args, 3)?.clone(),
-            arg(args, 4)?.clone(),
-        ];
-        let mut state = brain(world, id);
-        state.prone_nodes = Some(nodes.clone());
-        state.prone_scale = (down.recip(), up.recip());
-        store(world, id, state);
-        for node in &nodes {
-            set_weight(world, receiver, node, 1.0, 0.0, 1.0)?;
+    registry.register(
+        Namespace::Method,
+        "clearpitchorient",
+        |world, receiver, _| {
+            let id = actor_id(world, receiver)?;
+            clear_pitch(world, id);
+            Ok(Value::Undefined)
+        },
+    );
+    registry.register(Namespace::Method, "enterprone", |world, receiver, args| {
+        let id = actor_id(world, receiver)?;
+        let ms = (float(args, 0)? * 1000.) as i32;
+        let feet_forward = if args.len() > 1 {
+            super::super::args::int(args, 1)? == 0
+        } else {
+            true
+        };
+        let now = now(world);
+        let entered = {
+            let mut runtime = world.resource_mut::<RoundScript>();
+            let actor = runtime.actors.get_mut(&id).unwrap();
+            let nodes = actor
+                .prone_nodes
+                .as_ref()
+                .ok_or("set prone animation nodes before entering prone")?;
+            if nodes.nodes.iter().any(|node| node.0 == 0) || nodes.inverse_pitch == [0.; 2] {
+                return Err("set prone animation nodes before entering prone".into());
+            }
+            actor.prone.enter(now, ms, feet_forward)
+        };
+        if entered {
+            check_ground(world, id)?;
         }
         Ok(Value::Undefined)
     });
-    registry.register(Method, "enterprone", |world, receiver, args| {
-        blend_nodes(world, receiver, 1.0, float(args, 0)?)?;
-        set_prone(world, receiver, true)?;
+    registry.register(Namespace::Method, "exitprone", |world, receiver, args| {
+        let id = actor_id(world, receiver)?;
+        let ms = (float(args, 0)? * 1000.) as i32;
+        let now = now(world);
+        world
+            .resource_mut::<RoundScript>()
+            .actors
+            .get_mut(&id)
+            .unwrap()
+            .prone
+            .exit(now, ms);
         Ok(Value::Undefined)
     });
-    registry.register(Method, "exitprone", |world, receiver, args| {
-        set_prone(world, receiver, false)?;
-        if brain(world, actor(world, receiver)?).prone_nodes.is_some() {
-            blend_nodes(world, receiver, 0.0, float(args, 0)?)?;
-        }
-        Ok(Value::Undefined)
-    });
-    registry.register(Method, "updateprone", |world, receiver, args| {
-        let id = actor(world, receiver)?;
-        let state = brain(world, id);
-        if !state.prone {
+    registry.register(Namespace::Method, "updateprone", |world, receiver, args| {
+        let id = actor_id(world, receiver)?;
+        let now = now(world);
+        if !world
+            .resource_mut::<RoundScript>()
+            .actors
+            .get_mut(&id)
+            .unwrap()
+            .prone
+            .is_prone(now)
+            || is_ragdoll(world, id)
+        {
             return Ok(Value::Undefined);
         }
-        let (weight, blend, rate) = (float(args, 2)?, float(args, 3)?, float(args, 4)?);
-        for anim in [arg(args, 0)?.clone(), arg(args, 1)?.clone()] {
-            set_weight(world, receiver, &anim, weight, blend, rate)?;
+        let weight = float(args, 2)?;
+        let blend = float(args, 3)?;
+        let rate = float(args, 4)?;
+        if [weight, blend, rate]
+            .iter()
+            .any(|value| !value.is_finite() || *value < 0.)
+        {
+            return Err(
+                "animation weight, blend time and rate must be finite and nonnegative".into(),
+            );
         }
-        if let Some(nodes) = state.prone_nodes {
-            let weights = slope_weights(ground_rise(world, id), state.prone_scale);
-            for (node, weight) in nodes.iter().zip(weights) {
-                set_weight(world, receiver, node, weight, SLOPE_BLEND, 1.0)?;
+        {
+            let mut runtime = world.resource_mut::<RoundScript>();
+            let animator = runtime
+                .animators
+                .get_mut(&id)
+                .ok_or("actor has no animation tree")?;
+            let nodes = [animator.node(arg(args, 0)?)?, animator.node(arg(args, 1)?)?];
+            for node in nodes {
+                animator.goal(node, weight, blend, rate, true)?;
             }
         }
+        update_weights(world, id, true)?;
         Ok(Value::Undefined)
     });
+    registry.register(
+        Namespace::Method,
+        "setproneanimnodes",
+        |world, receiver, args| {
+            let id = actor_id(world, receiver)?;
+            let down = float(args, 0)?;
+            let up = float(args, 1)?;
+            if down >= 0.0 {
+                return Err("prone down pitch must be negative".into());
+            }
+            if up <= 0.0 {
+                return Err("prone up pitch must be positive".into());
+            }
+            let mut runtime = world.resource_mut::<RoundScript>();
+            let animator = runtime
+                .animators
+                .get(&id)
+                .ok_or("actor has no animation tree")?;
+            let nodes = [
+                animator.node(arg(args, 2)?)?,
+                animator.node(arg(args, 3)?)?,
+                animator.node(arg(args, 4)?)?,
+            ];
+            runtime.actors.get_mut(&id).unwrap().prone_nodes = Some(ProneNodes {
+                inverse_pitch: [down.recip(), up.recip()],
+                nodes,
+            });
+            Ok(Value::Undefined)
+        },
+    );
 }

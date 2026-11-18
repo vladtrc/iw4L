@@ -332,238 +332,290 @@ pub fn mark_clip_world_triangle_points(
     mark_chop_world_triangle_points(planes, v0, v1, v2, out_pts)
 }
 
-pub fn mark_emit_brush_fragment(
-    used_tri: u32,
-    used_point: u32,
-    max_tris: u32,
-    max_points: u32,
-    fragment: &[FxWorldMarkPoint],
-    v0_lmap: [f32; 2],
-    v1_lmap: [f32; 2],
-    v2_lmap: [f32; 2],
-    v0_n: [f32; 3],
-    v1_n: [f32; 3],
-    v2_n: [f32; 3],
-    context: [u8; 7],
-    tris: &mut [FxMarkStagingTri],
-    points: &mut [FxMarkStagingPoint],
-) -> Result<(u32, u32), FxMarkEmitRefuse> {
-    let n = fragment.len() as i32;
-    if n < 3 {
-        return Err(FxMarkEmitRefuse::FragmentTooSmall);
-    }
-    let used_t = used_tri as i32;
-    let used_p = used_point as i32;
-    if (max_points as i32) - used_p < n || (max_tris as i32) - used_t < n * 3 - 6 {
-        return Err(FxMarkEmitRefuse::Overflow);
-    }
-    let fan = (n as u32) - 2;
-    let tri_end = used_tri.saturating_add(fan);
-    let point_end = used_point.saturating_add(n as u32);
-    if tri_end as usize > tris.len() || point_end as usize > points.len() {
-        return Err(FxMarkEmitRefuse::Overflow);
-    }
-    let base = used_point as u16;
-    let mut i = 2u16;
-    while i < n as u16 {
-        let slot = (used_tri + u32::from(i) - 2) as usize;
-        tris[slot] = FxMarkStagingTri {
-            indices: [base + i - 1, base + i, base],
-            context,
-            _pad: 0,
-        };
-        i += 1;
-    }
-    let mut p = 0usize;
-    while p < n as usize {
-        let w = fragment[p].weights;
-        points[used_point as usize + p] = FxMarkStagingPoint {
-            xyz: fragment[p].xyz,
-            lmap_coord: [
-                w[0] * v0_lmap[0] + w[1] * v1_lmap[0] + w[2] * v2_lmap[0],
-                w[0] * v0_lmap[1] + w[1] * v1_lmap[1] + w[2] * v2_lmap[1],
-            ],
-            normal: [
-                w[0] * v0_n[0] + w[1] * v1_n[0] + w[2] * v2_n[0],
-                w[0] * v0_n[1] + w[1] * v1_n[1] + w[2] * v2_n[1],
-                w[0] * v0_n[2] + w[1] * v1_n[2] + w[2] * v2_n[2],
-            ],
-        };
-        p += 1;
-    }
-    Ok((tri_end, point_end))
+#[derive(Clone, Copy, Debug)]
+pub struct MarkProjection {
+    pub origin: [f32; 3],
+    pub radius: f32,
+    pub axis: [[f32; 3]; 3],
 }
 
-pub fn mark_clip_world_surfaces(
-    origin: [f32; 3],
-    radius: f32,
-    axis: [[f32; 3]; 3],
-    mids: &[[f32; 3]],
-    halves: &[[f32; 3]],
-    positions: &[[f32; 3]],
-    packed_indices: &[u32],
-    surface_index_ranges: &[(u32, u32)],
-) -> MarkWorldClipCensus {
-    let planes = mark_fragment_clip_planes(origin, axis, radius);
-    let mark_dir = axis[0];
-    let radius_sq = radius * radius;
-    let n = core::cmp::min(
-        core::cmp::min(mids.len(), halves.len()),
-        surface_index_ranges.len(),
-    );
-    let mut census = MarkWorldClipCensus::default();
-    let mut stacked = 0u32;
-    let cap = R_MARK_FRAGMENTS_WORLD_SURF_STACK;
-    let mut si = 0;
-    while si < n {
-        if stacked >= cap {
-            break;
+#[derive(Clone, Copy, Debug)]
+pub struct MarkReceiverGeometry<'a> {
+    pub mids: &'a [[f32; 3]],
+    pub halves: &'a [[f32; 3]],
+    pub positions: &'a [[f32; 3]],
+    pub packed_indices: &'a [u32],
+    pub surface_index_ranges: &'a [(u32, u32)],
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct MarkReceiverAttributes<'a> {
+    pub lightmap_uvs: &'a [[f32; 2]],
+    pub normals: &'a [[f32; 3]],
+    pub contexts: &'a [[u8; 7]],
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct MarkTriangleAttributes {
+    pub lightmap_uvs: [[f32; 2]; 3],
+    pub normals: [[f32; 3]; 3],
+}
+
+pub struct MarkStagingBuffer<'a> {
+    pub used_tri: u32,
+    pub used_point: u32,
+    pub max_tris: u32,
+    pub max_points: u32,
+    pub tris: &'a mut [FxMarkStagingTri],
+    pub points: &'a mut [FxMarkStagingPoint],
+}
+
+impl MarkStagingBuffer<'_> {
+    pub fn emit_fragment(
+        &mut self,
+        fragment: &[FxWorldMarkPoint],
+        attributes: MarkTriangleAttributes,
+        context: [u8; 7],
+    ) -> Result<(), FxMarkEmitRefuse> {
+        let n = fragment.len() as i32;
+        if n < 3 {
+            return Err(FxMarkEmitRefuse::FragmentTooSmall);
         }
-        if crate::mark_sphere_hits_bounds(origin, radius_sq, mids[si], halves[si]) {
-            stacked = stacked.saturating_add(1);
-            let (start, count) = surface_index_ranges[si];
-            let start = start as usize;
-            let end = start.saturating_add(count as usize);
-            if count >= 3 && start < packed_indices.len() {
-                let end = core::cmp::min(end, packed_indices.len());
-                let mut t = start;
-                while t + 2 < end {
-                    let i0 = packed_indices[t] as usize;
-                    let i1 = packed_indices[t + 1] as usize;
-                    let i2 = packed_indices[t + 2] as usize;
-                    t += 3;
-                    if i0 >= positions.len() || i1 >= positions.len() || i2 >= positions.len() {
-                        continue;
-                    }
-                    census.tri_seen = census.tri_seen.saturating_add(1);
-                    let v0 = positions[i0];
-                    let v1 = positions[i1];
-                    let v2 = positions[i2];
-                    if mark_is_triangle_rejected(mark_dir, v0, v1, v2) {
-                        census.tri_rejected = census.tri_rejected.saturating_add(1);
-                        continue;
-                    }
-                    let pts = mark_clip_world_triangle(mark_dir, &planes, v0, v1, v2);
-                    if pts < 3 {
-                        census.clip_zero = census.clip_zero.saturating_add(1);
-                    } else {
-                        census.clip_kept = census.clip_kept.saturating_add(pts - 2);
+        let used_t = self.used_tri as i32;
+        let used_p = self.used_point as i32;
+        if (self.max_points as i32) - used_p < n || (self.max_tris as i32) - used_t < n * 3 - 6 {
+            return Err(FxMarkEmitRefuse::Overflow);
+        }
+        let fan = (n as u32) - 2;
+        let tri_end = self.used_tri.saturating_add(fan);
+        let point_end = self.used_point.saturating_add(n as u32);
+        if tri_end as usize > self.tris.len() || point_end as usize > self.points.len() {
+            return Err(FxMarkEmitRefuse::Overflow);
+        }
+        let base = self.used_point as u16;
+        let mut i = 2u16;
+        while i < n as u16 {
+            let slot = (self.used_tri + u32::from(i) - 2) as usize;
+            self.tris[slot] = FxMarkStagingTri {
+                indices: [base + i - 1, base + i, base],
+                context,
+                _pad: 0,
+            };
+            i += 1;
+        }
+        let mut p = 0usize;
+        while p < n as usize {
+            let w = fragment[p].weights;
+            self.points[self.used_point as usize + p] = FxMarkStagingPoint {
+                xyz: fragment[p].xyz,
+                lmap_coord: [
+                    w[0] * attributes.lightmap_uvs[0][0]
+                        + w[1] * attributes.lightmap_uvs[1][0]
+                        + w[2] * attributes.lightmap_uvs[2][0],
+                    w[0] * attributes.lightmap_uvs[0][1]
+                        + w[1] * attributes.lightmap_uvs[1][1]
+                        + w[2] * attributes.lightmap_uvs[2][1],
+                ],
+                normal: [
+                    w[0] * attributes.normals[0][0]
+                        + w[1] * attributes.normals[1][0]
+                        + w[2] * attributes.normals[2][0],
+                    w[0] * attributes.normals[0][1]
+                        + w[1] * attributes.normals[1][1]
+                        + w[2] * attributes.normals[2][1],
+                    w[0] * attributes.normals[0][2]
+                        + w[1] * attributes.normals[1][2]
+                        + w[2] * attributes.normals[2][2],
+                ],
+            };
+            p += 1;
+        }
+        self.used_tri = tri_end;
+        self.used_point = point_end;
+        Ok(())
+    }
+}
+
+impl MarkProjection {
+    pub fn clip_world_surfaces(&self, geometry: MarkReceiverGeometry<'_>) -> MarkWorldClipCensus {
+        let Self {
+            origin,
+            radius,
+            axis,
+        } = *self;
+        let MarkReceiverGeometry {
+            mids,
+            halves,
+            positions,
+            packed_indices,
+            surface_index_ranges,
+        } = geometry;
+        let planes = mark_fragment_clip_planes(origin, axis, radius);
+        let mark_dir = axis[0];
+        let radius_sq = radius * radius;
+        let n = core::cmp::min(
+            core::cmp::min(mids.len(), halves.len()),
+            surface_index_ranges.len(),
+        );
+        let mut census = MarkWorldClipCensus::default();
+        let mut stacked = 0u32;
+        let cap = R_MARK_FRAGMENTS_WORLD_SURF_STACK;
+        let mut si = 0;
+        while si < n {
+            if stacked >= cap {
+                break;
+            }
+            if crate::mark_sphere_hits_bounds(origin, radius_sq, mids[si], halves[si]) {
+                stacked = stacked.saturating_add(1);
+                let (start, count) = surface_index_ranges[si];
+                let start = start as usize;
+                let end = start.saturating_add(count as usize);
+                if count >= 3 && start < packed_indices.len() {
+                    let end = core::cmp::min(end, packed_indices.len());
+                    let mut t = start;
+                    while t + 2 < end {
+                        let i0 = packed_indices[t] as usize;
+                        let i1 = packed_indices[t + 1] as usize;
+                        let i2 = packed_indices[t + 2] as usize;
+                        t += 3;
+                        if i0 >= positions.len() || i1 >= positions.len() || i2 >= positions.len() {
+                            continue;
+                        }
+                        census.tri_seen = census.tri_seen.saturating_add(1);
+                        let v0 = positions[i0];
+                        let v1 = positions[i1];
+                        let v2 = positions[i2];
+                        if mark_is_triangle_rejected(mark_dir, v0, v1, v2) {
+                            census.tri_rejected = census.tri_rejected.saturating_add(1);
+                            continue;
+                        }
+                        let pts = mark_clip_world_triangle(mark_dir, &planes, v0, v1, v2);
+                        if pts < 3 {
+                            census.clip_zero = census.clip_zero.saturating_add(1);
+                        } else {
+                            census.clip_kept = census.clip_kept.saturating_add(pts - 2);
+                        }
                     }
                 }
             }
+            si += 1;
         }
-        si += 1;
+        census
     }
-    census
-}
 
-pub fn mark_stage_world_surfaces(
-    origin: [f32; 3],
-    radius: f32,
-    axis: [[f32; 3]; 3],
-    mids: &[[f32; 3]],
-    halves: &[[f32; 3]],
-    positions: &[[f32; 3]],
-    lightmap_uvs: &[[f32; 2]],
-    normals: &[[f32; 3]],
-    packed_indices: &[u32],
-    surface_index_ranges: &[(u32, u32)],
-    contexts: &[[u8; 7]],
-    max_tris: u32,
-    max_points: u32,
-    tris: &mut [FxMarkStagingTri],
-    points: &mut [FxMarkStagingPoint],
-    retest_sphere: bool,
-) -> MarkWorldStaging {
-    let planes = mark_fragment_clip_planes(origin, axis, radius);
-    let mark_dir = axis[0];
-    let radius_sq = radius * radius;
-    let n = core::cmp::min(
-        core::cmp::min(mids.len(), halves.len()),
-        surface_index_ranges.len(),
-    );
-    let mut out = MarkWorldStaging::default();
-    let mut stacked = 0u32;
-    let cap = R_MARK_FRAGMENTS_WORLD_SURF_STACK;
-    let mut si = 0;
-    let mut fragment = [FxWorldMarkPoint::ZERO; R_MARK_CHOP_MAX_POINTS];
-    while si < n {
-        if stacked >= cap || out.overflow {
-            break;
-        }
-        if !retest_sphere || crate::mark_sphere_hits_bounds(origin, radius_sq, mids[si], halves[si])
-        {
-            stacked = stacked.saturating_add(1);
-            let (start, count) = surface_index_ranges[si];
-            let start = start as usize;
-            let end = start.saturating_add(count as usize);
-            if count >= 3 && start < packed_indices.len() {
-                let end = core::cmp::min(end, packed_indices.len());
-                let mut t = start;
-                while t + 2 < end {
-                    if out.overflow {
-                        break;
-                    }
-                    let i0 = packed_indices[t] as usize;
-                    let i1 = packed_indices[t + 1] as usize;
-                    let i2 = packed_indices[t + 2] as usize;
-                    t += 3;
-                    if i0 >= positions.len() || i1 >= positions.len() || i2 >= positions.len() {
-                        continue;
-                    }
-                    out.census.tri_seen = out.census.tri_seen.saturating_add(1);
-                    let v0 = positions[i0];
-                    let v1 = positions[i1];
-                    let v2 = positions[i2];
-                    if mark_is_triangle_rejected(mark_dir, v0, v1, v2) {
-                        out.census.tri_rejected = out.census.tri_rejected.saturating_add(1);
-                        continue;
-                    }
-                    let pts = mark_chop_world_triangle_points(&planes, v0, v1, v2, &mut fragment);
-                    if pts < 3 {
-                        out.census.clip_zero = out.census.clip_zero.saturating_add(1);
-                        continue;
-                    }
-                    out.census.clip_kept = out.census.clip_kept.saturating_add(pts - 2);
-                    if i0 >= lightmap_uvs.len()
-                        || i1 >= lightmap_uvs.len()
-                        || i2 >= lightmap_uvs.len()
-                        || i0 >= normals.len()
-                        || i1 >= normals.len()
-                        || i2 >= normals.len()
-                    {
-                        continue;
-                    }
-                    match mark_emit_brush_fragment(
-                        out.used_tri,
-                        out.used_point,
-                        max_tris,
-                        max_points,
-                        &fragment[..pts as usize],
-                        lightmap_uvs[i0],
-                        lightmap_uvs[i1],
-                        lightmap_uvs[i2],
-                        normals[i0],
-                        normals[i1],
-                        normals[i2],
-                        contexts.get(si).copied().unwrap_or([0; 7]),
-                        tris,
-                        points,
-                    ) {
-                        Ok((used_tri, used_point)) => {
-                            out.used_tri = used_tri;
-                            out.used_point = used_point;
-                        }
-                        Err(FxMarkEmitRefuse::Overflow) => {
-                            out.overflow = true;
+    pub fn stage_world_surfaces(
+        &self,
+        geometry: MarkReceiverGeometry<'_>,
+        attributes: MarkReceiverAttributes<'_>,
+        output: &mut MarkStagingBuffer<'_>,
+        retest_sphere: bool,
+    ) -> MarkWorldStaging {
+        let Self {
+            origin,
+            radius,
+            axis,
+        } = *self;
+        let MarkReceiverGeometry {
+            mids,
+            halves,
+            positions,
+            packed_indices,
+            surface_index_ranges,
+        } = geometry;
+        let MarkReceiverAttributes {
+            lightmap_uvs,
+            normals,
+            contexts,
+        } = attributes;
+        output.used_tri = 0;
+        output.used_point = 0;
+        let planes = mark_fragment_clip_planes(origin, axis, radius);
+        let mark_dir = axis[0];
+        let radius_sq = radius * radius;
+        let n = core::cmp::min(
+            core::cmp::min(mids.len(), halves.len()),
+            surface_index_ranges.len(),
+        );
+        let mut out = MarkWorldStaging::default();
+        let mut stacked = 0u32;
+        let cap = R_MARK_FRAGMENTS_WORLD_SURF_STACK;
+        let mut si = 0;
+        let mut fragment = [FxWorldMarkPoint::ZERO; R_MARK_CHOP_MAX_POINTS];
+        while si < n {
+            if stacked >= cap || out.overflow {
+                break;
+            }
+            if !retest_sphere
+                || crate::mark_sphere_hits_bounds(origin, radius_sq, mids[si], halves[si])
+            {
+                stacked = stacked.saturating_add(1);
+                let (start, count) = surface_index_ranges[si];
+                let start = start as usize;
+                let end = start.saturating_add(count as usize);
+                if count >= 3 && start < packed_indices.len() {
+                    let end = core::cmp::min(end, packed_indices.len());
+                    let mut t = start;
+                    while t + 2 < end {
+                        if out.overflow {
                             break;
                         }
-                        Err(FxMarkEmitRefuse::FragmentTooSmall) => {}
+                        let i0 = packed_indices[t] as usize;
+                        let i1 = packed_indices[t + 1] as usize;
+                        let i2 = packed_indices[t + 2] as usize;
+                        t += 3;
+                        if i0 >= positions.len() || i1 >= positions.len() || i2 >= positions.len() {
+                            continue;
+                        }
+                        out.census.tri_seen = out.census.tri_seen.saturating_add(1);
+                        let v0 = positions[i0];
+                        let v1 = positions[i1];
+                        let v2 = positions[i2];
+                        if mark_is_triangle_rejected(mark_dir, v0, v1, v2) {
+                            out.census.tri_rejected = out.census.tri_rejected.saturating_add(1);
+                            continue;
+                        }
+                        let pts =
+                            mark_chop_world_triangle_points(&planes, v0, v1, v2, &mut fragment);
+                        if pts < 3 {
+                            out.census.clip_zero = out.census.clip_zero.saturating_add(1);
+                            continue;
+                        }
+                        out.census.clip_kept = out.census.clip_kept.saturating_add(pts - 2);
+                        if i0 >= lightmap_uvs.len()
+                            || i1 >= lightmap_uvs.len()
+                            || i2 >= lightmap_uvs.len()
+                            || i0 >= normals.len()
+                            || i1 >= normals.len()
+                            || i2 >= normals.len()
+                        {
+                            continue;
+                        }
+                        match output.emit_fragment(
+                            &fragment[..pts as usize],
+                            MarkTriangleAttributes {
+                                lightmap_uvs: [
+                                    lightmap_uvs[i0],
+                                    lightmap_uvs[i1],
+                                    lightmap_uvs[i2],
+                                ],
+                                normals: [normals[i0], normals[i1], normals[i2]],
+                            },
+                            contexts.get(si).copied().unwrap_or([0; 7]),
+                        ) {
+                            Ok(()) => {}
+                            Err(FxMarkEmitRefuse::Overflow) => {
+                                out.overflow = true;
+                                break;
+                            }
+                            Err(FxMarkEmitRefuse::FragmentTooSmall) => {}
+                        }
                     }
                 }
             }
+            si += 1;
         }
-        si += 1;
+        out.used_tri = output.used_tri;
+        out.used_point = output.used_point;
+        out
     }
-    out
 }

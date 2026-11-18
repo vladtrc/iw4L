@@ -5,9 +5,7 @@ use std::sync::{Arc, Weak};
 use bevy::prelude::Resource;
 use bevy::render::render_resource::*;
 use bevy::render::renderer::{PendingCommandBuffers, RenderDevice, RenderQueue};
-use render_frame::skinning::{
-    PackedSkinJob, PackedSkinShape, SkinBatchLimits, SkinRefusal, plan_skin_batches,
-};
+use render_frame::skinning::{PackedSkinJob, PackedSkinShape, SkinBatchLimits, plan_skin_batches};
 
 const VERTEX_BYTES: u64 = 32;
 const PARAMS_BYTES: u64 = 48;
@@ -70,11 +68,10 @@ impl SkinGpu {
         output: Option<&Buffer>,
         vertex_count: usize,
         device: &RenderDevice,
-        _queue: &RenderQueue,
         pending: &mut PendingCommandBuffers,
         budget: u64,
-    ) -> Result<Skinned, SkinRefusal> {
-        let _prepare = perf::Span::RenderSkinPrepareMs.enter();
+    ) -> Result<Skinned, &'static str> {
+        let _prepare = perf::span!("SkinPrepare", "iw4l.render");
         if self
             .device
             .as_ref()
@@ -104,7 +101,7 @@ impl SkinGpu {
         if jobs.is_empty() {
             return Ok(Skinned::default());
         }
-        let output = output.ok_or(SkinRefusal::UnsupportedProduct)?;
+        let output = output.ok_or("unsupported skin product")?;
         self.output_bytes = output.size();
         let limits = device.limits();
         let batches = plan_skin_batches(
@@ -144,7 +141,7 @@ impl SkinGpu {
             .saturating_add(output.size().saturating_mul(2))
             > budget
         {
-            return Err(SkinRefusal::ResidencyPressure);
+            return Err("skin residency budget exhausted");
         }
         while self
             .resident_bytes()
@@ -176,7 +173,7 @@ impl SkinGpu {
             .saturating_add(transient)
             > budget
         {
-            return Err(SkinRefusal::ResidencyPressure);
+            return Err("skin residency budget exhausted");
         }
         for (id, shape) in unique {
             let resident = self.shapes.entry(id).or_insert_with(|| ResidentShape {

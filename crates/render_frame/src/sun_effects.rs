@@ -32,7 +32,6 @@ pub struct SunEffectsDef {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct SunEffectsFrame {
-    pub world_generation: Option<u64>,
     pub camera_key: u64,
     pub camera_cut: bool,
     pub dt_ms: i32,

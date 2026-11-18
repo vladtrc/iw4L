@@ -32,7 +32,8 @@ the solver implementer, not to the integrating agent.
 
 The maintainer's local artifact `2026-10-04-independent-reimplementations` retains the
 contract, exact agent prompt, origin statement, checks and integration logs.
-These records live under ignored `context/artifacts/`, per `CONTEXT.md`.
+These records live under ignored `context/artifacts/`, per
+[`md/skills/CONTEXT.md`](../../md/skills/CONTEXT.md).
 The public replacement commit can be identified from this file's Git history;
 its full hash and the solver digest are retained in that artifact.
 

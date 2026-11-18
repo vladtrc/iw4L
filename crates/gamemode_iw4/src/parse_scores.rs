@@ -91,11 +91,13 @@ pub fn parse_scores(argv_tokens: &[&str]) -> ParsedScores {
     out.score_limit = atol(argv(argv_tokens, 4));
     for i in 0..out.num {
         let base = 5 + i * SCORE_TOKENS_PER_CLIENT;
-        let mut row = Score::default();
-        row.client = atol(argv(argv_tokens, base));
-        row.score = atol(argv(argv_tokens, base + 1));
-        row.ping = atol(argv(argv_tokens, base + 2));
-        row.deaths = atol(argv(argv_tokens, base + 3));
+        let mut row = Score {
+            client: atol(argv(argv_tokens, base)),
+            score: atol(argv(argv_tokens, base + 1)),
+            ping: atol(argv(argv_tokens, base + 2)),
+            deaths: atol(argv(argv_tokens, base + 3)),
+            ..Score::default()
+        };
         out.status_icon_index[i] = atol(argv(argv_tokens, base + 4));
         row.kills = atol(argv(argv_tokens, base + 5));
         row.assists = atol(argv(argv_tokens, base + 6));

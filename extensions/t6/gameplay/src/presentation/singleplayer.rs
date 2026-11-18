@@ -1,0 +1,56 @@
+use asset_game::SingleplayerMode;
+
+pub(super) const MODES: &[SingleplayerMode] = &[
+    SingleplayerMode {
+        label: "Black Ops 2 Campaign",
+        button_label: Some("BLOPS2 Campaign"),
+        entries: &[
+            "Pyrrhic Victory",
+            "Celerium",
+            "Old Wounds",
+            "Time and Fate",
+            "Fallen Angel",
+            "Karma",
+            "Suffer with Me",
+            "Achilles' Veil",
+            "Odysseus",
+            "Cordis Die",
+            "Judgment Day",
+        ],
+        zones: &[],
+        previews: &[],
+    },
+    SingleplayerMode {
+        label: "Black Ops 2 Strike Force",
+        button_label: Some("BLOPS2 Strike Force"),
+        entries: &[
+            "FOB Spectre",
+            "Shipwreck",
+            "I.E.D.",
+            "Second Chance",
+            "Dispatch",
+        ],
+        zones: &[],
+        previews: &[],
+    },
+    SingleplayerMode {
+        label: "Black Ops 2 Zombies",
+        button_label: Some("BLOPS2 Zombies"),
+        entries: &[
+            "TranZit",
+            "Bus Depot",
+            "Farm",
+            "Town",
+            "Nuketown Zombies",
+            "Die Rise",
+            "Diner",
+            "Mob of the Dead",
+            "Cell Block",
+            "Buried",
+            "Borough",
+            "Origins",
+        ],
+        zones: &[],
+        previews: &[],
+    },
+];

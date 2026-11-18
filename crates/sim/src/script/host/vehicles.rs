@@ -5,9 +5,11 @@ use crate::script::runtime::{raise, run_now};
 use crate::script::{NativeRegistry, RoundScript, Value};
 use bevy_ecs::prelude::World;
 
-pub(super) mod campaign;
-
 pub(crate) const DAMAGE: &str = "maps/mp/gametypes/_callbacksetup::codecallback_vehicledamage";
+
+mod engine;
+pub(super) mod physics;
+mod wheels;
 
 const VEHICLE_SLOTS: u8 = 8;
 const MPH: f32 = 17.6;
@@ -26,10 +28,17 @@ pub(crate) struct Plane {
 
 #[derive(Clone, Debug)]
 pub(crate) struct Heli {
+    motion: Option<asset_core::VehicleMotion>,
+    physics: Option<physics::Body>,
+    path_mode: physics::PathMode,
+    engine: Option<engine::Engine>,
+    team: Option<u8>,
+    wheel_surfaces: [u8; 6],
     slot: u8,
     goal: Option<[f32; 3]>,
     path_node: Option<u64>,
     path_running: bool,
+    path_switch: Option<(u64, u64)>,
     velocity: [f32; 3],
     turning: f32,
     hover: Option<Hover>,
@@ -39,6 +48,7 @@ pub(crate) struct Heli {
     near_notified: bool,
     speed: f32,
     max_speed: f32,
+    path_speed: f32,
     accel: f32,
     decel: f32,
     heading: [f32; 3],
@@ -60,8 +70,6 @@ pub(crate) struct Heli {
     on_target: bool,
     gunner: Option<u32>,
     next_fire_ms: i32,
-    ground: bool,
-    path_speed: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -104,10 +112,17 @@ pub(crate) enum TurretAim {
 impl Default for Heli {
     fn default() -> Self {
         Self {
+            motion: None,
+            physics: None,
+            path_mode: physics::PathMode::default(),
+            engine: None,
+            team: None,
+            wheel_surfaces: [0; 6],
             slot: 0,
             goal: None,
             path_node: None,
             path_running: false,
+            path_switch: None,
             velocity: [0.0; 3],
             turning: 1.0,
             hover: None,
@@ -117,6 +132,7 @@ impl Default for Heli {
             near_notified: false,
             speed: 0.0,
             max_speed: 0.0,
+            path_speed: 0.0,
             accel: 0.0,
             decel: 0.0,
             heading: [1.0, 0.0, 0.0],
@@ -138,8 +154,6 @@ impl Default for Heli {
             on_target: false,
             gunner: None,
             next_fire_ms: 0,
-            ground: false,
-            path_speed: 0.0,
         }
     }
 }
@@ -236,7 +250,7 @@ fn fire_weapon(world: &mut World, receiver: &Value, args: &[Value]) -> Result<Va
         (heli.weapon, heli.owner, heli.turret, heli.heading)
     };
     let weapon = weapon.ok_or("vehicle has no weapon")?;
-    let tag = optional(args, 0, string)?.unwrap_or_default();
+    let tag = optional(args, 0, string)?.unwrap_or(String::new());
     let from = super::presence::tag_world(world, id, &tag)
         .map(|(origin, _)| origin)
         .unwrap_or_else(|| super::turrets::muzzle(world, id));
@@ -264,20 +278,22 @@ fn fire_weapon(world: &mut World, receiver: &Value, args: &[Value]) -> Result<Va
         })
         .map_or(heading, |d| d.to_array());
     if bullet {
-        super::turrets::fire_bullet(world, id, from, dir, weapon, owner.map(crate::ClientId));
+        super::turrets::fire_bullet(
+            world,
+            id,
+            from,
+            dir,
+            weapon,
+            owner.map(crate::ClientId),
+            None,
+        )?;
         return Ok(Value::Undefined);
     }
-    let player =
-        owner.filter(|client| world.resource::<RoundScript>().players.contains_key(client));
-    let owner = player
-        .or_else(|| super::weapons::campaign::owner(world).map(|client| client.0))
+    let owner = owner
+        .filter(|client| world.resource::<RoundScript>().players.contains_key(client))
         .ok_or("vehicle owner is not connected")?;
     let end = std::array::from_fn(|i| from[i] + dir[i] * 1000.0);
-    let missile = super::weapons::launch(world, crate::ClientId(owner), weapon, from, end)?;
-    if player.is_none() {
-        super::weapons::campaign::mark_ownerless(world, &missile);
-    }
-    Ok(missile)
+    super::weapons::launch(world, crate::ClientId(owner), weapon, from, end)
 }
 
 fn vec_field(runtime: &mut RoundScript, object: u64, name: &str) -> [f32; 3] {
@@ -295,10 +311,29 @@ fn spawn_vehicle(
     model: &str,
     flight: Option<Heli>,
 ) -> Result<Value, String> {
-    let slot = if flight.is_some() && !campaign::sp_level(world) {
+    let flight = flight
+        .map(|mut flight| -> Result<Heli, String> {
+            if flight.motion.is_some_and(|motion| motion.physics_enabled) {
+                if !flight
+                    .motion
+                    .and_then(|motion| motion.physics)
+                    .is_some_and(|facts| facts.valid())
+                {
+                    return Err("vehicle physical inputs are unavailable".into());
+                }
+                flight.physics = Some(physics::Body::default());
+            }
+            Ok(flight)
+        })
+        .transpose()?;
+    let slot = if flight.is_some() {
         let runtime = world.resource::<RoundScript>();
         Some(
-            (0..VEHICLE_SLOTS)
+            (0..if runtime.profile == asset_core::RuntimeProfile::Campaign {
+                64
+            } else {
+                VEHICLE_SLOTS
+            })
                 .find(|slot| {
                     !runtime
                         .vehicles
@@ -310,25 +345,128 @@ fn spawn_vehicle(
     } else {
         None
     };
-    let presence = super::presence::spawn_presence(world, origin)?;
+    let id = world
+        .resource_mut::<RoundScript>()
+        .create_entity(EntityKind::Vehicle, classname)?;
+    let presence = match super::presence::spawn_presence(world, origin) {
+        Ok(presence) => presence,
+        Err(error) => {
+            world.resource_mut::<RoundScript>().delete_entity(id);
+            return Err(error);
+        }
+    };
+    let number = crate::frame::FrameWorld::from_world(world)
+        .gentity_number(presence)
+        .ok_or("vehicle presence has no entity number")?;
     let birthtime = super::players::now_ms(world) as i32;
     let mut runtime = world.resource_mut::<RoundScript>();
-    let id = runtime.create_entity(EntityKind::Vehicle, classname)?;
     runtime.set_object_field(id, "birthtime", Value::Int(birthtime));
     runtime.set_object_field(id, "origin", Value::Vector(origin));
     runtime.set_object_field(id, "angles", Value::Vector(angles));
     runtime.set_object_field(id, "model", Value::string(model));
-    runtime.new_models.push(id);
     let entity = runtime.entities.get_mut(&id).unwrap();
     entity.presence = Some(presence);
+    entity.number = number;
     entity.can_damage = true;
+    entity.contents = 0x2080;
+    runtime.path_nodes.blockers.insert(id, Default::default());
     if let Some(mut flight) = flight {
-        flight.slot = slot.unwrap_or(u8::MAX);
+        flight.slot = slot.unwrap();
         flight.heading = math_iw4::angle_vectors(angles).0;
         runtime.set_object_field(id, "veh_speed", Value::Float(0.0));
         runtime.vehicles.insert(id, flight);
     }
     Ok(Value::Object(id))
+}
+
+fn spawn_campaign_vehicle(world: &mut World, parent: u64, args: &[Value]) -> Result<Value, String> {
+    let targetname = optional(args, 0, string)?;
+    let owner = args
+        .get(1)
+        .map(|value| {
+            world
+                .resource::<RoundScript>()
+                .player_client_of(value)
+                .ok_or("vehicle owner is not a player")
+        })
+        .transpose()?;
+    let now = super::players::now_ms(world) as i32;
+    let (classname, origin, angles, model, definition, fields, flags) = {
+        let mut runtime = world.resource_mut::<RoundScript>();
+        if runtime.entities[&parent].kind != EntityKind::VehicleSpawner {
+            return Err("receiver is not a vehicle spawner".into());
+        }
+        if runtime
+            .engine
+            .vehicle_spawn_times
+            .get(&parent)
+            .is_some_and(|last| *last >= now)
+        {
+            return Ok(Value::Undefined);
+        }
+        let Value::String(model) = runtime.object_field(parent, "model") else {
+            return Err("vehicle spawner has no model".into());
+        };
+        let Value::String(definition) = runtime.object_field(parent, "vehicletype") else {
+            return Err("vehicle spawner has no vehicle definition".into());
+        };
+        let flags = match runtime.object_field(parent, "spawnflags") {
+            Value::Int(flags) => flags,
+            _ => 0,
+        };
+        runtime.engine.vehicle_spawn_times.insert(parent, now);
+        (
+            runtime.entities[&parent].classname.clone(),
+            vec_field(&mut runtime, parent, "origin"),
+            vec_field(&mut runtime, parent, "angles"),
+            model,
+            definition,
+            runtime.objects[&parent].clone(),
+            flags,
+        )
+    };
+    let mut fields_copy = std::collections::BTreeMap::new();
+    for (field, value) in fields {
+        fields_copy.insert(field, crate::script::runtime::copy_value(world, value)?);
+    }
+    let frame = crate::frame::FrameWorld::from_world(world);
+    let motion = frame.vehicle_motion(&definition).ok_or_else(|| {
+        format!("vehicle {definition}: motion and wheel contact inputs are unavailable")
+    })?;
+    let flight = Heli {
+        motion: Some(motion),
+        engine: frame
+            .vehicle_engine(&definition)
+            .cloned()
+            .map(engine::Engine::new),
+        owner,
+        weapon: frame.vehicle_turret_weapon(&definition),
+        compass: frame.vehicle_compass(&definition).cloned(),
+        def_accel: frame.vehicle_accel(&definition).unwrap_or(0.0),
+        ..Default::default()
+    };
+    let value = spawn_vehicle(world, &classname, origin, angles, &model, Some(flight))?;
+    let Value::Object(child) = value else {
+        return Err("vehicle allocation did not return an entity".into());
+    };
+    let mut runtime = world.resource_mut::<RoundScript>();
+    runtime.objects.insert(child, fields_copy);
+    runtime.set_object_field(
+        child,
+        "targetname",
+        targetname.map_or(Value::Undefined, |name| Value::string(&name)),
+    );
+    runtime.set_object_field(child, "spawnflags", Value::Int(flags & !2));
+    runtime.entities.get_mut(&child).unwrap().contents =
+        if flags & 1 != 0 { 0x202080 } else { 0x2080 };
+    runtime.set_object_field(child, "birthtime", Value::Int(now));
+    raise(
+        world,
+        Value::Object(parent),
+        "spawned",
+        vec![Value::Object(child)],
+    );
+    Ok(Value::Object(child))
 }
 
 fn set_goal(heli: &mut Heli, goal: [f32; 3], stop: bool) {
@@ -354,6 +492,64 @@ fn node(runtime: &mut RoundScript, object: u64) -> Result<[f32; 3], String> {
         Value::Vector(origin) => Ok(origin),
         _ => Err("vehicle node has no origin".into()),
     }
+}
+
+fn apply_path_speed(runtime: &mut RoundScript, node: u64, vehicle: u64) -> Result<(), String> {
+    let mut field = |name: &str| -> Result<Option<f32>, String> {
+        let value = match runtime.object_field(node, name) {
+            Value::Undefined => return Ok(None),
+            Value::Int(value) => value as f32,
+            Value::Float(value) => value,
+            Value::String(value) => value
+                .parse::<f32>()
+                .map_err(|_| format!("vehicle node {name} must be numeric"))?,
+            _ => return Err(format!("vehicle node {name} must be numeric")),
+        };
+        if !value.is_finite() || value < 0.0 || !(value * MPH).is_finite() {
+            return Err(format!(
+                "vehicle node {name} must be finite and nonnegative"
+            ));
+        }
+        Ok(Some(value * MPH))
+    };
+    let Some(speed) = field("speed")? else {
+        return Ok(());
+    };
+    let accel = match field("script_accel")? {
+        Some(value) => Some(value),
+        None => field("accel")?,
+    };
+    let decel = match field("script_decel")? {
+        Some(value) => Some(value),
+        None => field("decel")?,
+    };
+    let vehicle = runtime
+        .vehicles
+        .get_mut(&vehicle)
+        .ok_or("entity is not a vehicle")?;
+    vehicle.path_speed = speed;
+    vehicle.max_speed = speed;
+    vehicle.accel = accel.map_or_else(
+        || {
+            if vehicle.accel > 0.0 {
+                vehicle.accel
+            } else {
+                speed.max(MPH)
+            }
+        },
+        |value| value.max(MPH),
+    );
+    vehicle.decel = decel.map_or_else(
+        || {
+            if vehicle.decel > 0.0 {
+                vehicle.decel
+            } else {
+                vehicle.accel
+            }
+        },
+        |value| value.max(MPH),
+    );
+    Ok(())
 }
 
 fn next_node(runtime: &mut RoundScript, object: u64) -> Result<Option<u64>, String> {
@@ -401,9 +597,15 @@ fn vehicle_array(world: &mut World, prefix: Option<&str>) -> Result<Value, Strin
         Some(prefix) => runtime
             .entities
             .iter()
-            .filter(|(_, entity)| {
-                entity.classname.starts_with(prefix)
-                    && (prefix != "script_vehicle" || entity.kind != EntityKind::Vehicle)
+            .filter(|(id, entity)| {
+                if prefix == "script_vehicle"
+                    && runtime.profile == asset_core::RuntimeProfile::Campaign
+                {
+                    runtime.live(id) && entity.kind == EntityKind::VehicleSpawner
+                } else {
+                    entity.classname.starts_with(prefix)
+                        && (prefix != "script_vehicle" || entity.kind != EntityKind::Vehicle)
+                }
             })
             .map(|(id, _)| Value::Object(*id))
             .collect(),
@@ -412,6 +614,27 @@ fn vehicle_array(world: &mut World, prefix: Option<&str>) -> Result<Value, Strin
 }
 
 pub(crate) fn register(registry: &mut NativeRegistry) {
+    wheels::register(registry);
+    engine::register(registry);
+    physics::register(registry);
+    registry.register(Method, "vehicle_isphysveh", |world, receiver, _| {
+        let motion = heli(world, receiver)?
+            .motion
+            .ok_or("vehicle motion inputs are unavailable")?;
+        Ok(Value::Int(i32::from(motion.physics_enabled)))
+    });
+    registry.register(Method, "setvehicleteam", |world, receiver, args| {
+        let name = string(args, 0)?.to_ascii_lowercase();
+        let campaign =
+            world.resource::<RoundScript>().profile == asset_core::RuntimeProfile::Campaign;
+        let team = if name == "none" && !campaign {
+            0
+        } else {
+            super::spawners::team(&name)?
+        };
+        heli(world, receiver)?.team = Some(team);
+        Ok(Value::Undefined)
+    });
     registry.register(Function, "getallvehiclenodes", |world, _, _| {
         vehicle_array(world, Some("info_vehicle_node"))
     });
@@ -428,7 +651,12 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
                 .count() as i32,
         ))
     });
-    registry.register(Function, "vehicle_getspawnerarray", |world, _, _| {
+    registry.register(Function, "vehicle_getspawnerarray", |world, _, args| {
+        if !args.is_empty()
+            && world.resource::<RoundScript>().profile == asset_core::RuntimeProfile::Campaign
+        {
+            return Err("Vehicle_GetSpawnerArray cannot take arguments".into());
+        }
         vehicle_array(world, Some("script_vehicle"))
     });
     registry.register(Method, "getvehicleowner", |world, receiver, _| {
@@ -446,6 +674,16 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         let velocity = match world.resource::<RoundScript>().planes.get(&object) {
             Some(plane) => plane.velocity,
             None => heli(world, receiver)?.velocity,
+        };
+        Ok(Value::Vector(velocity))
+    });
+    registry.register(Method, "vehicle_getbodyvelocity", |world, receiver, _| {
+        let object = super::natives::engine::entity_id(world, receiver)?;
+        let angles = vec_field(&mut world.resource_mut::<RoundScript>(), object, "angles");
+        let velocity = if let Some(plane) = world.resource::<RoundScript>().planes.get(&object) {
+            physics::world_to_body(plane.velocity, angles)
+        } else {
+            physics::local_velocity(heli(world, receiver)?, angles)
         };
         Ok(Value::Vector(velocity))
     });
@@ -483,6 +721,7 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
                 vehicle.path_running = false;
                 vehicle.speed = 0.0;
                 vehicle.velocity = [0.0; 3];
+                physics::teleport(vehicle);
                 vehicle.heading = math_iw4::angle_vectors(angles).0;
                 if let Some(hover) = &mut vehicle.hover {
                     hover.center = None;
@@ -514,12 +753,10 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         heli(world, receiver)?;
         let object = super::natives::engine::entity_id(world, arg(args, 0)?)?;
         node(&mut world.resource_mut::<RoundScript>(), object)?;
-        let ground = campaign::sp_level(world);
         let vehicle = heli(world, receiver)?;
         vehicle.path_node = Some(object);
         vehicle.path_running = false;
         vehicle.goal = None;
-        vehicle.ground |= ground;
         Ok(Value::Undefined)
     });
     registry.register(Method, "startpath", |world, receiver, args| {
@@ -529,28 +766,42 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
             None => attached.ok_or("vehicle has no attached path")?,
         };
         let origin = node(&mut world.resource_mut::<RoundScript>(), object)?;
-        let (speed, accel, decel) = {
-            let mut runtime = world.resource_mut::<RoundScript>();
-            (
-                campaign::node_speed(&mut runtime, object),
-                campaign::node_accel(&mut runtime, object),
-                campaign::node_decel(&mut runtime, object),
-            )
-        };
-        let vehicle = heli(world, receiver)?;
+        let vehicle_id = super::natives::engine::entity_id(world, receiver)?;
+        let mut runtime = world.resource_mut::<RoundScript>();
+        if runtime.profile == asset_core::RuntimeProfile::Campaign {
+            apply_path_speed(&mut runtime, object, vehicle_id)?;
+        }
+        let vehicle = runtime
+            .vehicles
+            .get_mut(&vehicle_id)
+            .ok_or("receiver is not a vehicle")?;
         vehicle.path_node = Some(object);
         vehicle.path_running = true;
-        let ground = vehicle.ground;
-        if ground && let Some(speed) = speed {
-            campaign::take_speed(vehicle, speed, accel, decel);
+        set_goal(vehicle, origin, true);
+        Ok(Value::Undefined)
+    });
+    registry.register(Method, "setswitchnode", |world, receiver, args| {
+        heli(world, receiver)?;
+        let vehicle = super::natives::engine::entity_id(world, receiver)?;
+        let from = super::natives::engine::entity_id(world, arg(args, 0)?)?;
+        let to = super::natives::engine::entity_id(world, arg(args, 1)?)?;
+        let mut runtime = world.resource_mut::<RoundScript>();
+        let next = next_node(&mut runtime, from)?;
+        let goal = node(&mut runtime, to)?;
+        let vehicle = runtime.vehicles.get_mut(&vehicle).unwrap();
+        if vehicle.path_node.is_some() && vehicle.path_node == next {
+            vehicle.path_switch = None;
+            vehicle.path_node = Some(to);
+            set_goal(vehicle, goal, true);
+        } else {
+            vehicle.path_switch = Some((from, to));
         }
-        set_goal(vehicle, origin, !ground);
         Ok(Value::Undefined)
     });
     registry.register(Method, "vehicle_dospawn", |world, receiver, args| {
         let object = super::natives::engine::entity_id(world, receiver)?;
-        if args.is_empty() {
-            return campaign::spawn_from_spawner(world, object);
+        if world.resource::<RoundScript>().profile == asset_core::RuntimeProfile::Campaign {
+            return spawn_campaign_vehicle(world, object, args);
         }
         let definition = string(args, 0)?;
         let owner = world
@@ -579,6 +830,7 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         let weapon = frame.vehicle_turret_weapon(&definition);
         let compass = frame.vehicle_compass(&definition).cloned();
         let def_accel = frame.vehicle_accel(&definition).unwrap_or(0.0);
+        let motion = frame.vehicle_motion(&definition);
         spawn_vehicle(
             world,
             "script_vehicle",
@@ -590,6 +842,7 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
                 weapon,
                 compass,
                 def_accel,
+                motion,
                 ..Default::default()
             }),
         )
@@ -604,6 +857,7 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         let weapon = frame.vehicle_turret_weapon(&definition);
         let compass = frame.vehicle_compass(&definition).cloned();
         let def_accel = frame.vehicle_accel(&definition).unwrap_or(0.0);
+        let motion = frame.vehicle_motion(&definition);
         let vehicle = spawn_vehicle(
             world,
             "script_vehicle",
@@ -614,6 +868,7 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
                 weapon,
                 compass,
                 def_accel,
+                motion,
                 ..Default::default()
             }),
         )?;
@@ -638,6 +893,7 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         let weapon = frame.vehicle_turret_weapon(&vehicle);
         let compass = frame.vehicle_compass(&vehicle).cloned();
         let def_accel = frame.vehicle_accel(&vehicle).unwrap_or(0.0);
+        let motion = frame.vehicle_motion(&vehicle);
         spawn_vehicle(
             world,
             "script_vehicle",
@@ -649,6 +905,7 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
                 compass,
                 weapon,
                 def_accel,
+                motion,
                 ..Heli::default()
             }),
         )
@@ -701,7 +958,33 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         "vehicle_setspeedimmediate",
         |world, receiver, args| {
             let speed = float(args, 0)?.max(0.0) * MPH;
+            if !speed.is_finite() {
+                return Err("vehicle speed must be finite".into());
+            }
+            let object = super::natives::engine::entity_id(world, receiver)?;
+            let (origin, angles) = {
+                let mut r = world.resource_mut::<RoundScript>();
+                (
+                    vec_field(&mut r, object, "origin"),
+                    vec_field(&mut r, object, "angles"),
+                )
+            };
             let heli = heli(world, receiver)?;
+            let direction = heli
+                .motion
+                .filter(|motion| motion.kind == 5)
+                .and(heli.goal.filter(|_| !heli.arrived))
+                .filter(|goal| *goal != origin)
+                .map_or_else(
+                    || math_iw4::angle_vectors(angles).0,
+                    |goal| {
+                        (glam::Vec3::from_array(goal) - glam::Vec3::from_array(origin))
+                            .normalize()
+                            .to_array()
+                    },
+                );
+            heli.velocity = direction.map(|v| v * speed);
+            heli.heading = direction;
             heli.max_speed = speed;
             heli.speed = speed;
             heli.accel = heli.accel.max(speed);
@@ -709,6 +992,24 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
             Ok(Value::Undefined)
         },
     );
+    registry.register(Method, "setwaitspeed", |world, receiver, args| {
+        let speed = float(args, 0)? * MPH;
+        if !speed.is_finite() || speed < 0.0 {
+            return Err("wait speed must be finite and nonnegative".into());
+        }
+        heli(world, receiver)?.max_speed = speed;
+        Ok(Value::Undefined)
+    });
+    registry.register(Method, "resumespeed", |world, receiver, args| {
+        let accel = float(args, 0)?;
+        if !accel.is_finite() || !(accel.max(1.0) * MPH).is_finite() {
+            return Err("resume acceleration must be finite".into());
+        }
+        let vehicle = heli(world, receiver)?;
+        vehicle.max_speed = vehicle.path_speed;
+        vehicle.accel = accel.max(1.0) * MPH;
+        Ok(Value::Undefined)
+    });
     registry.register(Method, "vehicle_getspeed", |world, receiver, _| {
         Ok(Value::Float(heli(world, receiver)?.speed / MPH))
     });
@@ -886,7 +1187,7 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         let weapon = string(args, 5)?;
         let point = vector(args, 6)?;
         let dir = vector(args, 7)?;
-        let part = optional(args, 11, string)?.unwrap_or_default();
+        let part = optional(args, 11, string)?.unwrap_or(String::new());
         let mut runtime = world.resource_mut::<RoundScript>();
         let before = match runtime.object_field(object, "health") {
             Value::Int(health) => health,
@@ -896,7 +1197,7 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         let after = before.saturating_sub(amount);
         runtime.set_object_field(object, "health", Value::Int(after));
         let model = runtime.object_field(object, "model");
-        drop(runtime);
+
         raise(
             world,
             receiver.clone(),
@@ -924,13 +1225,13 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
 pub(crate) fn damage(
     world: &mut World,
     object: u64,
-    hit: &super::entity_damage::EntityHit,
+    hit: &super::entity_damage::ObjectHit,
     attacker: Value,
     weapon: &str,
     part: &str,
 ) {
     let args = vec![
-        Value::Undefined,
+        hit.inflictor.clone(),
         attacker,
         Value::Int(hit.amount),
         Value::Int(hit.flags),
@@ -1023,7 +1324,125 @@ fn body_tilt(
     [heli.max_pitch * lean * forward, heli.max_roll * lean * side]
 }
 
+fn kinematic_motion(world: &mut World, id: u64) -> physics::Motion {
+    let mut runtime = world.resource_mut::<RoundScript>();
+    let origin = vec_field(&mut runtime, id, "origin");
+    let angles = vec_field(&mut runtime, id, "angles");
+    let look_at = runtime.vehicles[&id]
+        .look_at
+        .filter(|target| runtime.entities.contains_key(target));
+    let look_at = look_at.map(|target| vec_field(&mut runtime, target, "origin"));
+    let heli = runtime.vehicles.get_mut(&id).unwrap();
+    let before = heli.speed;
+    let mut notes = Vec::new();
+    let mut next;
+    let mut goal_left = 0.0;
+    match heli.goal.filter(|_| !(heli.arrived && heli.stop_at_goal)) {
+        Some(goal) => {
+            let to: [f32; 3] = std::array::from_fn(|i| goal[i] - origin[i]);
+            let dist = to.iter().map(|v| v * v).sum::<f32>().sqrt();
+            let wanted = if heli.stop_at_goal {
+                heli.max_speed.min((2.0 * heli.decel * dist).sqrt())
+            } else {
+                heli.max_speed
+            };
+            heli.speed = if wanted > heli.speed {
+                (heli.speed + heli.accel * TICK_S).min(wanted)
+            } else {
+                (heli.speed - heli.decel * TICK_S).max(wanted)
+            };
+            if dist > f32::EPSILON {
+                if heli.turning >= 1.0 || heli.stop_at_goal {
+                    heli.heading = to.map(|v| v / dist);
+                } else {
+                    let desired = math_iw4::vect_to_angles(to);
+                    let current = math_iw4::vect_to_angles(heli.heading);
+                    let step = 180.0 * heli.turning * TICK_S;
+                    heli.heading = math_iw4::angle_vectors([
+                        approach_angle(current[0], desired[0], step),
+                        approach_angle(current[1], desired[1], step),
+                        0.0,
+                    ])
+                    .0;
+                }
+            }
+            let step = (heli.speed * TICK_S).min(dist);
+            next = std::array::from_fn(|i| origin[i] + heli.heading[i] * step);
+            let left = next
+                .iter()
+                .zip(goal)
+                .map(|(a, b)| (a - b).powi(2))
+                .sum::<f32>()
+                .sqrt();
+            goal_left = left;
+            if heli.near_goal > 0.0 && !heli.near_notified && left <= heli.near_goal {
+                heli.near_notified = true;
+                notes.push("near_goal");
+            }
+            if !heli.arrived && left <= ARRIVED {
+                heli.arrived = true;
+                if heli.stop_at_goal {
+                    next = goal;
+                    heli.speed = 0.0;
+                }
+                notes.push("goal");
+            }
+        }
+        None => {
+            heli.speed = (heli.speed - heli.decel * TICK_S).max(0.0);
+            next = std::array::from_fn(|i| origin[i] + heli.heading[i] * heli.speed * TICK_S);
+            if heli.speed <= f32::EPSILON
+                && let Some(hover) = &mut heli.hover
+            {
+                next = hover.advance(origin);
+            }
+        }
+    }
+    let desired_yaw = heli
+        .target_yaw
+        .or(heli.arrived.then_some(heli.goal_yaw).flatten())
+        .or(look_at.map(|at| math_iw4::vect_to_angles([at[0] - next[0], at[1] - next[1], 0.0])[1]))
+        .or(
+            (heli.speed > 1.0 && heli.heading[..2].iter().any(|v| v.abs() > 0.01))
+                .then(|| math_iw4::vect_to_angles(heli.heading)[1]),
+        )
+        .unwrap_or(angles[1]);
+    let velocity: [f32; 3] = std::array::from_fn(|i| (next[i] - origin[i]) / TICK_S);
+    let mut angles = angles;
+    let yaw_vel = &mut heli.angle_vel[1];
+    update_angle(
+        &mut angles[1],
+        yaw_vel,
+        desired_yaw,
+        [heli.yaw_speed, heli.yaw_accel, heli.yaw_decel],
+        heli.yaw_overshoot,
+    );
+    let [pitch_target, roll_target] = body_tilt(heli, velocity, angles[1], before, goal_left);
+    let ratio = if heli.def_accel > 0.0 {
+        (heli.accel / heli.def_accel).clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    let angle_accel = ratio * 45.0 + (1.0 - ratio);
+    for (axis, target) in [(0, pitch_target), (2, roll_target)] {
+        update_angle(
+            &mut angles[axis],
+            &mut heli.angle_vel[axis],
+            target,
+            [45.0, angle_accel, angle_accel * 0.4],
+            0.0,
+        );
+    }
+    physics::Motion {
+        origin: next,
+        angles,
+        velocity,
+        notes: notes.into_iter().map(|name| (name, Vec::new())).collect(),
+    }
+}
+
 pub(crate) fn advance(world: &mut World) {
+    let _span = perf::span_handle!("script_vehicles_advance", "iw4l.sim").enter();
     {
         let mut runtime = world.resource_mut::<RoundScript>();
         let ids: Vec<u64> = runtime.planes.keys().copied().collect();
@@ -1046,6 +1465,10 @@ pub(crate) fn advance(world: &mut World) {
         .collect();
     let now = crate::level_time_ms(world.resource::<crate::step::StepRequest>().tick);
     for id in ids {
+        if !world.resource::<RoundScript>().entities.contains_key(&id) {
+            world.resource_mut::<RoundScript>().vehicles.remove(&id);
+            continue;
+        }
         let (gunner, weapon) = world
             .resource::<RoundScript>()
             .vehicles
@@ -1057,123 +1480,33 @@ pub(crate) fn advance(world: &mut World) {
         let fire_ms = weapon
             .and_then(|weapon| crate::frame::FrameWorld::from_world(world).combat_facts_for(weapon))
             .map_or(100, |facts| facts.fire_time_ms.max(1));
+        let before = world.resource::<RoundScript>().vehicles[&id].speed;
+        let motion = if world.resource::<RoundScript>().vehicles[&id]
+            .physics
+            .is_some()
+        {
+            match physics::advance(world, id) {
+                Ok(motion) => motion,
+                Err(message) => {
+                    world.resource_mut::<RoundScript>().fault = Some(crate::script::Fault::at(
+                        &crate::script::Location {
+                            module: "<engine>".into(),
+                            function: "vehicle physics".into(),
+                            line: 0,
+                            column: 0,
+                        },
+                        message,
+                    ));
+                    return;
+                }
+            }
+        } else {
+            kinematic_motion(world, id)
+        };
+        let mut notes = motion.notes;
+        let (next, angles, velocity) = (motion.origin, motion.angles, motion.velocity);
         let mut runtime = world.resource_mut::<RoundScript>();
-        if !runtime.entities.contains_key(&id) {
-            runtime.vehicles.remove(&id);
-            continue;
-        }
-        let origin = vec_field(&mut runtime, id, "origin");
-        let angles = vec_field(&mut runtime, id, "angles");
-        let look_at = runtime.vehicles[&id]
-            .look_at
-            .filter(|target| runtime.entities.contains_key(target));
-        let look_at = look_at.map(|target| vec_field(&mut runtime, target, "origin"));
         let heli = runtime.vehicles.get_mut(&id).unwrap();
-        let before = heli.speed;
-        let mut notes = Vec::new();
-        let mut next;
-        let mut goal_left = 0.0;
-        match heli.goal.filter(|_| !(heli.arrived && heli.stop_at_goal)) {
-            Some(goal) => {
-                let to: [f32; 3] = std::array::from_fn(|i| goal[i] - origin[i]);
-                let dist = to.iter().map(|v| v * v).sum::<f32>().sqrt();
-                let wanted = if heli.stop_at_goal {
-                    heli.max_speed.min((2.0 * heli.decel * dist).sqrt())
-                } else {
-                    heli.max_speed
-                };
-                heli.speed = if wanted > heli.speed {
-                    (heli.speed + heli.accel * TICK_S).min(wanted)
-                } else {
-                    (heli.speed - heli.decel * TICK_S).max(wanted)
-                };
-                if dist > f32::EPSILON {
-                    if heli.turning >= 1.0 || heli.stop_at_goal {
-                        heli.heading = to.map(|v| v / dist);
-                    } else {
-                        let desired = math_iw4::vect_to_angles(to);
-                        let current = math_iw4::vect_to_angles(heli.heading);
-                        let step = 180.0 * heli.turning * TICK_S;
-                        heli.heading = math_iw4::angle_vectors([
-                            approach_angle(current[0], desired[0], step),
-                            approach_angle(current[1], desired[1], step),
-                            0.0,
-                        ])
-                        .0;
-                    }
-                }
-                let step = (heli.speed * TICK_S).min(dist);
-                next = std::array::from_fn(|i| origin[i] + heli.heading[i] * step);
-                let left = next
-                    .iter()
-                    .zip(goal)
-                    .map(|(a, b)| (a - b).powi(2))
-                    .sum::<f32>()
-                    .sqrt();
-                goal_left = left;
-                if heli.near_goal > 0.0 && !heli.near_notified && left <= heli.near_goal {
-                    heli.near_notified = true;
-                    notes.push("near_goal");
-                }
-                if !heli.arrived && left <= ARRIVED {
-                    heli.arrived = true;
-                    if heli.stop_at_goal {
-                        next = goal;
-                        heli.speed = 0.0;
-                    }
-                    notes.push("goal");
-                }
-            }
-            None => {
-                heli.speed = (heli.speed - heli.decel * TICK_S).max(0.0);
-                next = std::array::from_fn(|i| origin[i] + heli.heading[i] * heli.speed * TICK_S);
-                if heli.speed <= f32::EPSILON
-                    && let Some(hover) = &mut heli.hover
-                {
-                    next = hover.advance(origin);
-                }
-            }
-        }
-        let desired_yaw = heli
-            .target_yaw
-            .or(heli.arrived.then_some(heli.goal_yaw).flatten())
-            .or(look_at
-                .map(|at| math_iw4::vect_to_angles([at[0] - next[0], at[1] - next[1], 0.0])[1]))
-            .or(
-                (heli.speed > 1.0 && heli.heading[..2].iter().any(|v| v.abs() > 0.01))
-                    .then(|| math_iw4::vect_to_angles(heli.heading)[1]),
-            )
-            .unwrap_or(angles[1]);
-        let velocity: [f32; 3] = std::array::from_fn(|i| (next[i] - origin[i]) / TICK_S);
-        let mut angles = angles;
-        let yaw_vel = &mut heli.angle_vel[1];
-        update_angle(
-            &mut angles[1],
-            yaw_vel,
-            desired_yaw,
-            [heli.yaw_speed, heli.yaw_accel, heli.yaw_decel],
-            heli.yaw_overshoot,
-        );
-        let [pitch_target, roll_target] = if heli.ground {
-            [math_iw4::vect_to_angles(heli.heading)[0], 0.0]
-        } else {
-            body_tilt(heli, velocity, angles[1], before, goal_left)
-        };
-        let ratio = if heli.def_accel > 0.0 {
-            (heli.accel / heli.def_accel).clamp(0.0, 1.0)
-        } else {
-            1.0
-        };
-        let angle_accel = ratio * 45.0 + (1.0 - ratio);
-        for (axis, target) in [(0, pitch_target), (2, roll_target)] {
-            update_angle(
-                &mut angles[axis],
-                &mut heli.angle_vel[axis],
-                target,
-                [45.0, angle_accel, angle_accel * 0.4],
-                0.0,
-            );
-        }
         let [pitch, yaw, roll] = angles;
         match control {
             Some((point, attack)) => {
@@ -1181,7 +1514,7 @@ pub(crate) fn advance(world: &mut World) {
                 heli.on_target = true;
                 if attack && now >= heli.next_fire_ms {
                     heli.next_fire_ms = now + fire_ms;
-                    notes.push("turret_fire");
+                    notes.push(("turret_fire", Vec::new()));
                 }
             }
             None if heli.gunner.is_some() => {
@@ -1192,53 +1525,42 @@ pub(crate) fn advance(world: &mut World) {
         }
         if heli.turret.is_some() && !heli.on_target {
             heli.on_target = true;
-            notes.push("turret_on_target");
+            notes.push(("turret_on_target", Vec::new()));
         }
         heli.velocity = velocity;
         let reached_node = (heli.path_running && heli.arrived)
             .then_some(heli.path_node)
             .flatten();
         let speed = heli.speed;
+        if let Some(engine) = &mut heli.engine {
+            engine.advance(now, speed, before);
+        }
         if let Some(reached) = reached_node {
-            let next = match campaign::take_switch(&mut runtime, id, reached) {
-                Some(to) => Ok(Some(to)),
-                None => next_node(&mut runtime, reached),
-            };
-            let successor = next.and_then(|next| match next {
-                Some(next) => Ok(Some((next, node(&mut runtime, next)?))),
-                None => Ok(None),
-            });
-            let ground = runtime.vehicles[&id].ground;
-            let reached_speed = campaign::node_speed(&mut runtime, reached);
-            let reached_accel = campaign::node_accel(&mut runtime, reached);
-            let reached_decel = campaign::node_decel(&mut runtime, reached);
-            let last = match &successor {
-                Ok(Some((next, _))) => {
-                    ground && !matches!(next_node(&mut runtime, *next), Ok(Some(_)))
+            let next = match runtime.vehicles[&id].path_switch {
+                Some((from, to)) if from == reached => {
+                    runtime.vehicles.get_mut(&id).unwrap().path_switch = None;
+                    Ok(Some(to))
                 }
-                _ => true,
+                _ => next_node(&mut runtime, reached),
             };
-            if ground && let Some(speed) = reached_speed {
-                campaign::take_speed(
-                    runtime.vehicles.get_mut(&id).unwrap(),
-                    speed,
-                    reached_accel,
-                    reached_decel,
-                );
-            }
+            let successor = next.and_then(|next| {
+                if runtime.profile == asset_core::RuntimeProfile::Campaign {
+                    apply_path_speed(&mut runtime, reached, id)?;
+                }
+                match next {
+                    Some(next) => Ok(Some((next, node(&mut runtime, next)?))),
+                    None => Ok(None),
+                }
+            });
             match successor {
                 Ok(Some((node, goal))) => {
                     let vehicle = runtime.vehicles.get_mut(&id).unwrap();
                     vehicle.path_node = Some(node);
-                    set_goal(vehicle, goal, !ground || last);
+                    set_goal(vehicle, goal, true);
                 }
                 Ok(None) => {
                     runtime.vehicles.get_mut(&id).unwrap().path_running = false;
-                    notes.push(if ground {
-                        "reached_end_node"
-                    } else {
-                        "end_of_path"
-                    });
+                    notes.push(("end_of_path", Vec::new()));
                 }
                 Err(error) => {
                     runtime.vehicles.get_mut(&id).unwrap().path_running = false;
@@ -1258,12 +1580,12 @@ pub(crate) fn advance(world: &mut World) {
         runtime.set_object_field(id, "origin", Value::Vector(next));
         runtime.set_object_field(id, "angles", Value::Vector([pitch, yaw, roll]));
         runtime.set_object_field(id, "veh_speed", Value::Float(speed / MPH));
-        drop(runtime);
-        for note in notes {
-            raise(world, Value::Object(id), note, Vec::new());
+
+        for (note, args) in notes {
+            raise(world, Value::Object(id), note, args);
         }
+        wheels::update(world, id);
     }
-    campaign::drive(world);
 }
 
 pub(crate) fn compass_rows(world: &mut World) -> Vec<crate::CompassVehicle> {
@@ -1271,17 +1593,24 @@ pub(crate) fn compass_rows(world: &mut World) -> Vec<crate::CompassVehicle> {
     let mut rows: Vec<_> = runtime
         .vehicles
         .iter()
-        .filter_map(|(id, heli)| Some((*id, heli.owner?, heli.compass.clone()?)))
+        .filter_map(|(id, heli)| {
+            Some((
+                *id,
+                heli.owner.unwrap_or(u32::MAX),
+                heli.team,
+                heli.compass.clone()?,
+            ))
+        })
         .collect();
     rows.extend(
         runtime
             .planes
             .iter()
-            .filter_map(|(id, plane)| Some((*id, plane.owner, plane.compass.clone()?))),
+            .filter_map(|(id, plane)| Some((*id, plane.owner, None, plane.compass.clone()?))),
     );
-    rows.sort_by_key(|(id, _, _)| *id);
+    rows.sort_by_key(|(id, _, _, _)| *id);
     rows.into_iter()
-        .filter_map(|(id, owner, (icons, size))| {
+        .filter_map(|(id, owner, native_team, (icons, size))| {
             if !world.resource::<RoundScript>().live(&id) {
                 return None;
             }
@@ -1297,11 +1626,11 @@ pub(crate) fn compass_rows(world: &mut World) -> Vec<crate::CompassVehicle> {
                 team = super::players::load_field(world, owner, "sessionteam")
                     .unwrap_or(Value::Undefined);
             }
-            let team = match team {
+            let team = native_team.map(i32::from).unwrap_or_else(|| match team {
                 Value::String(team) if &*team == "axis" => entity_iw4::TEAM_AXIS,
                 Value::String(team) if &*team == "allies" => entity_iw4::TEAM_ALLIES,
                 _ => entity_iw4::TEAM_FREE,
-            };
+            });
             Some(crate::CompassVehicle {
                 origin,
                 yaw,
@@ -1320,7 +1649,7 @@ pub(crate) fn hud_targets(world: &World) -> Vec<crate::VehicleHudTarget> {
         .vehicles
         .iter()
         .filter_map(|(id, vehicle)| {
-            if !runtime.live(id) || vehicle.slot >= VEHICLE_SLOTS {
+            if !runtime.live(id) {
                 return None;
             }
             let entity = runtime.entities.get(id)?;
@@ -1339,4 +1668,20 @@ pub(crate) fn hud_targets(world: &World) -> Vec<crate::VehicleHudTarget> {
         .collect();
     rows.sort_by_key(|row| row.slot);
     rows
+}
+
+/// An independent audio voice leaves script PlayLoopSound on the same entity intact.
+pub(super) fn engine_sounds(runtime: &RoundScript) -> Vec<(u64, u8, crate::script::Arc<str>, f32)> {
+    runtime
+        .vehicles
+        .iter()
+        .flat_map(|(id, vehicle)| {
+            vehicle.engine.as_ref().into_iter().flat_map(move |engine| {
+                engine
+                    .voices()
+                    .into_iter()
+                    .map(move |(slot, alias, gain)| (*id, slot, alias.into(), gain))
+            })
+        })
+        .collect()
 }

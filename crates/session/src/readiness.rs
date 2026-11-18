@@ -1,5 +1,5 @@
 use bevy::prelude::Resource;
-use frame::{LocalLoadKey, RuntimeRole, WorldReadiness, WorldStamp};
+use frame::{RuntimeRole, WorldReadiness};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ReadinessDecision {
@@ -34,17 +34,15 @@ impl ReadinessDecision {
 pub fn decide_readiness(
     role: RuntimeRole,
     headless: bool,
-    generation: WorldStamp,
     installed: bool,
     navigation: Option<WorldReadiness>,
     rendering: Option<WorldReadiness>,
     audio: Option<WorldReadiness>,
 ) -> ReadinessDecision {
-    if !installed || generation.0.is_none() {
+    if !installed {
         return ReadinessDecision::default();
     }
-    let ready =
-        |report: Option<WorldReadiness>| report.is_some_and(|report| report.ready_for(generation));
+    let ready = |report: Option<WorldReadiness>| report.is_some_and(|report| report.is_ready());
     let graphics_required = role != RuntimeRole::Dedicated && !headless;
     let rendered = !graphics_required || ready(rendering);
     let presentation = rendered && (!graphics_required || ready(audio));
@@ -53,13 +51,11 @@ pub fn decide_readiness(
         RuntimeRole::Replay => presentation,
         RuntimeRole::Client => false,
     };
-    let failure = if role.runs_authority()
-        && navigation.is_some_and(|report| report.failed_for(generation))
-    {
+    let failure = if role.runs_authority() && navigation.is_some_and(|report| report.is_failed()) {
         Some(ReadinessFailure::Navigation)
-    } else if graphics_required && rendering.is_some_and(|report| report.failed_for(generation)) {
+    } else if graphics_required && rendering.is_some_and(|report| report.is_failed()) {
         Some(ReadinessFailure::Rendering)
-    } else if graphics_required && audio.is_some_and(|report| report.failed_for(generation)) {
+    } else if graphics_required && audio.is_some_and(|report| report.is_failed()) {
         Some(ReadinessFailure::Audio)
     } else {
         None
@@ -73,8 +69,6 @@ pub fn decide_readiness(
 
 #[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SessionReadinessPolicy {
-    pub load_key: Option<LocalLoadKey>,
-    pub generation: WorldStamp,
     pub advancement_allowed: bool,
     pub presentation_allowed: bool,
     pub admission_allowed: bool,
@@ -82,14 +76,7 @@ pub struct SessionReadinessPolicy {
 }
 
 impl SessionReadinessPolicy {
-    pub fn local_input_allowed(self, generation: WorldStamp, armed: bool, failed: bool) -> bool {
-        self.input_allowed
-            && self.generation == generation
-            && generation.0.is_some()
-            && self
-                .load_key
-                .is_some_and(|key| generation.0 == Some(key.local_load_request_id))
-            && armed
-            && !failed
+    pub fn local_input_allowed(self, armed: bool, failed: bool) -> bool {
+        self.input_allowed && armed && !failed
     }
 }

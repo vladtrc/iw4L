@@ -42,15 +42,6 @@ pub struct StaticModelHit {
     pub bone_idx: i32,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct StaticModelWalkStats {
-    pub considered: u32,
-
-    pub aabb_miss: u32,
-
-    pub traced: u32,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RigidXform {
     pub axis: [[f32; 3]; 3],
@@ -183,38 +174,21 @@ pub fn point_trace_static_models<'a, I>(
 where
     I: IntoIterator<Item = &'a ClipStaticModel>,
 {
-    let mut stats = StaticModelWalkStats::default();
-    point_trace_static_models_stats(models, start, end, contentmask, results, &mut stats)
-}
-
-pub fn point_trace_static_models_stats<'a, I>(
-    models: I,
-    start: [f32; 3],
-    end: [f32; 3],
-    contentmask: u32,
-    results: &mut Trace,
-    stats: &mut StaticModelWalkStats,
-) -> Option<StaticModelHit>
-where
-    I: IntoIterator<Item = &'a ClipStaticModel>,
-{
-    point_trace_static_models_stats_keyed(
+    point_trace_static_models_keyed(
         models.into_iter().enumerate(),
         start,
         end,
         contentmask,
         results,
-        stats,
     )
 }
 
-pub fn point_trace_static_models_stats_keyed<'a, I>(
+pub fn point_trace_static_models_keyed<'a, I>(
     models: I,
     start: [f32; 3],
     end: [f32; 3],
     contentmask: u32,
     results: &mut Trace,
-    stats: &mut StaticModelWalkStats,
 ) -> Option<StaticModelHit>
 where
     I: IntoIterator<Item = (usize, &'a ClipStaticModel)>,
@@ -224,12 +198,9 @@ where
         if sm.coll.contents & contentmask == 0 {
             continue;
         }
-        stats.considered = stats.considered.saturating_add(1);
         if trace_box_misses(start, end, sm.bounds_mid, sm.bounds_half, results.fraction) {
-            stats.aabb_miss = stats.aabb_miss.saturating_add(1);
             continue;
         }
-        stats.traced = stats.traced.saturating_add(1);
         let bone = trace_static_model(sm, results, start, end, contentmask);
         if bone >= 0 {
             winner = Some(StaticModelHit {

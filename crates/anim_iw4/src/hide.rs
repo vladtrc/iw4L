@@ -30,7 +30,7 @@ pub fn or_shift_part_bits(dst: &mut [u32; 6], src: [u32; 6], bone_base: u32) {
         } else {
             0
         };
-        let high = if i >= word_shift + 1 {
+        let high = if i > word_shift {
             src[i - word_shift - 1] << inv
         } else {
             0

@@ -16,7 +16,7 @@ const SKY_CEILING_MIN_NORMAL_Z: f32 = 0.7;
 
 // The mark is kept for the missile's whole flight. The pilot's control link is
 // dropped when the pilot dies, and the missile must still pass the sky ceiling then.
-#[derive(Resource, Debug, Default)]
+#[derive(Resource, Clone, Debug, Default)]
 pub(crate) struct RemoteMissiles(Vec<ProjectileId>);
 
 pub(crate) fn mark_remote(world: &mut World, id: ProjectileId) {
@@ -26,9 +26,9 @@ pub(crate) fn mark_remote(world: &mut World, id: ProjectileId) {
     }
 }
 
-pub(crate) fn is_remote(world: &mut FrameWorld, id: ProjectileId) -> bool {
+pub(crate) fn is_remote(world: &FrameWorld, id: ProjectileId) -> bool {
     world
-        .ecs()
+        .ecs_ref()
         .get_resource::<RemoteMissiles>()
         .is_some_and(|marked| marked.0.contains(&id))
 }
@@ -99,9 +99,6 @@ pub(crate) fn steer(
     cmd: &playerstate_iw4::UserCmd,
     msec: i32,
 ) {
-    if !world.publishes_snapshot() {
-        return;
-    }
     let Some(mut link) = world
         .client_meta(id)
         .and_then(|m| m.remote_missile)
@@ -130,9 +127,6 @@ pub(crate) fn steer(
 }
 
 pub(crate) fn advance(world: &mut FrameWorld, tick: Tick) {
-    if !world.publishes_snapshot() {
-        return;
-    }
     forget_gone_missiles(world);
     let now = crate::level_time_ms(tick);
     for id in world.client_ids_sorted() {
@@ -164,7 +158,8 @@ pub(crate) fn advance(world: &mut FrameWorld, tick: Tick) {
             .map(|(v, d)| v * d)
             .sum::<f32>()
             .max(0.0);
-        if link.armed && !link.boosted && link.attack {
+        let boosting = link.armed && !link.boosted && link.attack;
+        if boosting {
             speed = SPEED_RANGE[1];
             link.boosted = true;
         } else {
@@ -186,6 +181,21 @@ pub(crate) fn advance(world: &mut FrameWorld, tick: Tick) {
             tr_base: projectile.origin,
         };
         projectile.apos = entity_iw4::fire_missile_apos(dir);
+        if boosting {
+            let payload = crate::EntityEventPayload {
+                number: link.entnum,
+                correlation: link.projectile.0,
+                origin: projectile.origin,
+                weapon: projectile.weapon,
+                ..Default::default()
+            };
+            world.push_entity_event(
+                tick,
+                crate::EventAudience::Client(id),
+                entity_iw4::EntityEventKind::MISSILE_REMOTE_BOOST,
+                payload,
+            );
+        }
         world.client_meta_mut(id).remote_missile = Some(link);
     }
 }

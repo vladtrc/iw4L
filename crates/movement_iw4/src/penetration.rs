@@ -435,3 +435,91 @@ pub fn capsule_triangle(moving: Capsule, t: Triangle) -> ContactResult {
         negative
     })
 }
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CapsuleSweepHit {
+    pub fraction: f64,
+    pub normal: Vec3,
+    pub startsolid: bool,
+    pub allsolid: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CapsuleSweepError {
+    Invalid,
+    IterationLimit,
+}
+
+pub fn sweep_capsules(
+    moving: Capsule,
+    delta: Vec3,
+    fixed: Capsule,
+) -> Result<Option<CapsuleSweepHit>, CapsuleSweepError> {
+    if !moving.valid() || !fixed.valid() || !delta.finite() {
+        return Err(CapsuleSweepError::Invalid);
+    }
+    let radius = moving.radius + fixed.radius;
+    if !radius.is_finite() {
+        return Err(CapsuleSweepError::Invalid);
+    }
+    let mut fraction = 0.0;
+    for _ in 0..128 {
+        let (p, q) = closest_segments(
+            moving.a + delta * fraction,
+            moving.b + delta * fraction,
+            fixed.a,
+            fixed.b,
+        )
+        .ok_or(CapsuleSweepError::Invalid)?;
+        let distance = (p - q).length();
+        if !distance.is_finite() {
+            return Err(CapsuleSweepError::Invalid);
+        }
+        let gap = distance - radius;
+        let startsolid = fraction == 0.0 && gap < 0.0;
+        let normal = if distance > 1e-12 {
+            (p - q) / distance
+        } else {
+            match capsule_capsule(moving, fixed) {
+                ContactResult::Contact(c) => c.normal,
+                _ => return Err(CapsuleSweepError::Invalid),
+            }
+        };
+        let closing = -delta.dot(normal);
+        if gap <= 1e-7 {
+            if !startsolid && fraction == 0.0 && closing <= 0.0 {
+                return Ok(None);
+            }
+            let allsolid = startsolid
+                && matches!(
+                    capsule_capsule(
+                        Capsule {
+                            a: moving.a + delta,
+                            b: moving.b + delta,
+                            ..moving
+                        },
+                        fixed
+                    ),
+                    ContactResult::Contact(_)
+                );
+            return Ok(Some(CapsuleSweepHit {
+                fraction,
+                normal,
+                startsolid,
+                allsolid,
+            }));
+        }
+        if closing <= 0.0 {
+            return Ok(None);
+        }
+        let next = fraction + gap / closing;
+        if next > 1.0 {
+            return Ok(None);
+        }
+        if next <= fraction {
+            return Err(CapsuleSweepError::IterationLimit);
+        }
+        fraction = next;
+    }
+    Err(CapsuleSweepError::IterationLimit)
+}

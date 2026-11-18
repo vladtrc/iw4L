@@ -255,6 +255,29 @@ impl Video {
         }
     }
 
+    pub(crate) fn rgba(&self, out: &mut [u8]) {
+        let (y_plane, u_plane, v_plane) = (&self.cur[0], &self.cur[1], &self.cur[2]);
+        let alpha = self.has_alpha.then(|| &self.cur[3]);
+        for (row, line) in out
+            .chunks_exact_mut(self.width * 4)
+            .take(self.height)
+            .enumerate()
+        {
+            let ys = &y_plane.data[row * y_plane.stride..][..self.width];
+            let us = &u_plane.data[(row >> 1) * u_plane.stride..];
+            let vs = &v_plane.data[(row >> 1) * v_plane.stride..];
+            for (x, pixel) in line.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                let d = i32::from(us[x >> 1]) - 128;
+                let e = i32::from(vs[x >> 1]) - 128;
+                let c = (i32::from(ys[x]) - 16) * 298;
+                pixel[0] = ((c + 409 * e + 128) >> 8).clamp(0, 255) as u8;
+                pixel[1] = ((c - 100 * d - 208 * e + 128) >> 8).clamp(0, 255) as u8;
+                pixel[2] = ((c + 516 * d + 128) >> 8).clamp(0, 255) as u8;
+                pixel[3] = alpha.map_or(255, |plane| plane.data[row * plane.stride + x]);
+            }
+        }
+    }
+
     pub(crate) fn decode(&mut self, packet: &[u8]) -> Result<(), Error> {
         std::mem::swap(&mut self.cur, &mut self.prev);
         let mut b = Bits::new(packet);
@@ -928,36 +951,6 @@ fn idct(block: &mut [i32; 64]) {
         let row: [i32; 8] = std::array::from_fn(|k| tmp[y * 8 + k]);
         for (k, v) in idct8(row).into_iter().enumerate() {
             block[y * 8 + k] = v.wrapping_add(0x7f) >> 8;
-        }
-    }
-}
-
-pub(crate) fn to_rgba(planes: &[Plane], width: usize, height: usize, out: &mut [u8]) {
-    let (y_p, u_p, v_p) = (&planes[0], &planes[1], &planes[2]);
-    for (row, line) in out.chunks_exact_mut(width * 4).take(height).enumerate() {
-        let ys = &y_p.data[row * y_p.stride..][..width];
-        let us = &u_p.data[(row >> 1) * u_p.stride..];
-        let vs = &v_p.data[(row >> 1) * v_p.stride..];
-        let y_pairs = ys.as_chunks::<2>().0;
-        let px_pairs = line.as_chunks_mut::<8>().0;
-        for (i, ([y0, y1], px8)) in y_pairs.iter().zip(px_pairs).enumerate() {
-            let d = i32::from(us[i]) - 128;
-            let e = i32::from(vs[i]) - 128;
-            let r_add = 409 * e + 128;
-            let g_sub = 100 * d + 208 * e - 128;
-            let b_add = 516 * d + 128;
-
-            let c0 = (i32::from(*y0) - 16) * 298;
-            px8[0] = ((c0 + r_add) >> 8).clamp(0, 255) as u8;
-            px8[1] = ((c0 - g_sub) >> 8).clamp(0, 255) as u8;
-            px8[2] = ((c0 + b_add) >> 8).clamp(0, 255) as u8;
-            px8[3] = 255;
-
-            let c1 = (i32::from(*y1) - 16) * 298;
-            px8[4] = ((c1 + r_add) >> 8).clamp(0, 255) as u8;
-            px8[5] = ((c1 - g_sub) >> 8).clamp(0, 255) as u8;
-            px8[6] = ((c1 + b_add) >> 8).clamp(0, 255) as u8;
-            px8[7] = 255;
         }
     }
 }

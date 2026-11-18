@@ -1,0 +1,10 @@
+SELECT 'compared_ticks' AS metric, COUNT(*) AS total FROM slice WHERE name = 'bg_shadow'
+UNION ALL SELECT 'compared_commands', COALESCE(SUM(EXTRACT_ARG(arg_set_id, 'debug.commands')),0) FROM slice WHERE name = 'bg_shadow'
+UNION ALL SELECT 'compared_players', COALESCE(SUM(EXTRACT_ARG(arg_set_id, 'debug.players')),0) FROM slice WHERE name = 'bg_shadow'
+UNION ALL SELECT 'compared_shots', COALESCE(SUM(EXTRACT_ARG(arg_set_id, 'debug.shots')),0) FROM slice WHERE name = 'bg_shadow'
+UNION ALL SELECT 'ps_differences', COALESCE(SUM(EXTRACT_ARG(arg_set_id, 'debug.ps_diff')),0) FROM slice WHERE name = 'bg_shadow'
+UNION ALL SELECT 'carry_differences', COALESCE(SUM(EXTRACT_ARG(arg_set_id, 'debug.carry_diff')),0) FROM slice WHERE name = 'bg_shadow'
+UNION ALL SELECT 'cause_differences', COALESCE(SUM(EXTRACT_ARG(arg_set_id, 'debug.causes_diff')),0) FROM slice WHERE name = 'bg_shadow'
+UNION ALL SELECT 'seed_differences', COALESCE(SUM(EXTRACT_ARG(arg_set_id, 'debug.seeds_diff')),0) FROM slice WHERE name = 'bg_shadow'
+UNION ALL SELECT 'shot_differences', COALESCE(SUM(EXTRACT_ARG(arg_set_id, 'debug.shots_diff')),0) FROM slice WHERE name = 'bg_shadow'
+UNION ALL SELECT 'rng_differences', COALESCE(SUM(EXTRACT_ARG(arg_set_id, 'debug.rng_diff')),0) FROM slice WHERE name = 'bg_shadow';

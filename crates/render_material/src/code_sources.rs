@@ -227,6 +227,15 @@ impl RuntimeCodeSources {
             .cloned()
     }
 
+    pub fn live_constants(&self) -> impl Iterator<Item = (u16, &[[u32; 4]])> {
+        self.constants
+            .iter()
+            .enumerate()
+            .filter_map(|(index, slot)| {
+                Some((u16::try_from(index).ok()?, slot.live_rows()?.as_ref()))
+            })
+    }
+
     pub fn has_constant(&self, index: u16) -> bool {
         self.constant_rows(index).is_some()
     }
@@ -252,6 +261,18 @@ impl RuntimeCodeSources {
 pub enum CodeSourceError {
     TextureIndexOverflow,
 }
+
+impl std::fmt::Display for CodeSourceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TextureIndexOverflow => {
+                f.write_str("code texture index does not fit the host address space")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CodeSourceError {}
 
 #[derive(Clone, Debug)]
 pub struct CompiledConstantOverlay {

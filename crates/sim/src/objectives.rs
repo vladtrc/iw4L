@@ -4,6 +4,8 @@ use gamemode_iw4::Team;
 pub struct ObjectiveMatch {
     pub scores: [i32; 3],
     pub compass: Vec<CompassObjective>,
+    pub campaign: Vec<CampaignObjective>,
+    pub campaign_mode: bool,
     pub vehicles: Vec<CompassVehicle>,
     pub vehicle_targets: Vec<VehicleHudTarget>,
     pub server_info: Vec<(String, String)>,
@@ -21,8 +23,28 @@ pub struct ObjectiveMatch {
     pub thermal_body_material: String,
     pub missile_vision: Option<crate::VisionChange>,
     pub night_vision: Option<crate::VisionChange>,
+    pub night_vision_assets: bool,
+    pub half_res_particles: bool,
     pub pain_vision: Option<crate::VisionChange>,
-    pub list: Vec<ObjectiveListRow>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CampaignObjective {
+    pub index: u8,
+    pub state: ObjectiveState,
+    pub text: String,
+    pub positions: [Option<[f32; 3]>; 8],
+    pub entity: Option<u16>,
+    pub offset: [f32; 3],
+    pub icon: String,
+    pub pointer_text: String,
+    pub ring: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ObjectiveUpdate {
+    pub state: ObjectiveState,
+    pub text: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -95,16 +117,6 @@ pub struct CompassObjective {
     pub team: Team,
     pub icon: String,
     pub viewer: Option<u32>,
-    pub label: String,
-    pub follows: bool,
-}
-
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct ObjectiveListRow {
-    pub index: u8,
-    pub state: ObjectiveState,
-    pub template: String,
-    pub arg: String,
 }
 
 impl ObjectiveMatch {

@@ -1,4 +1,3 @@
-use crate::dip::{D3dDrawIndexedPrimitive, draw_indexed_from_shadow_work};
 use crate::partition::{D3dScissorRect, set_viewport_and_scissor};
 use crate::{ShadowDrawListWork, draw_surf_list_work_shadow};
 use lighting_iw4::SpotShadowSlotPlan;
@@ -12,7 +11,6 @@ pub struct SpotShadowMapPass {
     pub scissor: D3dScissorRect,
     pub viewport: SunShadowViewport,
     pub work: Option<ShadowDrawListWork>,
-    pub dips: Vec<D3dDrawIndexedPrimitive>,
 }
 
 fn plan_viewport(plan: SpotShadowSlotPlan) -> SunShadowViewport {
@@ -31,20 +29,12 @@ pub fn draw_spot_shadow_map(
 ) -> SpotShadowMapPass {
     let viewport = plan_viewport(plan);
     let scissor = set_viewport_and_scissor(viewport);
-    let (work, dips) = if let Some(packed) = packed {
-        let work = draw_surf_list_work_shadow(packed);
-        let dips = draw_indexed_from_shadow_work(&work);
-        (Some(work), dips)
-    } else {
-        (None, Vec::new())
-    };
     SpotShadowMapPass {
         slot_index,
         render_target_id: plan.render_target_id,
         cleared: plan.clear,
         scissor,
         viewport,
-        work,
-        dips,
+        work: packed.map(draw_surf_list_work_shadow),
     }
 }

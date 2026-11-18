@@ -97,7 +97,22 @@ pub(crate) fn contacts(
     input: GroundTraceInput,
     out: &mut ContactBuffer,
 ) -> Coverage {
-    match gather(scene, input, out) {
+    let Some(cap) = capsule(input, false) else {
+        return Coverage::Unsupported;
+    };
+    contacts_with_capsule(scene, input, cap, out)
+}
+
+pub(crate) fn contacts_with_capsule(
+    scene: &RecoveryScene<'_>,
+    input: GroundTraceInput,
+    cap: Capsule,
+    out: &mut ContactBuffer,
+) -> Coverage {
+    if !cap.valid() {
+        return Coverage::Unsupported;
+    }
+    match gather(scene, input, cap, out) {
         Ok(()) => Coverage::Complete,
         Err(status) => status,
     }
@@ -106,9 +121,9 @@ pub(crate) fn contacts(
 fn gather(
     scene: &RecoveryScene<'_>,
     input: GroundTraceInput,
+    cap: Capsule,
     out: &mut ContactBuffer,
 ) -> Result<(), Coverage> {
-    let cap = capsule(input, false).ok_or(Coverage::Unsupported)?;
     let map = clipmap_iw4::ClipMapRef {
         nodes: &scene.bsp.nodes,
         leaves: &scene.bsp.leaves,
@@ -322,4 +337,25 @@ fn mesh_contacts(
         }
     }
     Ok(())
+}
+
+pub(crate) fn frame_vector64(
+    frame: asset_core::world_frame::WorldFrame,
+    v: movement_iw4::penetration::Vec3,
+    inverse: bool,
+) -> movement_iw4::penetration::Vec3 {
+    let axes =
+        [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]].map(|a| frame.vector_to_scene(a));
+    let v: [f64; 3] = v.into();
+    std::array::from_fn::<_, 3, _>(|i| {
+        (0..3)
+            .map(|j| f64::from(if inverse { axes[i][j] } else { axes[j][i] }) * v[j])
+            .sum()
+    })
+    .into()
+}
+pub(crate) fn frame_origin64(
+    frame: asset_core::world_frame::WorldFrame,
+) -> movement_iw4::penetration::Vec3 {
+    frame.point_to_scene([0.0; 3]).map(f64::from).into()
 }

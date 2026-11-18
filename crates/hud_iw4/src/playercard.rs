@@ -31,7 +31,7 @@ pub const PLAYERCARD_INFO_NAME: i32 = 8;
 pub const PLAYERCARD_INFO_CLAN: i32 = 9;
 pub const PLAYERCARD_INFO_STR: i32 = 10;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct PlayerCardData {
     pub last_update_time: i32,
 
@@ -48,21 +48,6 @@ pub struct PlayerCardData {
     pub team: i32,
 
     pub name: [u8; 32],
-}
-
-impl Default for PlayerCardData {
-    fn default() -> Self {
-        Self {
-            last_update_time: 0,
-            title: 0,
-            icon: 0,
-            nameplate: 0,
-            rank: 0,
-            prestige: 0,
-            team: 0,
-            name: [0; 32],
-        }
-    }
 }
 
 impl PlayerCardData {
@@ -82,17 +67,31 @@ impl PlayerCardData {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct PlayerCardProfile<'a> {
+    pub name: &'a [u8; 16],
+    pub team: i32,
+    pub rank: i32,
+    pub prestige: i32,
+    pub icon: u32,
+    pub title: u32,
+    pub nameplate: u32,
+}
+
 #[must_use]
 pub fn player_cards_set_script_slot(
     cg_time: i32,
-    name16: &[u8; 16],
-    team: i32,
-    rank: i32,
-    prestige: i32,
-    icon: u32,
-    title: u32,
-    nameplate: u32,
+    profile: PlayerCardProfile<'_>,
 ) -> PlayerCardData {
+    let PlayerCardProfile {
+        name: name16,
+        team,
+        rank,
+        prestige,
+        icon,
+        title,
+        nameplate,
+    } = profile;
     let mut name = [0u8; 32];
     let n = name16.len().min(name.len());
     name[..n].copy_from_slice(&name16[..n]);

@@ -44,6 +44,7 @@ fn captured_input(f: WeaponBodyFacts, melee_charge_anim: bool) -> CapturedCombat
         reload_empty_time_ms: f.reload_empty_time_ms,
         empty_reload: weapon_iw4::EmptyReloadPolicy::Authored,
         clip_size: f.clip_size,
+        clip_only: f.clip_only,
         start_ammo: f.start_ammo_rounds(),
         max_ammo: f.max_ammo_rounds(),
         ammo_index: f.ammo_index,
@@ -60,6 +61,7 @@ fn captured_input(f: WeaponBodyFacts, melee_charge_anim: bool) -> CapturedCombat
         burst_cooldown_ms: 0,
 
         bolt_action: f.bolt_action,
+        silenced: f.silenced,
         rechamber_time_ms: f.rechamber_time_ms,
         rechamber_bolt_time_ms: f.rechamber_bolt_time_ms,
         rechamber_bolt_delay_ms: f.rechamber_bolt_delay_ms,

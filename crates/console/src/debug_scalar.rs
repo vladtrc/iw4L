@@ -66,6 +66,46 @@ macro_rules! debug_scalars {
                 _ => unreachable!(),
             }
         }
+
+        pub(crate) fn route(
+            mut commands: bevy::prelude::MessageReader<$crate::ConsoleCommand>,
+            mut dvars: bevy::prelude::ResMut<$ty>,
+            mut console: bevy::prelude::ResMut<$crate::ConsoleState>,
+            settings: bevy::prelude::Res<$crate::ConsoleSettings>,
+            mut line: bevy::prelude::ResMut<$crate::ConsoleLine>,
+        ) {
+            for cmd in commands.read() {
+                let name = cmd.name.as_str();
+                if !NAMES.contains(&name) {
+                    continue;
+                }
+                let parsed = match cmd.args.as_slice() {
+                    [] => Ok(None),
+                    [value] => value
+                        .parse::<f32>()
+                        .ok()
+                        .filter(|v| v.is_finite())
+                        .map(Some)
+                        .ok_or(()),
+                    _ => Err(()),
+                };
+                let (current, min, max, is_bool) = scalar_current(&dvars, name);
+                let msg = match parsed {
+                    Ok(None) => format!("{name} = {current} (domain {min}..{max})"),
+                    Ok(Some(value))
+                        if (min..=max).contains(&value)
+                            && (!is_bool || value == 0.0 || value == 1.0) =>
+                    {
+                        scalar_assign(&mut dvars, name, value);
+                        format!("{name} = {value}")
+                    }
+                    _ => format!("usage: {name} [finite value {min}..{max}]"),
+                };
+                diag::info!(Console, "{msg}");
+                line.0 = msg.clone();
+                console.echo(msg, settings.log_capacity);
+            }
+        }
     };
 }
 pub(crate) use debug_scalars;

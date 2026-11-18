@@ -9,15 +9,13 @@ pub fn bullet_damage_at_distance(facts: &WeaponCombatFacts, dist: f32) -> i32 {
     };
     let mut damage = base;
     let range = facts.min_damage_range - facts.max_damage_range;
-    if base != min && range != 0.0 {
-        if facts.max_damage_range <= dist {
-            if facts.min_damage_range <= dist {
-                damage = min;
-            } else {
-                let lerp = (dist - facts.max_damage_range) / range;
-                let lerp = lerp.clamp(0.0, 1.0);
-                damage = ((base as f32) * (1.0 - lerp) + (min as f32) * lerp) as i32;
-            }
+    if base != min && range != 0.0 && facts.max_damage_range <= dist {
+        if facts.min_damage_range <= dist {
+            damage = min;
+        } else {
+            let lerp = (dist - facts.max_damage_range) / range;
+            let lerp = lerp.clamp(0.0, 1.0);
+            damage = ((base as f32) * (1.0 - lerp) + (min as f32) * lerp) as i32;
         }
     }
     damage.max(0)

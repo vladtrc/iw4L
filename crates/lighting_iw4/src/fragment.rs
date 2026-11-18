@@ -79,11 +79,7 @@ pub fn model_lighting_env_lod(specular_alpha: f32) -> f32 {
 
 pub fn model_lighting_env_intensity(view_dot_normal: f32, env_map_parms: [f32; 4]) -> f32 {
     let mut base = 1.0 + view_dot_normal;
-    if base < 0.0 {
-        base = 0.0;
-    } else if base > 1.0 {
-        base = 1.0;
-    }
+    base = base.clamp(0.0, 1.0);
     let t = libm::powf(base, env_map_parms[2]);
     env_map_parms[0] + (env_map_parms[1] - env_map_parms[0]) * t
 }

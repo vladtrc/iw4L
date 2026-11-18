@@ -48,10 +48,10 @@ impl PcmStream {
         }
     }
 
-    pub fn push(&self, stereo: &[f32]) -> usize {
+    pub fn push(&mut self, stereo: &[f32]) -> usize {
         let written = self.ring.written.load(Ordering::Relaxed);
         let n = (stereo.len() / 2).min(self.free_frames());
-        for (i, frame) in stereo.chunks_exact(2).take(n).enumerate() {
+        for (i, frame) in stereo.as_chunks::<2>().0.iter().take(n).enumerate() {
             let at = ((written as usize + i) % CAPACITY) * 2;
             self.ring.samples[at].store(frame[0].to_bits(), Ordering::Relaxed);
             self.ring.samples[at + 1].store(frame[1].to_bits(), Ordering::Relaxed);
@@ -62,14 +62,14 @@ impl PcmStream {
         n
     }
 
-    pub fn free_frames(&self) -> usize {
+    fn free_frames(&self) -> usize {
         let used =
             self.ring.written.load(Ordering::Relaxed) - self.ring.read.load(Ordering::Acquire);
         CAPACITY - used as usize
     }
 
-    pub fn played_frames(&self) -> u64 {
-        self.ring.read.load(Ordering::Acquire)
+    pub fn is_empty(&self) -> bool {
+        self.ring.read.load(Ordering::Acquire) == self.ring.written.load(Ordering::Relaxed)
     }
 
     pub fn clock(&self) -> PcmClock {

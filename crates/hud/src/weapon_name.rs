@@ -1,24 +1,24 @@
 use assets::{BoundWeapons, PreparedLocalizedStrings};
 
-use crate::gaps::{GapCause, HudGap, HudPresentationGaps};
-
 pub(crate) fn localized_weapon_name(
     viewmodel_index: u32,
     weapons: Option<&BoundWeapons<'_>>,
     strings: Option<&PreparedLocalizedStrings>,
-    gaps: &mut HudPresentationGaps,
 ) -> Option<String> {
     let Some(weapons) = weapons else {
-        gaps.raise(GapCause::NameNoWeaponCatalog);
+        diag::warn_once!(Ui, "no weapon catalog is loaded");
         return None;
     };
     let Some(key) = weapons.registry().display_name_key_of(viewmodel_index) else {
-        gaps.raise(GapCause::NameNoDisplayNameKey { viewmodel_index });
+        diag::warn_once!(
+            Ui,
+            "weapon index {viewmodel_index} carries no display-name key"
+        );
         return None;
     };
-    gaps.clear(HudGap::WeaponDisplayName);
+
     let Some(strings) = strings else {
-        gaps.raise(GapCause::NoStringTable);
+        diag::warn_once!(Ui, "no localized string table is loaded");
         return None;
     };
     let text = match weapons.registry().identity_namespace_of(viewmodel_index) {
@@ -27,7 +27,6 @@ pub(crate) fn localized_weapon_name(
     };
     match text {
         Some(text) => {
-            gaps.clear(HudGap::LocalizedText);
             let mut name = text.to_owned();
             for key in weapons
                 .registry()
@@ -45,9 +44,11 @@ pub(crate) fn localized_weapon_name(
             Some(name)
         }
         None => {
-            gaps.raise(GapCause::LocalizedRowMissing {
-                key: key.to_owned(),
-            });
+            diag::warn_once!(
+                Ui,
+                "key `{key}` has no row in the loaded language",
+                key = key.to_owned()
+            );
             None
         }
     }

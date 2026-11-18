@@ -29,7 +29,10 @@ pub enum KnowledgeSource {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Contact {
     pub id: ClientId,
+    /// Position perceived through a doorway, used for aiming.
     pub origin: [f32; 3],
+    /// Last established physical position, used when investigating lost sight.
+    pub physical_origin: [f32; 3],
     pub source: KnowledgeSource,
     pub seen_tick: u32,
     pub confidence: f32,
@@ -71,7 +74,7 @@ impl WeaponClass {
             return Self::Assault;
         }
         let stem = crate::unique_loadout::family_stem(name);
-        for row in crate::unique_loadout::UNIQUE_WEAPONS {
+        for row in crate::unique_loadout::bot_weapons() {
             if crate::unique_loadout::family_stem(row.key) == stem {
                 return Self::from_group(row.group);
             }

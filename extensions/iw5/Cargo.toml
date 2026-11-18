@@ -1,0 +1,30 @@
+[package]
+name = "ext_iw5"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+asset_anim.workspace = true
+asset_audio.workspace = true
+asset_core.workspace = true
+asset_game.workspace = true
+asset_material.workspace = true
+asset_model.workspace = true
+asset_transport.workspace = true
+asset_world.workspace = true
+assets.workspace = true
+bots.workspace = true
+ext_iw5_audio.workspace = true
+ext_iw5_fastfile.workspace = true
+ext_iw5_gameplay.workspace = true
+ext_iw5_load.workspace = true
+ext_iw5_material.workspace = true
+ext_iw5_world.workspace = true
+ext_iw5_zone.workspace = true
+game_family.workspace = true
+render_material.workspace = true
+sim.workspace = true
+
+[lints]
+workspace = true

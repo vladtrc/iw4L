@@ -40,7 +40,7 @@ fn nearest_on_segment(a: [f32; 3], b: [f32; 3], point: [f32; 3]) -> [f32; 3] {
     add(a, scale(segment, t))
 }
 
-pub(crate) fn random(world: &mut World) -> u32 {
+pub fn random(world: &mut World) -> u32 {
     let mut runtime = world.resource_mut::<RoundScript>();
     let mut x = runtime.rng;
     x ^= x << 13;
@@ -50,27 +50,52 @@ pub(crate) fn random(world: &mut World) -> u32 {
     x
 }
 
-pub(crate) fn random_unit(world: &mut World) -> f32 {
+fn random_unit(world: &mut World) -> f32 {
     (random(world) >> 8) as f32 / (1u32 << 24) as f32
 }
 
-pub(crate) fn spread_end(
-    start: [f32; 3],
-    end: [f32; 3],
+pub(crate) fn sample_shot_direction(
+    world: &mut World,
+    direction: glam::Vec3,
     spread: f32,
-    (r, t): (f32, f32),
-) -> [f32; 3] {
-    const RANGE: f32 = 8192.0;
-    let angles = math_iw4::vect_to_angles(std::array::from_fn(|k| end[k] - start[k]));
-    let (forward, right, up) = math_iw4::angle_vectors(angles);
-    let radius = r.sqrt() * spread.to_radians().tan() * RANGE;
-    let theta = t * std::f32::consts::TAU;
-    let (x, y) = (radius * theta.cos(), radius * theta.sin());
-    std::array::from_fn(|k| start[k] + forward[k] * RANGE + right[k] * x + up[k] * y)
+) -> Result<glam::Vec3, String> {
+    if !spread.is_finite() || !(0.0..90.0).contains(&spread) {
+        return Err("spread must be finite, nonnegative and below 90 degrees".into());
+    }
+    let aim = direction
+        .try_normalize()
+        .ok_or("spread requires a nonzero direction")?;
+    if spread == 0.0 {
+        return Ok(aim);
+    }
+    let up = if aim.z.abs() < 0.9 {
+        glam::Vec3::Z
+    } else {
+        glam::Vec3::Y
+    };
+    let right = aim.cross(up).normalize();
+    let up = right.cross(aim).normalize();
+    // Uniform area in a tangent disk, rather than the original sampler.
+    let radius = random_unit(world).sqrt() * spread.to_radians().tan();
+    let angle = random_unit(world) * std::f32::consts::TAU;
+    Ok((aim + right * (radius * angle.cos()) + up * (radius * angle.sin())).normalize())
 }
 
 pub(crate) fn register(registry: &mut NativeRegistry) {
     use Namespace::Function;
+    registry.register(Function, "bulletspread", |world, _, args| {
+        let start = vector(args, 0)?;
+        let end = vector(args, 1)?;
+        if !start.into_iter().chain(end).all(f32::is_finite) {
+            return Err("bulletspread endpoints must be finite".into());
+        }
+        let start = glam::Vec3::from_array(start);
+        let direction =
+            sample_shot_direction(world, glam::Vec3::from_array(end) - start, float(args, 2)?)?;
+        Ok(Value::Vector(
+            (start + direction * weapon_iw4::BULLET_MAX_RANGE).to_array(),
+        ))
+    });
     macro_rules! unary {
         ($($name:literal => $f:expr),* $(,)?) => {$(
             registry.register(Function, $name, |_, _, args| {
@@ -86,6 +111,7 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         "cos" => |d| d.to_radians().cos(),
         "sin" => |d| d.to_radians().sin(),
         "tan" => |d| d.to_radians().tan(),
+        "squared" => |value| value * value,
         "angleclamp180" => |a| {
             let a = a - 360.0 * (a / 360.0).floor();
             if a > 180.0 { a - 360.0 } else { a }
@@ -129,6 +155,34 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
     registry.register(Function, "min", |_, _, args| {
         Ok(Value::Float(float(args, 0)?.min(float(args, 1)?)))
     });
+    registry.register(Function, "clamp", |_, _, args| {
+        let upper = float(args, 2)?;
+        let lower = float(args, 1)?;
+        let value = float(args, 0)?;
+        let bounded = if value - upper < 0.0 { value } else { upper };
+        Ok(Value::Float(if lower - value < 0.0 {
+            bounded
+        } else {
+            lower
+        }))
+    });
+    registry.register(Function, "vectorlerp", |_, _, args| {
+        if args.len() != 3 {
+            return Err("vectorlerp expects three arguments".into());
+        }
+        let start = vector(args, 0)?;
+        let end = vector(args, 1)?;
+        let fraction = float(args, 2)?;
+        Ok(Value::Vector(std::array::from_fn(|axis| {
+            start[axis] + (end[axis] - start[axis]) * fraction
+        })))
+    });
+    registry.register(Function, "isarray", |_, _, args| {
+        Ok(Value::Int(i32::from(matches!(
+            arg(args, 0)?,
+            Value::Array(_)
+        ))))
+    });
     registry.register(Function, "distance", |_, _, args| {
         Ok(Value::Float(
             distance_sq(vector(args, 0)?, vector(args, 1)?).sqrt(),
@@ -156,16 +210,6 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
     });
     registry.register(Function, "vectordot", |_, _, args| {
         Ok(Value::Float(dot(vector(args, 0)?, vector(args, 1)?)))
-    });
-    registry.register(Function, "squared", |_, _, args| {
-        let x = float(args, 0)?;
-        Ok(Value::Float(x * x))
-    });
-    registry.register(Function, "vectorlerp", |_, _, args| {
-        let (a, b, t) = (vector(args, 0)?, vector(args, 1)?, float(args, 2)?);
-        Ok(Value::Vector(std::array::from_fn(|i| {
-            a[i] + (b[i] - a[i]) * t
-        })))
     });
     registry.register(Function, "vectornormalize", |_, _, args| {
         Ok(Value::Vector(normalize(vector(args, 0)?)))
@@ -248,11 +292,6 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
     registry.register(Function, "randomfloat", |world, _, args| {
         let max = float(args, 0)?;
         Ok(Value::Float(random_unit(world) * max))
-    });
-    registry.register(Function, "bulletspread", |world, _, args| {
-        let (start, end, spread) = (vector(args, 0)?, vector(args, 1)?, float(args, 2)?);
-        let draws = (random_unit(world), random_unit(world));
-        Ok(Value::Vector(spread_end(start, end, spread, draws)))
     });
     registry.register(Function, "randomfloatrange", |world, _, args| {
         let (min, max) = (float(args, 0)?, float(args, 1)?);

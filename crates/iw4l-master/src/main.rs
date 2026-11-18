@@ -14,12 +14,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use master_protocol::{
-    ALPN, AdmissionFailure, Advert, AdvertId, ControlFrame, ControlHello, ControlRequest,
-    ControlResponse, EndpointRole, MAX_BOOTSTRAP_STREAM_BYTES, MAX_CONCURRENT_BOOTSTRAP,
-    MAX_LIST_ADVERTS, MAX_RELAY_UNI_STREAMS, MemberId, PeerEvent, RelayDatagram, RequestBody,
-    ResponseBody, RoomPhase, RoomView, SESSION_IDLE, SESSION_KEEP_ALIVE, ServiceError,
-    SessionCloseReason, StatusResponse, decode_relay, decode_relay_stream, decode_stream_payload,
-    encode_relay, encode_relay_stream, encode_stream_frame, stream_frame_len,
+    ALPN, AdmissionFailure, AdvertId, ControlFrame, ControlHello, ControlRequest, ControlResponse,
+    EndpointRole, MAX_BOOTSTRAP_STREAM_BYTES, MAX_CONCURRENT_BOOTSTRAP, MAX_RELAY_UNI_STREAMS,
+    MemberId, PeerEvent, RelayDatagram, RequestBody, ResponseBody, RoomPhase, RoomView,
+    SESSION_IDLE, SESSION_KEEP_ALIVE, ServiceError, SessionCloseReason, StatusResponse,
+    decode_relay, decode_relay_stream, decode_stream_payload, encode_relay, encode_relay_stream,
+    encode_stream_frame, stream_frame_len,
 };
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -33,7 +33,7 @@ const MAX_ROOMS: usize = 10_000;
 const CONTROL_PRIORITY: i32 = 0;
 
 struct QueuedControl {
-    frame: ControlFrame,
+    encoded: Vec<u8>,
     deadline: tokio::time::Instant,
     _bytes: tokio::sync::OwnedSemaphorePermit,
 }
@@ -44,25 +44,31 @@ struct ControlSender {
     bytes: Arc<Semaphore>,
 }
 
+enum ControlSendError {
+    InvalidFrame(master_protocol::ProtocolError),
+    Unavailable,
+}
+
 impl ControlSender {
-    fn try_send(&self, frame: ControlFrame) -> Result<()> {
-        let len = encode_stream_frame(&frame)?.len();
+    fn try_send(&self, frame: ControlFrame) -> std::result::Result<(), ControlSendError> {
+        let encoded = encode_stream_frame(&frame).map_err(ControlSendError::InvalidFrame)?;
+        let len = encoded.len();
         let bytes = self
             .bytes
             .clone()
             .try_acquire_many_owned(len as u32)
-            .map_err(|_| "control byte budget exhausted")?;
+            .map_err(|_| ControlSendError::Unavailable)?;
         self.tx
-            .try_send(QueuedControl::new(frame, bytes))
-            .map_err(|_| "control queue exhausted")?;
+            .try_send(QueuedControl::new(encoded, bytes))
+            .map_err(|_| ControlSendError::Unavailable)?;
         Ok(())
     }
 }
 
 impl QueuedControl {
-    fn new(frame: ControlFrame, bytes: tokio::sync::OwnedSemaphorePermit) -> Self {
+    fn new(encoded: Vec<u8>, bytes: tokio::sync::OwnedSemaphorePermit) -> Self {
         Self {
-            frame,
+            encoded,
             deadline: tokio::time::Instant::now() + limits::values().queue_age,
             _bytes: bytes,
         }
@@ -189,6 +195,20 @@ impl PasswordVerifier {
             .zip(Self::digest(self.salt, password).as_ref())
             .fold(0u8, |difference, (a, b)| difference | (a ^ b))
             == 0
+    }
+}
+
+struct RoomContent {
+    map: String,
+    requires: master_protocol::ContentFamilies,
+    available: master_protocol::ContentFamilies,
+}
+
+impl RoomContent {
+    fn is_valid(&self) -> bool {
+        self.requires.contains_family("iw4")
+            && self.requires.missing_from(&self.available).is_empty()
+            && map_content_allowed(&self.map, &self.requires)
     }
 }
 
@@ -729,7 +749,7 @@ async fn run_connection(
     children.spawn(async move {
         let result = async {
             while let Some(frame) = control_rx.recv().await {
-                tokio::time::timeout_at(frame.deadline, write_frame(&mut send, &frame.frame))
+                tokio::time::timeout_at(frame.deadline, send.write_all(&frame.encoded))
                     .await
                     .map_err(|_| "control queue/write deadline")??;
             }
@@ -822,7 +842,10 @@ async fn dispatch_publishes(state: &Mutex<ServiceState>, publishes: Vec<(u64, Co
             };
             match peer.control_tx.try_send(frame) {
                 Ok(()) => {}
-                Err(_) => {
+                Err(ControlSendError::InvalidFrame(error)) => {
+                    let _ = writeln!(std::io::stderr(), "invalid server control frame: {error}");
+                }
+                Err(ControlSendError::Unavailable) => {
                     failed.push(connection_id);
                     peer.connection
                         .close(0_u8.into(), b"control delivery failed");
@@ -878,11 +901,13 @@ async fn handle_request(
             &mut state,
             connection_id,
             name,
-            map,
+            RoomContent {
+                map,
+                requires,
+                available,
+            },
             mode,
             max_players,
-            requires,
-            available,
             password,
         ),
         RequestBody::JoinRoom {
@@ -922,21 +947,22 @@ async fn handle_request(
             ),
             Err(error) => (ResponseBody::Error(error), Vec::new()),
         },
-        RequestBody::ListRooms => {
-            let mut adverts: Vec<Advert> = state
+        RequestBody::ListRooms { after } => {
+            let mut rooms: Vec<_> = state
                 .rooms
                 .values()
-                .map(|room| room.view.advert())
+                .filter(|room| after.is_none_or(|id| room.view.room_id > id))
                 .collect();
-            adverts.sort_by_key(|advert| advert.id);
-            adverts.truncate(MAX_LIST_ADVERTS);
-            (
-                ResponseBody::RoomList {
-                    generation: state.generation,
-                    adverts,
-                },
-                Vec::new(),
+            rooms.sort_by_key(|room| room.view.room_id);
+            let page = ResponseBody::room_list_page(
+                state.generation,
+                rooms.into_iter().map(|room| room.view.advert()),
             )
+            .unwrap_or_else(|error| {
+                let _ = writeln!(std::io::stderr(), "cannot build room list: {error}");
+                ResponseBody::Error(ServiceError::Malformed)
+            });
+            (page, Vec::new())
         }
         RequestBody::HostWorldReady {
             room_id,
@@ -1013,20 +1039,19 @@ fn create_room(
     state: &mut ServiceState,
     connection_id: u64,
     name: String,
-    map: String,
+    content: RoomContent,
     mode: String,
     max_players: u8,
-    requires: master_protocol::ContentFlags,
-    available: master_protocol::ContentFlags,
     password: String,
 ) -> (ResponseBody, Vec<(u64, ControlFrame)>) {
-    if !master_protocol::ContentFlags::KNOWN.contains(requires)
-        || !requires.contains(master_protocol::ContentFlags::IW4)
-        || !requires.missing_from(available).is_empty()
-        || !map_content_allowed(&map, requires)
-    {
+    if !content.is_valid() {
         return (ResponseBody::Error(ServiceError::InvalidAdvert), Vec::new());
     }
+    let RoomContent {
+        map,
+        requires,
+        available,
+    } = content;
     if state.membership.contains_key(&connection_id) {
         return (
             ResponseBody::Error(ServiceError::AlreadyHosting),
@@ -1087,7 +1112,7 @@ fn join_room(
     state: &mut ServiceState,
     connection_id: u64,
     room_id: AdvertId,
-    have: master_protocol::ContentFlags,
+    have: master_protocol::ContentFamilies,
     password: String,
 ) -> (ResponseBody, Vec<(u64, ControlFrame)>) {
     if let Some(existing) = state.membership.get(&connection_id).copied() {
@@ -1123,10 +1148,10 @@ fn join_room(
     if !room.view.advert().allows_join_request() {
         return (ResponseBody::Error(ServiceError::Locked), Vec::new());
     }
-    if !room.view.requires.missing_from(have).is_empty() {
+    if !room.view.requires.missing_from(&have).is_empty() {
         return (
             ResponseBody::Error(ServiceError::MissingContent {
-                requires: room.view.requires,
+                requires: room.view.requires.clone(),
                 have,
             }),
             Vec::new(),
@@ -1175,8 +1200,8 @@ fn leave_room(
     (ResponseBody::RoomLeft, publishes)
 }
 
-fn map_content_allowed(map: &str, families: master_protocol::ContentFlags) -> bool {
-    master_protocol::ContentFlags::for_map(map).is_some_and(|family| families.contains(family))
+fn map_content_allowed(map: &str, families: &master_protocol::ContentFamilies) -> bool {
+    master_protocol::ContentFamilies::for_map(map).is_some_and(|family| families.contains(&family))
 }
 
 fn set_options(
@@ -1189,7 +1214,7 @@ fn set_options(
     match state.host_of(connection_id) {
         Ok(room_id) => {
             let room = state.rooms.get_mut(&room_id).expect("host room");
-            if !map_content_allowed(&map, room.view.requires)
+            if !map_content_allowed(&map, &room.view.requires)
                 || (room.view.phase.in_match() && (room.view.map != map || room.view.mode != mode))
             {
                 return (ResponseBody::Error(ServiceError::InvalidAdvert), Vec::new());
@@ -1217,7 +1242,7 @@ fn start_match(
     match state.host_of(connection_id) {
         Ok(room_id) => {
             let room = state.rooms.get_mut(&room_id).expect("host room");
-            if !map_content_allowed(&map, room.view.requires)
+            if !map_content_allowed(&map, &room.view.requires)
                 || (room.view.phase.in_match() && (room.view.map != map || room.view.mode != mode))
             {
                 return (ResponseBody::Error(ServiceError::InvalidAdvert), Vec::new());
@@ -1497,13 +1522,14 @@ async fn relay_datagram(
 
 async fn status(target: &ClientTarget) -> Result<()> {
     let (_endpoint, connection) = connect_client(target).await?;
+    let (mut send, mut recv) = open_control(&connection, EndpointRole::Cli).await?;
     let response = rpc(
-        &connection,
+        &mut send,
+        &mut recv,
         ControlRequest {
             request_id: 1,
             body: RequestBody::Status,
         },
-        EndpointRole::Cli,
     )
     .await?;
     match response.body {
@@ -1524,40 +1550,58 @@ async fn status(target: &ClientTarget) -> Result<()> {
 
 async fn list(target: &ClientTarget) -> Result<()> {
     let (_endpoint, connection) = connect_client(target).await?;
-    let response = rpc(
-        &connection,
-        ControlRequest {
-            request_id: 1,
-            body: RequestBody::ListRooms,
-        },
-        EndpointRole::Cli,
-    )
-    .await?;
-    match response.body {
-        ResponseBody::RoomList {
-            generation,
-            adverts,
-        } => {
-            let mut output = std::io::stdout().lock();
-            writeln!(output, "generation={generation} adverts={}", adverts.len())?;
-            for advert in adverts {
-                writeln!(
-                    output,
-                    "{}\t{}/{}\t{}\t{}\tlocked={}\tin_match={}\tgen={}\trequires=0x{:02x}\t{}",
-                    advert.id,
-                    advert.players,
-                    advert.max_players,
-                    advert.map,
-                    advert.mode,
-                    u8::from(advert.locked),
-                    u8::from(advert.in_match),
-                    advert.generation,
-                    advert.requires.0,
-                    advert.name
-                )?;
+    let (mut send, mut recv) = open_control(&connection, EndpointRole::Cli).await?;
+    let mut after = None;
+    let mut request_id = 0;
+    let mut all_adverts = Vec::new();
+    let generation = loop {
+        request_id += 1;
+        let response = rpc(
+            &mut send,
+            &mut recv,
+            ControlRequest {
+                request_id,
+                body: RequestBody::ListRooms { after },
+            },
+        )
+        .await?;
+        match response.body {
+            ResponseBody::RoomList {
+                generation,
+                adverts,
+                next,
+            } => {
+                all_adverts.extend(adverts);
+                match next {
+                    Some(id) if after.is_none_or(|previous| id > previous) => after = Some(id),
+                    Some(_) => return Err("room list cursor did not advance".into()),
+                    None => break generation,
+                }
             }
+            body => return Err(format!("unexpected List response: {body:?}").into()),
         }
-        body => return Err(format!("unexpected List response: {body:?}").into()),
+    };
+    let mut output = std::io::stdout().lock();
+    writeln!(
+        output,
+        "generation={generation} adverts={}",
+        all_adverts.len()
+    )?;
+    for advert in all_adverts {
+        writeln!(
+            output,
+            "{}\t{}/{}\t{}\t{}\tlocked={}\tin_match={}\tgen={}\trequires={}\t{}",
+            advert.id,
+            advert.players,
+            advert.max_players,
+            advert.map,
+            advert.mode,
+            u8::from(advert.locked),
+            u8::from(advert.in_match),
+            advert.generation,
+            advert.requires.iter().collect::<Vec<_>>().join(","),
+            advert.name
+        )?;
     }
     connection.close(0_u8.into(), b"list complete");
     Ok(())
@@ -1590,13 +1634,11 @@ async fn connect_client(target: &ClientTarget) -> Result<(quinn::Endpoint, quinn
     Ok((endpoint, connection))
 }
 
-async fn rpc(
+async fn open_control(
     connection: &quinn::Connection,
-    request: ControlRequest,
     role: EndpointRole,
-) -> Result<ControlResponse> {
-    let request_id = request.request_id;
-    let (mut send, mut recv) = connection.open_bi().await?;
+) -> Result<(quinn::SendStream, quinn::RecvStream)> {
+    let (mut send, recv) = connection.open_bi().await?;
     send.set_priority(CONTROL_PRIORITY)?;
     write_frame(
         &mut send,
@@ -1609,9 +1651,18 @@ async fn rpc(
         }),
     )
     .await?;
-    write_frame(&mut send, &ControlFrame::Request(request)).await?;
+    Ok((send, recv))
+}
+
+async fn rpc(
+    send: &mut quinn::SendStream,
+    recv: &mut quinn::RecvStream,
+    request: ControlRequest,
+) -> Result<ControlResponse> {
+    let request_id = request.request_id;
+    write_frame(send, &ControlFrame::Request(request)).await?;
     loop {
-        match read_frame(&mut recv).await? {
+        match read_frame(recv).await? {
             ControlFrame::Response(response) if response.request_id == request_id => {
                 return Ok(response);
             }

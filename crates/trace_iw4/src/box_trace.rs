@@ -19,6 +19,58 @@ const SURFACE_CLIP_EPSILON: f32 = 0.125;
 
 const WALKABLE_NORMAL_Z: f32 = 0.7;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum TraceShape {
+    #[default]
+    Capsule,
+    /// Narrow-phase dimensions and basis. Query bounds still carry the center
+    /// offset and enclosing bounds for broad-phase traversal.
+    Box {
+        half_size: [f32; 3],
+        axes: [[f32; 3]; 3],
+    },
+}
+
+impl TraceShape {
+    pub fn box_from_bounds(mins: [f32; 3], maxs: [f32; 3]) -> Self {
+        Self::Box {
+            half_size: core::array::from_fn(|i| (maxs[i] - mins[i]) * 0.5),
+            axes: [[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]],
+        }
+    }
+
+    pub fn map_axes(self, map: impl Fn([f32; 3]) -> [f32; 3]) -> Self {
+        match self {
+            Self::Capsule => self,
+            Self::Box { half_size, axes } => Self::Box {
+                half_size,
+                axes: axes.map(map),
+            },
+        }
+    }
+}
+
+trait PlaneSupport: Copy {
+    fn plane_radius(self, n: [f32; 3]) -> f32;
+}
+
+#[derive(Clone, Copy)]
+struct BoxSupport {
+    half_size: [f32; 3],
+    axes: [[f32; 3]; 3],
+}
+
+impl PlaneSupport for BoxSupport {
+    fn plane_radius(self, n: [f32; 3]) -> f32 {
+        (0..3)
+            .map(|i| {
+                let axis = self.axes[i];
+                (n[0] * axis[0] + n[1] * axis[1] + n[2] * axis[2]).abs() * self.half_size[i]
+            })
+            .sum()
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct CapsuleSize {
     offset: [f32; 3],
@@ -49,7 +101,9 @@ impl CapsuleSize {
             offset_z,
         }
     }
+}
 
+impl PlaneSupport for CapsuleSize {
     fn plane_radius(self, n: [f32; 3]) -> f32 {
         self.radius + n[2].abs() * self.offset_z
     }
@@ -116,16 +170,76 @@ where
     I: IntoIterator<Item = BrushRef<'a>>,
 {
     let cap = CapsuleSize::from_bounds(mins, maxs);
+    trace_support_into(brushes, start, end, cap.offset, cap, mask, best)
+}
+
+pub fn trace_shape<'a, I>(
+    brushes: I,
+    start: [f32; 3],
+    end: [f32; 3],
+    mins: [f32; 3],
+    maxs: [f32; 3],
+    mask: u32,
+    shape: TraceShape,
+) -> Trace
+where
+    I: IntoIterator<Item = BrushRef<'a>>,
+{
+    let mut best = Trace {
+        fraction: 1.0,
+        endpos: end,
+        ..Trace::default()
+    };
+    trace_shape_into(brushes, start, end, mins, maxs, mask, shape, &mut best);
+    best
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn trace_shape_into<'a, I>(
+    brushes: I,
+    start: [f32; 3],
+    end: [f32; 3],
+    mins: [f32; 3],
+    maxs: [f32; 3],
+    mask: u32,
+    shape: TraceShape,
+    best: &mut Trace,
+) -> u16
+where
+    I: IntoIterator<Item = BrushRef<'a>>,
+{
+    match shape {
+        TraceShape::Capsule => trace_box_into(brushes, start, end, mins, maxs, mask, best),
+        TraceShape::Box { half_size, axes } => trace_support_into(
+            brushes,
+            start,
+            end,
+            core::array::from_fn(|i| (mins[i] + maxs[i]) * 0.5),
+            BoxSupport { half_size, axes },
+            mask,
+            best,
+        ),
+    }
+}
+
+fn trace_support_into<'a, I, S: PlaneSupport>(
+    brushes: I,
+    start: [f32; 3],
+    end: [f32; 3],
+    offset: [f32; 3],
+    cap: S,
+    mask: u32,
+    best: &mut Trace,
+) -> u16
+where
+    I: IntoIterator<Item = BrushRef<'a>>,
+{
     let start = [
-        start[0] + cap.offset[0],
-        start[1] + cap.offset[1],
-        start[2] + cap.offset[2],
+        start[0] + offset[0],
+        start[1] + offset[1],
+        start[2] + offset[2],
     ];
-    let end = [
-        end[0] + cap.offset[0],
-        end[1] + cap.offset[1],
-        end[2] + cap.offset[2],
-    ];
+    let end = [end[0] + offset[0], end[1] + offset[1], end[2] + offset[2]];
     let mut glass_encoded = 0u16;
 
     for brush in brushes {
@@ -140,29 +254,25 @@ where
 
     if best.fraction < 1.0 {
         best.endpos = [
-            start[0] + (end[0] - start[0]) * best.fraction - cap.offset[0],
-            start[1] + (end[1] - start[1]) * best.fraction - cap.offset[1],
-            start[2] + (end[2] - start[2]) * best.fraction - cap.offset[2],
+            start[0] + (end[0] - start[0]) * best.fraction - offset[0],
+            start[1] + (end[1] - start[1]) * best.fraction - offset[1],
+            start[2] + (end[2] - start[2]) * best.fraction - offset[2],
         ];
 
         if best.walkable == 0 && best.startsolid == 0 {
             best.walkable = u8::from(best.normal[2] >= WALKABLE_NORMAL_Z);
         }
     } else {
-        best.endpos = [
-            end[0] - cap.offset[0],
-            end[1] - cap.offset[1],
-            end[2] - cap.offset[2],
-        ];
+        best.endpos = [end[0] - offset[0], end[1] - offset[1], end[2] - offset[2]];
     }
     glass_encoded
 }
 
-fn trace_through_brush(
+fn trace_through_brush<S: PlaneSupport>(
     brush: &BrushRef<'_>,
     start: [f32; 3],
     end: [f32; 3],
-    cap: CapsuleSize,
+    cap: S,
     trace: &mut Trace,
     glass_encoded: &mut u16,
 ) {

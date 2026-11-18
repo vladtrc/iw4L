@@ -69,7 +69,7 @@ impl ExactIndirectDraws {
             (needed > 0).then_some((0usize, needed))
         };
         for (slot, draw) in draws.iter_mut().enumerate() {
-            let args = match draw.constant_base {
+            let args = match draw.first_instance() {
                 Some(constant_base) => {
                     draw.indirect_arg = Some(slot as u32);
                     [draw.count, 1, draw.start, 0, constant_base]

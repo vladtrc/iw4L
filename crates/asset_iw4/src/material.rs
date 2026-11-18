@@ -242,11 +242,15 @@ fn colour_band_saw<T: PartialEq>(
     decoded: &T,
     decode: &impl Fn([u32; 2]) -> T,
 ) -> bool {
-    for slot in TECHNIQUE_COLOR_BAND_FIRST..before {
+    for (slot, entries_entry) in entries[..before]
+        .iter()
+        .enumerate()
+        .skip(TECHNIQUE_COLOR_BAND_FIRST)
+    {
         if (slots >> slot) & 1 == 0 {
             continue;
         }
-        if let Some(row) = table.get(entries[slot] as usize)
+        if let Some(row) = table.get((*entries_entry) as usize)
             && decode(*row) == *decoded
         {
             return true;

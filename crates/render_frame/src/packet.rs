@@ -53,13 +53,12 @@ pub struct PackedFrontendLists {
 
 impl PackedFrontendLists {
     #[must_use]
-    pub fn work_entry_n(&self) -> u32 {
-        let n = self.world.len()
-            + self.smodel.len()
-            + self.xmodel.len()
-            + self.smodel_cached.len()
-            + self.smodel_pretess.len()
-            + self.smodel_skinned.len();
-        n as u32
+    pub fn is_empty(&self) -> bool {
+        self.world.is_empty()
+            && self.smodel.is_empty()
+            && self.xmodel.is_empty()
+            && self.smodel_cached.is_empty()
+            && self.smodel_pretess.is_empty()
+            && self.smodel_skinned.is_empty()
     }
 }

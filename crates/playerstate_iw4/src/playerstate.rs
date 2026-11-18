@@ -140,9 +140,16 @@ pub mod eflags {
     pub const TURRET_ACTIVE_DUCK: u32 = 0x800;
 
     pub const RADAR_JAM: u32 = 0x200000;
+
+    pub const SP_EQ_DISABLED: u32 = 0x0200_0000;
+
+    pub const SP_LINKED_STANCE: u32 = 0x0100_0000;
 }
 
 pub mod other_flags {
+    pub const SP_HIDE_HUD: u32 = 0x2000;
+
+    pub const PAIN_VISION: u32 = 0x800;
     pub const AC130: u32 = 0x8000;
 
     pub const EMP_JAMMED: u32 = 0x400;
@@ -184,6 +191,14 @@ pub mod pm_flags {
     pub const SPRINT_BLOCKED: u32 = 0x0002_0000;
 
     pub const LAST_STAND: u32 = 0x0040_0000;
+
+    pub const SCRIPT_NO_STAND: u32 = 0x0080_0000;
+    pub const SCRIPT_NO_CROUCH: u32 = 0x0100_0000;
+    pub const SCRIPT_NO_PRONE: u32 = 0x0200_0000;
+    pub const SCRIPT_NO_STANCES: u32 = SCRIPT_NO_STAND | SCRIPT_NO_CROUCH | SCRIPT_NO_PRONE;
+
+    pub const SCRIPT_NO_LEAN: u32 = 0x0400_0000;
+    pub const SCRIPT_NO_MELEE: u32 = 0x0800_0000;
 }
 
 pub mod weap_flags {

@@ -25,11 +25,12 @@ pub(crate) fn rasterize(icon: ControllerIcon) -> Vec<u8> {
         &mut pixmap.as_mut(),
     );
     let mut rgba = pixmap.take();
-    for pixel in rgba.chunks_exact_mut(4) {
+    for pixel in rgba.as_chunks_mut::<4>().0.iter_mut() {
         let alpha = u32::from(pixel[3]);
-        if alpha != 0 {
+        if let Some(alpha) = std::num::NonZeroU32::new(alpha) {
             for channel in &mut pixel[..3] {
-                *channel = ((u32::from(*channel) * 255 + alpha / 2) / alpha).min(255) as u8;
+                *channel =
+                    ((u32::from(*channel) * 255 + alpha.get() / 2) / alpha.get()).min(255) as u8;
             }
         }
     }

@@ -24,6 +24,7 @@ impl Plugin for RenderGpuPlugin {
             Err(cause) => diag::warn!(World, "drawsurf sampler profile: cause={cause:?}"),
         }
         crate::drawsurf::register_drawsurf_render(app);
+        crate::drawsurf::scope::register(app);
         app.init_resource::<crate::GpuSubmitReady>()
             .init_resource::<crate::ColourWorkingSet>();
         let Some(render_app) = app.get_sub_app_mut(bevy::render::RenderApp) else {
@@ -49,6 +50,10 @@ impl Plugin for RenderGpuPlugin {
     }
 }
 
+#[expect(
+    clippy::type_complexity,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 fn extract_display_encoded_formats(
     cameras: bevy::render::Extract<
         Query<

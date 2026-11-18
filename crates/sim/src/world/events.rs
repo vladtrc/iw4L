@@ -49,7 +49,6 @@ pub(super) struct EventJournal {
     entity_events: Vec<EntityEventRecord>,
     next_entity_event: EventSequence,
     pellet_fx: Vec<crate::PelletFxRecord>,
-    last_pellet_fx: Vec<crate::PelletFxRecord>,
 }
 
 impl Default for EventJournal {
@@ -60,7 +59,6 @@ impl Default for EventJournal {
             entity_events: Vec::new(),
             next_entity_event: EventSequence(1),
             pellet_fx: Vec::new(),
-            last_pellet_fx: Vec::new(),
         }
     }
 }
@@ -76,28 +74,28 @@ impl EventJournal {
                 .saturating_mul(crate::MATCH_TICK_MS)
                 <= crate::gentity::GENTITY_TEMP_EVENT_LIFETIME_MS as u32
         });
-        self.last_pellet_fx = std::mem::take(&mut self.pellet_fx);
+        self.pellet_fx.clear();
     }
-    pub(super) fn push(
-        &mut self,
-        tick: Tick,
-        audience: EventAudience,
-        event: SimEvent,
-        publishes_snapshot: bool,
-    ) {
+    pub(super) fn push(&mut self, tick: Tick, audience: EventAudience, event: SimEvent) {
         let sequence = self.next_event;
         self.next_event = sequence.next();
-        if publishes_snapshot
-            && let SimEvent::Died {
-                victim, attacker, ..
-            } = &event
+        if let SimEvent::Died {
+            victim, attacker, ..
+        } = &event
         {
             let suicide = match attacker {
                 None => 1,
                 Some(a) if a == victim => 1,
                 Some(_) => 0,
             };
-            perf::death(victim.0, attacker.map(|a| a.0), suicide, tick.0);
+            perf::instant!("death", "iw4l.sim", |ctx| {
+                let (victim, attacker, tick): (u32, Option<u32>, u32) =
+                    (victim.0, attacker.map(|a| a.0), tick.0);
+                ctx.arg("victim", i64::from(victim));
+                ctx.arg("attacker", attacker.map(i64::from));
+                ctx.arg("suicide", i64::from(suicide));
+                ctx.arg("tick", i64::from(tick));
+            });
         }
         self.journal.push(EventRecord {
             sequence,
@@ -137,10 +135,6 @@ impl EventJournal {
         &self.pellet_fx
     }
 
-    pub(super) fn last_pellet_fx(&self) -> &[crate::PelletFxRecord] {
-        &self.last_pellet_fx
-    }
-
     pub(super) fn push_pellet_fx(&mut self, record: crate::PelletFxRecord) {
         self.pellet_fx.push(record);
     }
@@ -152,6 +146,7 @@ pub(super) struct PresentationQueue {
     pub(super) prints: Vec<PendingPrint>,
     pub(super) local_sounds: Vec<PendingLocalSound>,
     pub(super) script_audio: Vec<crate::ScriptAudioCommand>,
+    pub(super) objective_updates: Vec<crate::ObjectiveUpdate>,
 }
 impl PresentationQueue {
     pub(super) fn reset(&mut self) {
@@ -159,5 +154,6 @@ impl PresentationQueue {
         self.prints.clear();
         self.local_sounds.clear();
         self.script_audio.clear();
+        self.objective_updates.clear();
     }
 }

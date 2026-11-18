@@ -1,4 +1,4 @@
-use crate::menu_catalog::CapturedStringTable;
+use crate::CapturedStringTable;
 
 pub const STATS_REF_COL: i32 = 4;
 

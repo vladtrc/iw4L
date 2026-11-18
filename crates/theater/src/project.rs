@@ -40,6 +40,8 @@ pub struct CameraKey {
     pub origin: [f32; 3],
     pub rotation: [f32; 4],
     pub fov: f32,
+    #[serde(default)]
+    pub world: Option<usize>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -114,6 +116,64 @@ impl Project {
     }
 
     pub fn camera_at(&self, frame: f64) -> Option<(Transform, f32)> {
+        self.camera_at_mapped(frame, |key, _| Some(key))
+    }
+
+    pub fn camera_at_in_atlas(
+        &self,
+        frame: f64,
+        atlas: &sim::world_graph::Atlas,
+    ) -> Option<(Transform, f32)> {
+        self.camera_at_mapped(frame, |mut key, target| {
+            let (Some(source), Some(target)) = (key.world, target) else {
+                return Some(key);
+            };
+            if source == target {
+                return Some(key);
+            }
+            let mut links = atlas.portals.iter().filter_map(|pair| {
+                if pair.a.world.index() == source && pair.b.world.index() == target {
+                    Some(pair.oriented(true))
+                } else if pair.b.world.index() == source && pair.a.world.index() == target {
+                    Some(pair.oriented(false))
+                } else {
+                    None
+                }
+            });
+            let (entry, exit, yaw) = links.next()?;
+            // Different doors between the same worlds require an explicit route;
+            // selecting an arbitrary portal would produce an unrelated camera.
+            if links.next().is_some() {
+                return None;
+            }
+            let from = atlas.space.frame(entry.world).ok()?;
+            let to = atlas.space.frame(exit.world).ok()?;
+            let rotation = Quat::from_rotation_z(yaw);
+            let local = Vec3::from_array(from.point_to_local(key.origin));
+            let mapped =
+                rotation * (local - Vec3::from_array(entry.base)) + Vec3::from_array(exit.base);
+            key.origin = to.point_to_scene(mapped.to_array());
+            let basis = |world: sim::world_graph::WorldId| {
+                let axes = [Vec3::X, Vec3::Y, Vec3::Z].map(|axis| {
+                    Vec3::from_array(atlas.space.vector_to_scene(world, axis.to_array()))
+                });
+                Quat::from_mat3(&Mat3::from_cols(axes[0], axes[1], axes[2]))
+            };
+            key.rotation = (basis(exit.world)
+                * rotation
+                * basis(entry.world).inverse()
+                * Quat::from_array(key.rotation))
+            .to_array();
+            key.world = Some(target);
+            Some(key)
+        })
+    }
+
+    fn camera_at_mapped(
+        &self,
+        frame: f64,
+        map: impl Fn(CameraKey, Option<usize>) -> Option<CameraKey>,
+    ) -> Option<(Transform, f32)> {
         let first = self.cameras.first()?;
         let next = self
             .cameras
@@ -126,6 +186,9 @@ impl Project {
         } else {
             (&self.cameras[next - 1], &self.cameras[next])
         };
+        let world = a.world;
+        let a = map(*a, world)?;
+        let b = map(*b, world)?;
         let t = if a.frame == b.frame {
             0.0
         } else {
@@ -134,8 +197,8 @@ impl Project {
         let origin = if a.frame == b.frame {
             Vec3::from_array(a.origin)
         } else {
-            let before = &self.cameras[next.saturating_sub(2)];
-            let after = &self.cameras[(next + 1).min(self.cameras.len() - 1)];
+            let before = map(self.cameras[next.saturating_sub(2)], world)?;
+            let after = map(self.cameras[(next + 1).min(self.cameras.len() - 1)], world)?;
             let p0 = Vec3::from_array(before.origin);
             let p1 = Vec3::from_array(a.origin);
             let p2 = Vec3::from_array(b.origin);
@@ -157,6 +220,17 @@ impl Project {
             },
             a.fov + (b.fov - a.fov) * t,
         ))
+    }
+
+    /// Ownership changes at the authored crossing key while the position path
+    /// stays continuous in scene space, including overlapping portal worlds.
+    pub fn camera_world_at(&self, frame: f64) -> Option<usize> {
+        self.cameras
+            .iter()
+            .rev()
+            .find(|key| key.frame as f64 <= frame)
+            .or_else(|| self.cameras.first())
+            .and_then(|key| key.world)
     }
 
     pub fn highlights(&mut self, markers: &[TimelineEvent], player: u32, frames: u64) {
@@ -275,7 +349,9 @@ pub fn export(source: &Path, destination: &Path, project: &Project) -> Result<u6
                     .next_tick()
                     .map_err(|e| e.to_string())?
                     .ok_or("recording ended inside a segment")?;
-                output.record(&played.snapshot).map_err(|e| e.to_string())?;
+                output
+                    .record_frame(&played.snapshot, &played.frame)
+                    .map_err(|e| e.to_string())?;
                 count += 1;
             }
         }

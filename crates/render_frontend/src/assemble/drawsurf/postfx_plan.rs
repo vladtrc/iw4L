@@ -28,20 +28,17 @@ pub const POSTFX_TECH_TYPE: u8 = 4;
 pub const POSTFX_VERTEX_TYPE: u8 = 0;
 pub const CODE_TEXTURE_RESOLVED_SCENE: u32 = 10;
 pub const RESOLVED_SCENE_SAMPLER: u8 = 0x62;
-pub const CODE_COLOR_BIAS: u16 = 46;
-pub const CODE_COLOR_TINT_BASE: u16 = 47;
-pub const CODE_COLOR_TINT_DELTA: u16 = 48;
-pub const CODE_COLOR_TINT_QUADRATIC_DELTA: u16 = 49;
 
 const STANDARD_FILM_STATE: [u32; 2] = [0x1812_8812, 0xe00e_0002];
-const FILM_DESAT_MIN: f32 = 1.0 / 4096.0;
 
 pub const GLOW_SETUP_MATERIAL: &str = "glow_consistent_setup_color2";
 
 pub const GLOW_APPLY_MATERIAL: &str = "glow_apply_bloom";
 pub const GLOW_MATERIALS: &[&str] = &[GLOW_SETUP_MATERIAL, GLOW_APPLY_MATERIAL];
 
-pub const BLOOD_MATERIAL: &str = "splatter_alt";
+pub const WATER_MATERIALS: &[&str] = &[render_frame::water_sheeting::WATER_SHEETING_MATERIAL];
+
+pub const BLOOD_MATERIALS: &[&str] = &["splatter_alt", "splatter_alt_sp"];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PostFxAdmissionRefusal {
@@ -60,13 +57,7 @@ pub enum PostFxAdmissionRefusal {
     StateBitsMismatch { actual: [u32; 2] },
     AlphaTestEnabled,
     SamplerAbiMismatch,
-    CodeSource(PostFxSourceRefusal),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PostFxSourceRefusal {
-    InvalidDimensions { width: u32, height: u32 },
-    CodeSource(super::CodeSourceError),
+    CodeSource(String),
 }
 
 #[derive(Clone, Debug)]
@@ -150,13 +141,13 @@ pub fn film_sources(
     width: u32,
     height: u32,
     vision: Option<asset_world::FilmVision>,
-) -> Result<RuntimeCodeSources, PostFxSourceRefusal> {
-    let width_i32 = i32::try_from(width)
-        .map_err(|_| PostFxSourceRefusal::InvalidDimensions { width, height })?;
-    let height_i32 = i32::try_from(height)
-        .map_err(|_| PostFxSourceRefusal::InvalidDimensions { width, height })?;
+) -> Result<RuntimeCodeSources, String> {
+    let width_i32 =
+        i32::try_from(width).map_err(|_| format!("invalid postfx dimensions {width}x{height}"))?;
+    let height_i32 =
+        i32::try_from(height).map_err(|_| format!("invalid postfx dimensions {width}x{height}"))?;
     let projection = hud_iw4::cmd_buf_set_2d_projection(width_i32, height_i32)
-        .ok_or(PostFxSourceRefusal::InvalidDimensions { width, height })?;
+        .ok_or_else(|| format!("invalid postfx dimensions {width}x{height}"))?;
     let mut sources = RuntimeCodeSources::default();
     sources.set_constant(
         super::CODE_TRANSPOSE_WORLD_VIEW_PROJECTION0,
@@ -171,88 +162,11 @@ pub fn film_sources(
             1.0 / height as f32,
         ])],
     );
-    let authored = vision.unwrap_or_default();
-    let vision = if authored.enable {
-        authored
-    } else {
-        asset_world::FilmVision::default()
-    };
-    let desaturation = vision.desaturation.max(FILM_DESAT_MIN);
-    let mut contrast = vision.contrast;
-    let mut offset = vision.brightness + 0.5 - 0.5 * contrast;
-    if vision.invert {
-        contrast = -contrast;
-        offset += 1.0;
-    }
-    let base = vision.dark_tint.map(|value| value * contrast);
-    let delta: [f32; 3] = std::array::from_fn(|channel| {
-        2.0 * contrast * (vision.medium_tint[channel] - vision.dark_tint[channel])
-    });
-    let quadratic: [f32; 3] = std::array::from_fn(|channel| {
-        contrast
-            * (vision.light_tint[channel] - 2.0 * vision.medium_tint[channel]
-                + vision.dark_tint[channel])
-    });
-    sources.set_constant_rows(
-        CODE_COLOR_BIAS,
-        &[float4_bits([
-            offset,
-            offset,
-            offset,
-            1.0 / desaturation - 1.0,
-        ])],
-    );
-    sources.set_constant_rows(
-        CODE_COLOR_TINT_BASE,
-        &[float4_bits([
-            base[0],
-            base[1],
-            base[2],
-            vision.desaturation_dark,
-        ])],
-    );
-    sources.set_constant_rows(
-        CODE_COLOR_TINT_DELTA,
-        &[float4_bits([
-            delta[0],
-            delta[1],
-            delta[2],
-            vision.desaturation - vision.desaturation_dark,
-        ])],
-    );
-    sources.set_constant_rows(
-        CODE_COLOR_TINT_QUADRATIC_DELTA,
-        &[float4_bits([quadratic[0], quadratic[1], quadratic[2], 0.0])],
-    );
-    apply_glow_consts(&mut sources, authored);
+    render_scene::film::set_film_vision(&mut sources, vision);
     sources
         .set_texture(CODE_TEXTURE_RESOLVED_SCENE, RESOLVED_SCENE_SAMPLER)
-        .map_err(PostFxSourceRefusal::CodeSource)?;
+        .map_err(|cause| format!("postfx code source: {cause:?}"))?;
     Ok(sources)
-}
-
-fn apply_glow_consts(sources: &mut RuntimeCodeSources, authored: asset_world::FilmVision) {
-    let bits = |row: [f32; 4]| row.map(f32::to_bits);
-    match lighting_iw4::set_glow_info(
-        authored.glow_bloom_cutoff,
-        authored.glow_bloom_desaturation,
-        authored.glow_bloom_intensity,
-    ) {
-        Some(consts) => {
-            sources.set_constant_rows(
-                lighting_iw4::CONST_SRC_CODE_GLOW_SETUP,
-                &[bits(consts.setup)],
-            );
-            sources.set_constant_rows(
-                lighting_iw4::CONST_SRC_CODE_GLOW_APPLY,
-                &[bits(consts.apply)],
-            );
-        }
-        None => {
-            sources.set_constant_rows(lighting_iw4::CONST_SRC_CODE_GLOW_SETUP, &[[0; 4]]);
-            sources.set_constant_rows(lighting_iw4::CONST_SRC_CODE_GLOW_APPLY, &[[0; 4]]);
-        }
-    }
 }
 
 fn build_postfx_material(
@@ -280,7 +194,7 @@ fn build_postfx_material(
                 binding.source,
                 SamplerSource::CodeTexture {
                     index: 8 | 10 | 11 | 12 | 15
-                }
+                } | SamplerSource::MaterialTexture { .. }
             )
     });
     if !sampler_ok {
@@ -294,9 +208,11 @@ pub(crate) fn build_runtime_blood(
     prepared: &PreparedMaterialTable,
     programs: &RuntimeProgramRegistry,
     shaders: &[Handle<bevy::shader::Shader>],
+    profile: asset_core::RuntimeProfile,
 ) -> Result<RuntimeBloodMaterial, PostFxAdmissionRefusal> {
-    let film = admit_unlit_2d(catalog, prepared, programs, shaders, BLOOD_MATERIAL, false)?;
-    let (material, _, _) = postfx_material_location(catalog, BLOOD_MATERIAL)?;
+    let material_name = asset_game::BloodOverlayAssets::for_profile(profile).material;
+    let film = admit_unlit_2d(catalog, prepared, programs, shaders, material_name, false)?;
+    let (material, _, _) = postfx_material_location(catalog, material_name)?;
     let texture_slots = film
         .port
         .abi()
@@ -406,7 +322,7 @@ fn admit_unlit_2d(
     })
 }
 
-fn admission_sources() -> Result<RuntimeCodeSources, PostFxSourceRefusal> {
+fn admission_sources() -> Result<RuntimeCodeSources, String> {
     let mut sources = film_sources(1, 1, None)?;
 
     for index in 22..=27 {
@@ -415,10 +331,13 @@ fn admission_sources() -> Result<RuntimeCodeSources, PostFxSourceRefusal> {
     for index in 10..18 {
         sources.set_constant_rows(index, &[[0; 4]]);
     }
+    for index in [7, 54, 55, 56] {
+        sources.set_constant_rows(index, &[[0; 4]]);
+    }
     for index in [8, 11, 12, 15] {
         sources
             .set_texture(index, if index == 15 { 0x61 } else { 0x62 })
-            .map_err(PostFxSourceRefusal::CodeSource)?;
+            .map_err(|cause| format!("postfx code source: {cause:?}"))?;
     }
     Ok(sources)
 }
@@ -442,14 +361,14 @@ pub(crate) fn build_runtime_postfx(
             }
         }
     }
-    for &name in GLOW_MATERIALS {
+    for &name in GLOW_MATERIALS.iter().chain(WATER_MATERIALS) {
         match build_postfx_material(catalog, prepared, programs, shaders, name, false) {
             RuntimePostFxResources::Ready(mut ready) => passes.append(&mut ready),
             RuntimePostFxResources::Refused(PostFxAdmissionRefusal::MaterialMissing) => {}
             refused => {
                 diag::warn!(
                     World,
-                    "post-fx glow admission skipped material={name} cause={refused:?}"
+                    "post-fx optional admission skipped material={name} cause={refused:?}"
                 );
             }
         }

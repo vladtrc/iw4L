@@ -104,7 +104,7 @@ fn parse_max_voices(token: &str) -> i32 {
         return SND_ENTCHANNEL_DEFAULT_MAX_VOICES;
     }
     match token.parse::<i32>() {
-        Ok(n) if n >= 1 && n <= SND_ENTCHANNEL_DEFAULT_MAX_VOICES => n,
+        Ok(n) if (1..=SND_ENTCHANNEL_DEFAULT_MAX_VOICES).contains(&n) => n,
         _ => SND_ENTCHANNEL_DEFAULT_MAX_VOICES,
     }
 }

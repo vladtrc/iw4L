@@ -56,23 +56,23 @@ pub(super) fn poll_communities(
     }
     let (presence, watcher) = watch::channel(presence);
     let counts = CommunityPlayerCounts {
-        counts: Arc::new(Mutex::new(vec![None; updater::communities().len()])),
+        counts: Arc::new(Mutex::new(vec![None; community::communities().len()])),
         presence,
         cancel: CancellationToken::new(),
     };
-    let communities: Vec<_> = updater::communities()
+    let communities: Vec<_> = community::communities()
         .iter()
         .enumerate()
         .filter_map(|(index, entry)| {
             let community = std::fs::read(&entry.path)
                 .ok()
-                .and_then(|bytes| updater::Community::parse(&bytes).ok())?;
+                .and_then(|bytes| community::Community::parse(&bytes).ok())?;
             let target = MasterTarget {
                 address: community.master.address,
                 server_name: community.master.server_name,
                 ca_pem: community.updates.ca_pem,
             };
-            let selected = Some(entry.path.as_path()) == updater::selected_path();
+            let selected = Some(entry.path.as_path()) == community::selected_path();
             Some((index, target, selected))
         })
         .collect();
@@ -131,7 +131,7 @@ async fn watch_community(
         state.lock().expect("community counts poisoned")[index] = None;
         tokio::select! {
             _ = cancel.cancelled() => return,
-            _ = tokio::time::sleep(Duration::from_secs(5)) => {},
+            _ = tokio::time::sleep(Duration::from_secs(5)) => (),
         }
     }
 }

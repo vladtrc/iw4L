@@ -1,5 +1,5 @@
-use crate::lane::lane;
-use asset_core::ZoneGame;
+use crate::lanes::lane;
+use asset_core::FamilyId;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LaneStatus {
@@ -21,8 +21,11 @@ pub enum PreparedCapability {
     PlayableFfa,
 }
 
-pub fn lane_status(game: ZoneGame, capability: PreparedCapability) -> LaneStatus {
-    for &(cap, status) in lane(game).capabilities() {
+pub fn lane_status(game: FamilyId, capability: PreparedCapability) -> LaneStatus {
+    let Some(lane) = lane(game) else {
+        return LaneStatus::MissingDecoder;
+    };
+    for &(cap, status) in lane.capabilities() {
         if cap == capability {
             return status;
         }

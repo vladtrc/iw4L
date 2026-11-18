@@ -81,11 +81,25 @@ fn parse(source: &str) -> Result<LocalPlayerProfile, String> {
         let (name, value) = line
             .split_once('=')
             .ok_or_else(|| "expected a profile field=value line".to_owned())?;
+        if name.trim().eq_ignore_ascii_case("intel_found") {
+            profile.intel_found = value
+                .trim()
+                .parse::<u64>()
+                .map_err(|_| "invalid intel bitset".to_owned())?;
+            continue;
+        }
         let value = value
             .trim()
-            .parse::<u8>()
-            .map_err(|_| format!("invalid byte for {}", name.trim()))?;
-        if !profile.set(name.trim(), value) {
+            .parse::<i32>()
+            .map_err(|_| format!("invalid integer for {}", name.trim()))?;
+        if LocalPlayerProfile::FIELDS
+            .iter()
+            .any(|field| name.trim().eq_ignore_ascii_case(field))
+            && u8::try_from(value).is_err()
+        {
+            return Err(format!("invalid byte for {}", name.trim()));
+        }
+        if !profile.set_int(name.trim(), value) {
             return Err(format!("unknown profile field {}", name.trim()));
         }
     }
@@ -94,9 +108,10 @@ fn parse(source: &str) -> Result<LocalPlayerProfile, String> {
 
 fn serialize(profile: &LocalPlayerProfile) -> String {
     let mut source = String::from("# iw4l local player profile v1\n");
-    for name in LocalPlayerProfile::FIELDS {
-        source.push_str(&format!("{name}={}\n", profile.get(name).unwrap()));
+    for name in LocalPlayerProfile::ALL_FIELDS {
+        source.push_str(&format!("{name}={}\n", profile.get_int(name).unwrap()));
     }
+    source.push_str(&format!("intel_found={}\n", profile.intel_found));
     source
 }
 

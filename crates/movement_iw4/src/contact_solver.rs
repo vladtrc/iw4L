@@ -328,7 +328,7 @@ pub(crate) fn traverse(
         }
         hit
     };
-    let (mut baseline, obstructed) = slide(m, s, &baseline_trace);
+    let (mut baseline, mut obstructed) = slide(m, s, &baseline_trace);
     if all_solid.get() {
         return baseline;
     }
@@ -336,6 +336,16 @@ pub(crate) fn traverse(
         && let Some(snapped) = land(baseline, s.snap_down, s, trace)
     {
         baseline = snapped;
+    }
+    // Swept capsule contacts can round into a curved threshold. Treat an
+    // overlapping endpoint as an obstruction, so the normal step path gets a
+    // chance instead of publishing a penetrating pose for one substep.
+    if trace(baseline.origin, baseline.origin).blocked {
+        baseline = Motion {
+            origin: m.origin,
+            velocity: [0.; 3],
+        };
+        obstructed = true;
     }
     if !obstructed
         || !s.dt.is_finite()
@@ -352,14 +362,36 @@ pub(crate) fn traverse(
     if horizontal <= 1e-12 {
         return baseline;
     }
-    let mut up = m.origin;
-    up[2] += s.step_height;
-    let Some((_, raised)) = sweep(m.origin, up, trace) else {
-        return baseline;
+    let progress = |p: Vector| {
+        ((p[0] as f64 - m.origin[0] as f64) * m.velocity[0] as f64
+            + (p[1] as f64 - m.origin[1] as f64) * m.velocity[1] as f64)
+            / horizontal
     };
+    // A low lintel can admit the required curb rise but reject the maximum
+    // step. Search smaller rises within the same walking envelope; every
+    // candidate still sweeps up, forward and down and checks the final hull.
+    for attempt in 0..libm::ceilf(s.step_height) as usize {
+        if let Some(landed) = step(m, s, s.step_height - attempt as f32, trace)
+            && progress(landed.origin) - progress(baseline.origin) > 0.001
+        {
+            return landed;
+        }
+    }
+    baseline
+}
+
+fn step(
+    m: Motion,
+    s: Settings,
+    height: f32,
+    trace: &impl Fn(Vector, Vector) -> Contact,
+) -> Option<Motion> {
+    let mut up = m.origin;
+    up[2] += height;
+    let (_, raised) = sweep(m.origin, up, trace)?;
     let rise = raised[2] - m.origin[2];
     if rise <= 0. {
-        return baseline;
+        return None;
     }
     let elevated = Motion {
         origin: raised,
@@ -377,7 +409,7 @@ pub(crate) fn traverse(
     airborne.ground = None;
     let (advanced, _) = slide(elevated, airborne, &checked_trace);
     if rejected.get() {
-        return baseline;
+        return None;
     }
     let search = rise
         + if s.snap_down.is_finite() {
@@ -385,23 +417,13 @@ pub(crate) fn traverse(
         } else {
             0.
         };
-    let Some(landed) = land(advanced, search, s, trace) else {
-        return baseline;
-    };
-    if landed.origin[2] - m.origin[2] > s.step_height {
-        return baseline;
+    let landed = land(advanced, search, s, trace)?;
+    if landed.origin[2] - m.origin[2] > height || trace(landed.origin, landed.origin).blocked {
+        return None;
     }
-    let progress = |p: Vector| {
-        ((p[0] as f64 - m.origin[0] as f64) * m.velocity[0] as f64
-            + (p[1] as f64 - m.origin[1] as f64) * m.velocity[1] as f64)
-            / horizontal
-    };
-    if progress(landed.origin) - progress(baseline.origin) > 0.001 {
-        landed
-    } else {
-        baseline
-    }
+    Some(landed)
 }
+
 pub(crate) fn project_ground(v: &mut Vector, n: &Vector) {
     if !finite(*v) || !finite(*n) || n[2] < 0.001 {
         return;

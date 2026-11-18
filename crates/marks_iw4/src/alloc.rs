@@ -37,13 +37,6 @@ pub const fn mark_point_groups_for_count(point_count: u32) -> u32 {
     point_count.saturating_add(1) / 2
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FxAllocMarkRefuse {
-    CallbackNotInvoked,
-
-    TriCountZero,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FxMarkConstructed {
     pub frame_count_drawn: i32,
@@ -79,12 +72,12 @@ pub fn alloc_and_construct_mark(
     req: &FxAllocMarkRequest,
     tri_handle: u16,
     point_handle: u16,
-) -> Result<FxMarkConstructed, FxAllocMarkRefuse> {
+) -> Result<FxMarkConstructed, &'static str> {
     if !mark_world_brushes_invokes_callback(req.any_marks) {
-        return Err(FxAllocMarkRefuse::CallbackNotInvoked);
+        return Err("mark callback not invoked");
     }
     if req.tri_count == 0 {
-        return Err(FxAllocMarkRefuse::TriCountZero);
+        return Err("mark triangle count is zero");
     }
     Ok(FxMarkConstructed {
         frame_count_drawn: req.frame_count.wrapping_sub(1),

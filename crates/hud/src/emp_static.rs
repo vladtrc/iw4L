@@ -1,34 +1,30 @@
 use asset_game::MenuCatalog;
 use bevy::prelude::*;
-use net::{LocalPresentClient, PresentedSnapshot};
 use playerstate_iw4::other_flags;
 
 use crate::draw2d::{Draw2dCmd, Draw2dList, Draw2dOp, Draw2dProvenance, tessellate};
 use crate::gpu_list::{HudTessPass, TessJob};
-use crate::images::HudImages;
+use crate::images::HudImageLoader;
 
 const EMP_STATIC_VIS: &str = "op 16 op 138 op 1";
 
 #[derive(Component)]
 pub(crate) struct EmpStaticRaster;
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn update(
     surface: Res<crate::surface::Hud2dSurface>,
     catalog: Option<Res<MenuCatalog>>,
-    presented: Res<PresentedSnapshot>,
-    local: Res<LocalPresentClient>,
+    presentation: net::LocalPresentation,
     view: Option<Res<frame::ViewSubject>>,
     mut pass: ResMut<HudTessPass>,
-    mut hud_images: ResMut<HudImages>,
-    mut images: ResMut<Assets<Image>>,
+    mut hud_images: HudImageLoader,
 ) {
     pass.emp_static = TessJob::Hide;
     if !surface.is_ready() || view.as_ref().is_some_and(|v| v.in_killcam()) {
         return;
     }
-    if !presented
-        .player(local.0)
+    if !presentation
+        .player()
         .is_some_and(|ps| ps.other_flags & other_flags::EMP_JAMMED != 0)
     {
         return;
@@ -51,11 +47,7 @@ pub(crate) fn update(
         i32::from(item.rect.vert_align),
     );
     if hud_images
-        .get(
-            crate::images::HUD_CHROME_NAMESPACE,
-            &item.background,
-            &mut images,
-        )
+        .load(crate::images::HUD_CHROME_NAMESPACE, &item.background)
         .is_none()
     {
         return;

@@ -18,7 +18,7 @@ use d3d9_sm3::{TEXTURE_TABLE_BINDING_2D, TEXTURE_TABLE_BINDING_3D, TEXTURE_TABLE
 use render_material::{MaterialGenerationId, SamplerTextureDimension};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct SamplerKey {
+pub(super) struct SamplerKey {
     sampler_state: u8,
     packed_word: u32,
     anisotropy_clamp: u16,
@@ -176,7 +176,7 @@ impl ExactTextureTable {
     }
 
     pub fn census(&self) -> (usize, usize, usize, usize) {
-        let n = |lane: &Vec<TextureView>| lane.len().saturating_sub(1);
+        let n = |lane: &[TextureView]| lane.len().saturating_sub(1);
         (
             n(&self.views[0]),
             n(&self.views[1]),

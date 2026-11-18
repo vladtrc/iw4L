@@ -7,8 +7,6 @@ use crate::world::ClientId;
 use bevy_ecs::prelude::World;
 use playerstate_iw4::{PlayerState, buttons, weap_flags};
 
-pub(crate) mod campaign;
-
 mod pof {
     pub const THERMAL_VISION: u32 = 0x8;
     pub const THERMAL_VISION_OVERLAY_FOF: u32 = 0x10;
@@ -84,6 +82,22 @@ fn edit_lock(
 }
 
 pub(crate) fn register(registry: &mut NativeRegistry) {
+    registry.register(Method, "hidehud", |world, receiver, _| {
+        other_flag(
+            world,
+            receiver,
+            playerstate_iw4::other_flags::SP_HIDE_HUD,
+            true,
+        )
+    });
+    registry.register(Method, "showhud", |world, receiver, _| {
+        other_flag(
+            world,
+            receiver,
+            playerstate_iw4::other_flags::SP_HIDE_HUD,
+            false,
+        )
+    });
     registry.register(Method, "setspreadoverride", |world, receiver, args| {
         let spread = int(args, 0)?;
         if !(1..64).contains(&spread) {
@@ -380,16 +394,12 @@ pub(crate) fn select_location(
         return;
     }
     let pressed = cmd.buttons & !old_buttons;
-    let authority = world
-        .resource::<crate::step::StepRequest>()
-        .reason
-        .advances_authority_world();
     let receiver = world
         .resource::<RoundScript>()
         .players
         .get(&client)
         .map(|slot| Value::Object(slot.object));
-    if let (true, Some(receiver)) = (authority, receiver) {
+    if let Some(receiver) = receiver {
         if pressed & buttons::LOCATION_SELECT != 0 {
             let map = world.resource::<RoundScript>().engine.minimap;
             let loc = |byte: u8| (f32::from(byte as i8) + 128.0) / 255.0;
@@ -427,18 +437,22 @@ pub(crate) fn command_buttons(command: &str) -> u32 {
         "+smoke" => buttons::SMOKE,
         "+speed_throw" | "+toggleads_throw" | "mouse2" => buttons::ADS,
         "+gostand" | "space" => buttons::JUMP,
-        _ => campaign::command_buttons(command),
+        "+speed" | "toggleads" => buttons::ADS,
+        "+reload" => buttons::RELOAD,
+        "+sprint" => buttons::SPRINT,
+        "+holdbreath" => buttons::BREATH,
+        "+breath_sprint" => buttons::BREATH | buttons::SPRINT,
+        "+melee_breath" => buttons::MELEE_CHARGE | buttons::BREATH,
+        "+moveup" => buttons::JUMP,
+        "+movedown" | "gocrouch" | "togglecrouch" => buttons::CROUCH,
+        "+prone" | "goprone" | "toggleprone" | "lowerstance" => buttons::PRONE,
+        "+stance" => buttons::CROUCH | buttons::PRONE | buttons::STANCE_HELD,
+        "+throw" => buttons::THROW,
+        _ => 0,
     }
 }
 
 fn raise_commands(world: &mut World, client: u32, fired: impl Fn(&str) -> bool) {
-    if !world
-        .resource::<crate::step::StepRequest>()
-        .reason
-        .advances_authority_world()
-    {
-        return;
-    }
     let Some((receiver, notifies)) =
         world
             .resource::<RoundScript>()

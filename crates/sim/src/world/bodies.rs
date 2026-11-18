@@ -55,21 +55,13 @@ impl PlayerBodyRuntime {
         runtime.update(msec as f32 / 1000.0).ok()?;
         runtime.calc_delta_translation()
     }
-    fn skip_prediction_hitbox_tick(only: Option<&[ClientId]>, id: ClientId) -> bool {
-        only.is_some_and(|ids| !ids.contains(&id))
-    }
-
     pub(super) fn tick_dobjs<'a>(
         &mut self,
         inputs: impl IntoIterator<Item = (ClientId, &'a PlayerKitCollision)>,
-        only: Option<&[ClientId]>,
     ) {
         let mut live = std::collections::HashSet::new();
         for (id, kit) in inputs {
             live.insert(id.0);
-            if Self::skip_prediction_hitbox_tick(only, id) {
-                continue;
-            }
             let Some(body) = kit.body.as_ref() else {
                 self.player_dobjs.remove(&id.0);
                 continue;
@@ -124,7 +116,6 @@ impl PlayerBodyRuntime {
         inputs: impl IntoIterator<Item = (ClientId, usize)>,
         msec: i32,
         player: impl Fn(ClientId) -> Option<PlayerState>,
-        only: Option<&[ClientId]>,
     ) {
         let dt = msec as f32 / 1000.0;
         if content.definitions.iter().all(Option::is_none) {
@@ -134,9 +125,6 @@ impl PlayerBodyRuntime {
         let mut live = std::collections::HashSet::new();
         for (id, kit) in inputs {
             live.insert(id.0);
-            if Self::skip_prediction_hitbox_tick(only, id) {
-                continue;
-            }
             let Some(ps) = player(id) else {
                 continue;
             };
@@ -290,17 +278,22 @@ impl PlayerBodyRuntime {
                     xmodel_runtime::apply_player_anim_goals(
                         &mut slot.runtime,
                         content.branches.ok_or("player body branches missing")?,
-                        old_legs,
-                        old_torso,
-                        leaf,
-                        torso_index,
-                        legs_restart,
-                        torso_restart_changed,
-                        old_legs_moving,
-                        old_torso_moving,
-                        slot.legs_rate_sample.move_speed > 0.0,
-                        slot.torso_rate_sample.move_speed > 0.0,
-                        [legs_properties.blend_ms, torso_properties.blend_ms],
+                        xmodel_runtime::PlayerAnimTransition {
+                            previous: old_legs,
+                            index: leaf,
+                            restart: legs_restart,
+                            was_moving: old_legs_moving,
+                            moving: slot.legs_rate_sample.move_speed > 0.0,
+                            authored_blend_ms: legs_properties.blend_ms,
+                        },
+                        xmodel_runtime::PlayerAnimTransition {
+                            previous: old_torso,
+                            index: torso_index,
+                            restart: torso_restart_changed,
+                            was_moving: old_torso_moving,
+                            moving: slot.torso_rate_sample.move_speed > 0.0,
+                            authored_blend_ms: torso_properties.blend_ms,
+                        },
                     )?;
                     if let Some(time) = phase {
                         let mut state = slot.runtime.states()[leaf as usize];

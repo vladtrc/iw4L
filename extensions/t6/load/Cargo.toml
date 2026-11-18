@@ -1,0 +1,30 @@
+[package]
+name = "ext_t6_load"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anim_iw4.workspace = true
+asset_anim.workspace = true
+asset_audio.workspace = true
+asset_core.workspace = true
+asset_game.workspace = true
+asset_iw4.workspace = true
+asset_material.workspace = true
+asset_model.workspace = true
+asset_transport.workspace = true
+asset_world.workspace = true
+assets.workspace = true
+bevy.workspace = true
+ext_t6_audio.workspace = true
+ext_t6_fastfile.workspace = true
+ext_t6_gameplay.workspace = true
+ext_t6_material.workspace = true
+ext_t6_world.workspace = true
+ext_t6_zone.workspace = true
+render_material.workspace = true
+xmodel_runtime.workspace = true
+
+[lints]
+workspace = true

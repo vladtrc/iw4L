@@ -60,22 +60,20 @@ pub fn warm_class_select_icons(
         }
         return;
     }
-    let Some(games) = root.0.clone() else {
+    if root.0.is_none() {
         return;
-    };
+    }
     // Archive discovery and decoding must not hold up window event processing.
     let publication = publication.clone();
     let id = publication.id();
     *pending = Some((
         id,
-        AsyncComputeTaskPool::get()
-            .spawn(async move { decode_class_select_icons(&publication, &games) }),
+        AsyncComputeTaskPool::get().spawn(async move { decode_class_select_icons(&publication) }),
     ));
 }
 
 fn decode_class_select_icons(
     publication: &asset_material::UiImagePublication,
-    games: &std::path::Path,
 ) -> DecodedClassIcons {
     let started = std::time::Instant::now();
     let mut stems = Vec::new();
@@ -123,7 +121,7 @@ fn decode_class_select_icons(
     let mut missing = 0usize;
     for stem in stems {
         let key = format!("iw4:material/{stem}");
-        match asset_material::decode_ui_image(publication, games, &key) {
+        match asset_material::decode_ui_image(publication, &key) {
             Ok(Some((width, height, pixels))) => {
                 decoded.push((stem.to_owned(), rgba_ui_image(width, height, pixels)));
             }

@@ -6,10 +6,64 @@ use crate::{CompassObjective, ObjectiveMatch, ObjectiveState, ScriptEffect};
 use bevy_ecs::prelude::World;
 use gamemode_iw4::Team;
 
+const MAX_OBJECTIVES: i32 = 32;
+
 mod campaign;
 
-const MAX_OBJECTIVES: i32 = 32;
+pub(crate) fn prepare_team_scores(world: &mut World, allies: i32, axis: i32) -> Result<(), String> {
+    let mut runtime = world
+        .get_resource_mut::<RoundScript>()
+        .ok_or("score preparation requires an active match script")?;
+    if matches!(runtime.object_field(0, "gameended"), Value::Int(value) if value != 0) {
+        return Err("score preparation requires a match that has not ended".into());
+    }
+    let Value::Array(scores) = runtime.object_field(1, "teamScores") else {
+        return Err("score preparation requires initialized script team scores".into());
+    };
+    let scores = runtime
+        .arrays
+        .get_mut(&scores)
+        .ok_or("invalid script team scores")?;
+    for (team, score) in [("allies", allies), ("axis", axis)] {
+        scores.insert(
+            crate::script::ArrayKey::String(team.into()),
+            Value::Int(score),
+        );
+    }
+    runtime.engine.team_scores.insert("allies".into(), allies);
+    runtime.engine.team_scores.insert("axis".into(), axis);
+    Ok(())
+}
+
 const ENGINE_SERVER_INFO: &[&str] = &[
+    "snd_slavefadetime",
+    "objectivealpha",
+    "con_typewritercolorbase",
+    "compass",
+    "ammocounterhide",
+    "hud_drawhud",
+    "cg_drawhud",
+    "hud_showstance",
+    "hud_gasmaskoverlay",
+    "hud_fade_stance",
+    "cg_hudstanceflash",
+    "actionslotshide",
+    "cg_paused",
+    "hud_missionfailed",
+    "friendlynamefontsize",
+    "friendlynamefontobjective",
+    "friendlynamefontcolor",
+    "friendlynamefontglowcolor",
+    "hostilenamefontcolor",
+    "hostilenamefontglowcolor",
+    "cg_fovscale",
+    "r_lightgridenabletweaks",
+    "r_lightgridintensity",
+    "r_lightgridcontrast",
+    "r_lightgridusetweakedvalues",
+    "r_herolighting",
+    "r_lightcachelessfrequentperiod",
+    "r_lightcachelessfrequentmaxdistance",
     "ui_bomb_timer",
     "mapname",
     "g_gametype",
@@ -29,7 +83,7 @@ pub(crate) struct ScriptObjective {
     team: Team,
     icon: String,
     viewer: Option<u32>,
-    sp: campaign::SpObjective,
+    campaign: crate::CampaignObjective,
 }
 
 impl ScriptObjective {
@@ -73,15 +127,15 @@ fn place(world: &mut World, index: u8, target: &Value) -> Result<(), String> {
 pub(crate) fn register(registry: &mut NativeRegistry) {
     use Namespace::Function;
     registry.register(Function, "objective_add", |world, _, args| {
+        if campaign::active(world) {
+            return campaign::add(world, args);
+        }
         let index = index(args)?;
         let state = state(args, 1)?;
         *objective(world, index) = ScriptObjective {
             state,
             ..Default::default()
         };
-        if matches!(args.get(2), Some(Value::LocalizedString(_))) {
-            return campaign::add(world, index, args);
-        }
         if let Some(target) = args.get(2) {
             place(world, index, target)?;
         }
@@ -92,6 +146,13 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
     });
     registry.register(Function, "objective_delete", |world, _, args| {
         let index = index(args)?;
+        if campaign::active(world) {
+            let mut row = objective(world, index);
+            let pointer = std::mem::take(&mut row.campaign.pointer_text);
+            *row = ScriptObjective::default();
+            row.campaign.pointer_text = pointer;
+            return Ok(Value::Undefined);
+        }
         world
             .resource_mut::<RoundScript>()
             .engine
@@ -100,30 +161,40 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         Ok(Value::Undefined)
     });
     registry.register(Function, "objective_state", |world, _, args| {
+        if campaign::active(world) {
+            return campaign::set_state(world, args, true);
+        }
         let index = index(args)?;
         objective(world, index).state = state(args, 1)?;
-        campaign::state_changed(world, index);
         Ok(Value::Undefined)
     });
     registry.register(Function, "objective_icon", |world, _, args| {
+        if campaign::active(world) {
+            return campaign::icon(world, args);
+        }
         let index = index(args)?;
         objective(world, index).icon = string(args, 1)?;
         Ok(Value::Undefined)
     });
     registry.register(Function, "objective_position", |world, _, args| {
+        if campaign::active(world) {
+            return campaign::position(world, args, false);
+        }
         let index = index(args)?;
         let origin = vector(args, 1)?;
         place(world, index, &Value::Vector(origin))?;
         Ok(Value::Undefined)
     });
     registry.register(Function, "objective_onentity", |world, _, args| {
+        if campaign::active(world) {
+            return campaign::on_entity(world, args);
+        }
         let index = index(args)?;
         let target = arg(args, 1)?.clone();
         if !matches!(target, Value::Object(_)) {
             return Err(format!("{} is not an entity", type_name(&target)));
         }
         place(world, index, &target)?;
-        campaign::entity_offset(world, index, args)?;
         Ok(Value::Undefined)
     });
     registry.register(Function, "objective_team", |world, _, args| {
@@ -161,9 +232,23 @@ pub(crate) fn publish(world: &mut World) {
         .iter()
         .map(|(index, row)| (*index, row.clone()))
         .collect();
-    let campaign = campaign::publish(world, &rows);
     let mut compass = Vec::with_capacity(rows.len());
+    let is_campaign = campaign::active(world);
+    let mut campaign = Vec::new();
     for (index, row) in rows {
+        if is_campaign {
+            let mut data = row.campaign;
+            data.index = index;
+            data.state = row.state;
+            data.entity = row.entity.as_ref().and_then(|value| {
+                world
+                    .resource::<RoundScript>()
+                    .entity(value)
+                    .and_then(|(_, entity)| u16::try_from(entity.number).ok())
+            });
+            campaign.push(data);
+            continue;
+        }
         let origin = match &row.entity {
             Some(Value::Object(id)) if world.resource::<RoundScript>().live(id) => {
                 match super::players::entity_field(world, *id, "origin") {
@@ -180,11 +265,8 @@ pub(crate) fn publish(world: &mut World) {
             team: row.team,
             icon: row.icon,
             viewer: row.viewer,
-            label: String::new(),
-            follows: false,
         });
     }
-    let (compass, list) = campaign.unwrap_or((compass, Vec::new()));
     let runtime = world.resource::<RoundScript>();
     let match_script = world.resource::<crate::script::MatchScript>();
     let score = |team: &str| runtime.engine.team_scores.get(team).copied().unwrap_or(0);
@@ -197,7 +279,11 @@ pub(crate) fn publish(world: &mut World) {
         .server_info
         .iter()
         .map(|name| {
-            let value = match_script.dvars.get(name).cloned().unwrap_or_default();
+            let value = match_script
+                .dvars
+                .get(name)
+                .cloned()
+                .unwrap_or(String::new());
             (name.clone(), value)
         })
         .chain(engine)
@@ -213,14 +299,20 @@ pub(crate) fn publish(world: &mut World) {
         .collect();
     let game_end_time = runtime.engine.game_end_time;
     let slow_motion = runtime.engine.slow_motion;
-    let ambient = runtime
-        .program
-        .is_some()
-        .then(|| runtime.engine.ambient.clone().unwrap_or_default());
-    let ac130_ambient = runtime
-        .program
-        .is_some()
-        .then(|| runtime.engine.ac130_ambient.clone().unwrap_or_default());
+    let ambient = runtime.program.is_some().then(|| {
+        runtime
+            .engine
+            .ambient
+            .clone()
+            .unwrap_or_else(crate::ScriptAmbient::default)
+    });
+    let ac130_ambient = runtime.program.is_some().then(|| {
+        runtime
+            .engine
+            .ac130_ambient
+            .clone()
+            .unwrap_or_else(crate::ScriptAmbient::default)
+    });
     let rumble_aliases = match_script
         .precached
         .iter()
@@ -233,6 +325,8 @@ pub(crate) fn publish(world: &mut World) {
     let thermal_body_material = runtime.engine.thermal_body_material.clone();
     let missile_vision = runtime.engine.missile_vision.clone();
     let night_vision = runtime.engine.night_vision.clone();
+    let night_vision_assets = runtime.engine.night_vision_assets;
+    let half_res_particles = runtime.engine.half_res_particles;
     let pain_vision = runtime.engine.pain_vision.clone();
     let fog = runtime.engine.fog;
     let now = crate::level_time_ms(world.resource::<crate::step::StepRequest>().tick);
@@ -278,6 +372,10 @@ pub(crate) fn publish(world: &mut World) {
     frame.objectives = ObjectiveMatch {
         scores,
         compass,
+        campaign,
+        campaign_mode: is_campaign,
+        night_vision_assets,
+        half_res_particles,
         vehicles,
         vehicle_targets,
         server_info,
@@ -296,6 +394,5 @@ pub(crate) fn publish(world: &mut World) {
         missile_vision,
         night_vision,
         pain_vision,
-        list,
     };
 }

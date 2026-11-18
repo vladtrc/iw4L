@@ -6,7 +6,8 @@ license.workspace = true
 description = "Community configuration and HTTPS self-update before game startup."
 
 [dependencies]
-diag = { path = "../diag" }
+community.workspace = true
+diag.workspace = true
 rustls = { version = "0.23.31", default-features = false, features = ["ring", "std"] }
 rustls-pemfile = "2.2.0"
 serde.workspace = true

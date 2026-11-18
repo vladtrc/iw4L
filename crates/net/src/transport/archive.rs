@@ -14,6 +14,35 @@ pub const ARCHIVE_MAX_TICKS: usize = 0x4b0;
 
 pub const ARCHIVE_BYTE_BUDGET: usize = 32 * 1024 * 1024;
 
+/// The dvar that sets the archive's byte budget, in MiB. Frames are held
+/// whole, not delta-packed like retail's buffer: a map with a few hundred
+/// entities runs ~1 MiB a second, so a final killcam longer than ~30 s (a
+/// merged map's) needs its recipe to raise it.
+pub const ARCHIVE_MB_DVAR: &str = "sv_archive_mb";
+
+/// The archive's byte budget for the match: `ARCHIVE_MB_DVAR`, else
+/// `ARCHIVE_BYTE_BUDGET`.
+#[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ArchiveBudget(pub usize);
+
+impl Default for ArchiveBudget {
+    fn default() -> Self {
+        Self(ARCHIVE_BYTE_BUDGET)
+    }
+}
+
+impl ArchiveBudget {
+    pub fn from_dvars(dvars: &[(String, String)]) -> Self {
+        dvars
+            .iter()
+            .rev()
+            .find(|(name, _)| name.eq_ignore_ascii_case(ARCHIVE_MB_DVAR))
+            .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+            .filter(|&mb| mb > 0)
+            .map_or_else(Self::default, |mb| Self(mb * 1024 * 1024))
+    }
+}
+
 pub const ARCHIVE_LOOKUP_WINDOW_TICKS: usize = ARCHIVE_MAX_TICKS;
 
 pub const fn archive_attainable_ticks(_clients: usize) -> usize {
@@ -88,6 +117,8 @@ pub struct ArchiveMetrics {
 
 #[derive(Resource, Clone, Debug, Default)]
 pub struct FrameArchive {
+    /// `ArchiveBudget`'s bytes; none is `ARCHIVE_BYTE_BUDGET`.
+    budget: Option<usize>,
     frames: VecDeque<ArchivedFrame>,
     records: usize,
     bytes: usize,
@@ -99,8 +130,17 @@ impl FrameArchive {
         Self::default()
     }
 
+    pub fn budget(&self) -> usize {
+        self.budget.unwrap_or(ARCHIVE_BYTE_BUDGET)
+    }
+
+    pub fn set_budget(&mut self, bytes: usize) {
+        self.budget = Some(bytes);
+        self.evict();
+    }
+
     pub fn push(&mut self, frame: ArchivedFrame) -> bool {
-        if frame.bytes() > ARCHIVE_BYTE_BUDGET {
+        if frame.bytes() > self.budget() {
             return false;
         }
         if let Some(newest) = self.frames.back()
@@ -144,7 +184,7 @@ impl FrameArchive {
 
     fn evict(&mut self) {
         while self.frames.len() > 1
-            && (self.frames.len() > ARCHIVE_MAX_TICKS || self.bytes > ARCHIVE_BYTE_BUDGET)
+            && (self.frames.len() > ARCHIVE_MAX_TICKS || self.bytes > self.budget())
         {
             let Some(oldest) = self.frames.pop_front() else {
                 break;

@@ -1,12 +1,34 @@
 use std::path::{Path, PathBuf};
 
-use net::{Frame, SnapshotDecoder, SnapshotEncoder, Transport, frame_from_tick};
+use net::{Frame, SnapshotDecoder, SnapshotEncoder, frame_from_tick};
 use sim::Snapshot;
 
 use crate::file::{
-    FileTransport, MatchRecordIdentity, ReaderCheckpoint, ReplayError, demo_path,
+    MatchRecordIdentity, ReaderCheckpoint, RecordReader, RecordWriter, ReplayError, demo_path,
     sanitize_demo_name,
 };
+
+pub(crate) fn recording_frame(
+    encoder: &mut SnapshotEncoder,
+    snapshot: &Snapshot,
+    received: Option<&Frame>,
+) -> Frame {
+    let packed = frame_from_tick(encoder, snapshot);
+    match received {
+        Some(received) => Frame {
+            acks: received.acks.clone(),
+            reliable: received.reliable.clone(),
+            svc_sounds: received.svc_sounds.clone(),
+            svc_scores: received.svc_scores.clone(),
+            svc_card_slots: received.svc_card_slots.clone(),
+            svc_open_menus: received.svc_open_menus.clone(),
+            svc_hud_splashes: received.svc_hud_splashes.clone(),
+            svc_game_notifies: received.svc_game_notifies.clone(),
+            ..packed
+        },
+        None => packed,
+    }
+}
 
 pub fn auto_demo_name(index: u32) -> String {
     format!("demo{index:04}")
@@ -25,17 +47,15 @@ pub fn next_free_demo_name(artifacts_root: &Path) -> String {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
-            .unwrap_or_default()
+            .unwrap_or(0)
     )
 }
 
 #[derive(Debug)]
 pub struct Recording {
-    transport: FileTransport,
+    writer: RecordWriter,
     encoder: SnapshotEncoder,
     name: String,
-    path: PathBuf,
-    ticks: u64,
 }
 
 impl Recording {
@@ -51,13 +71,11 @@ impl Recording {
         let name =
             sanitize_demo_name(requested).unwrap_or_else(|| next_free_demo_name(artifacts_root));
         let path = demo_path(artifacts_root, &name);
-        let transport = FileTransport::recording_with_identity(&path, identity)?;
+        let writer = RecordWriter::create_with_identity(&path, identity)?;
         Ok(Self {
-            transport,
+            writer,
             encoder: SnapshotEncoder::new(),
             name,
-            path,
-            ticks: 0,
         })
     }
 
@@ -71,34 +89,44 @@ impl Recording {
             .and_then(|name| name.to_str())
             .unwrap_or("clip")
             .to_owned();
-        let transport = FileTransport::recording_with_identity(&path, identity)?;
+        let writer = RecordWriter::create_with_identity(&path, identity)?;
         Ok(Self {
-            transport,
+            writer,
             encoder: SnapshotEncoder::new(),
             name,
-            path,
-            ticks: 0,
         })
     }
 
     pub fn record(&mut self, snapshot: &Snapshot) -> Result<(), ReplayError> {
-        let frame = frame_from_tick(&mut self.encoder, snapshot);
-        self.transport
-            .send(&frame)
-            .map_err(|e| ReplayError::Io(std::io::Error::other(e.to_string())))?;
-        self.ticks += 1;
+        self.record_received(snapshot, None)
+    }
+
+    pub fn record_frame(&mut self, snapshot: &Snapshot, frame: &Frame) -> Result<(), ReplayError> {
+        self.record_received(snapshot, Some(frame))
+    }
+
+    fn record_received(
+        &mut self,
+        snapshot: &Snapshot,
+        received: Option<&Frame>,
+    ) -> Result<(), ReplayError> {
+        let frame = recording_frame(&mut self.encoder, snapshot, received);
+        self.writer.write_frame(&frame)?;
         Ok(())
     }
 
     pub fn record_clip_ring(&mut self, ring: &crate::clip::ClipRing) -> Result<u64, ReplayError> {
-        for snapshot in ring.iter() {
-            self.record(snapshot)?;
+        for frame in ring.frames() {
+            let frame = frame?;
+            let mut snapshot = SnapshotDecoder::new().decode(&frame.snapshot_delta)?;
+            snapshot.meta = frame.snapshot_meta.clone();
+            self.record_frame(&snapshot, &frame)?;
         }
         Ok(ring.len() as u64)
     }
 
     pub fn ticks(&self) -> u64 {
-        self.ticks
+        self.writer.frames()
     }
 
     pub fn name(&self) -> &str {
@@ -106,22 +134,19 @@ impl Recording {
     }
 
     pub fn path(&self) -> &Path {
-        &self.path
+        self.writer.path()
     }
 
-    pub fn stop(mut self) -> Result<(u64, PathBuf), ReplayError> {
-        self.transport.finish()?;
-        Ok((self.ticks, self.path))
+    pub fn stop(self) -> Result<(u64, PathBuf), ReplayError> {
+        self.writer.finish()
     }
 }
 
 #[derive(Debug)]
 pub struct Playback {
-    transport: FileTransport,
+    reader: RecordReader,
     decoder: SnapshotDecoder,
-    path: PathBuf,
     ticks: u64,
-    identity: MatchRecordIdentity,
 }
 
 impl Playback {
@@ -133,25 +158,17 @@ impl Playback {
     }
 
     pub fn open_path(path: &Path) -> Result<Self, ReplayError> {
-        let transport = FileTransport::playback(path)?;
-        let identity = transport
-            .identity()
-            .expect("playback FileTransport always has a reader");
+        let reader = RecordReader::open(path)?;
         Ok(Self {
-            transport,
+            reader,
             decoder: SnapshotDecoder::new(),
-            path: path.to_path_buf(),
             ticks: 0,
-            identity,
         })
     }
 
     pub fn next_tick(&mut self) -> Result<Option<PlayedTick>, ReplayError> {
-        let frame = match self.transport.recv() {
-            Ok(Some(frame)) => frame,
-            Ok(None) | Err(net::TransportError::Ended) => return Ok(None),
-            Err(net::TransportError::Wire(e)) => return Err(ReplayError::Wire(e)),
-            Err(net::TransportError::Io(e)) => return Err(ReplayError::Io(e)),
+        let Some(frame) = self.reader.read_frame()? else {
+            return Ok(None);
         };
         let mut snapshot = self.decoder.decode(&frame.snapshot_delta)?;
         snapshot.meta = frame.snapshot_meta.clone();
@@ -164,7 +181,7 @@ impl Playback {
     }
 
     pub fn path(&self) -> &Path {
-        &self.path
+        self.reader.path()
     }
 
     pub fn position_before(&mut self, frame_index: u64) -> Result<(), ReplayError> {
@@ -174,10 +191,7 @@ impl Playback {
     pub fn keyframe(&self) -> Keyframe {
         Keyframe {
             ticks: self.ticks,
-            reader: self
-                .transport
-                .checkpoint()
-                .expect("playback FileTransport always has a reader"),
+            reader: self.reader.checkpoint(),
             decoder: self.decoder.clone(),
         }
     }
@@ -189,11 +203,11 @@ impl Playback {
         if !resume_here {
             match keyframe {
                 Some(keyframe) => {
-                    self.transport.restore(&keyframe.reader)?;
+                    self.reader.restore(&keyframe.reader)?;
                     self.decoder = keyframe.decoder.clone();
                     self.ticks = keyframe.ticks;
                 }
-                None => *self = Self::open_path(&self.path)?,
+                None => *self = Self::open_path(self.reader.path())?,
             }
         }
         while self.ticks < frame_index {
@@ -209,7 +223,7 @@ impl Playback {
     }
 
     pub fn identity(&self) -> MatchRecordIdentity {
-        self.identity
+        self.reader.identity()
     }
 }
 

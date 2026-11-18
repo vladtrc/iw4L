@@ -1,5 +1,44 @@
 pub const MSEC_TO_SEC: f32 = 0.001;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CampaignPainVision {
+    enabled: bool,
+    intensity: f32,
+}
+
+impl CampaignPainVision {
+    pub fn update(
+        &mut self,
+        requested: bool,
+        frametime_ms: i32,
+        in_rate: f32,
+        out_rate: f32,
+    ) -> f32 {
+        if requested {
+            self.enabled = true;
+        }
+        if !self.enabled {
+            return self.intensity;
+        }
+        let dt = frametime_ms as f32 * MSEC_TO_SEC;
+        if requested {
+            self.intensity = if in_rate <= 0.0 {
+                1.0
+            } else {
+                (self.intensity + in_rate * dt).min(1.0)
+            };
+        } else if out_rate <= 0.0 {
+            *self = Self::default();
+        } else {
+            self.intensity -= out_rate * dt;
+            if self.intensity < 0.0 {
+                *self = Self::default();
+            }
+        }
+        self.intensity
+    }
+}
+
 pub const HUD_BLOOD_OVERLAY_LERP_RATE_DEFAULT: f32 = 0.3;
 
 pub const HEALTH_FRAC_PM_TYPE_NONE: i32 = 8;

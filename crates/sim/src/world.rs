@@ -2,6 +2,7 @@ mod bodies;
 mod collision;
 mod content;
 mod events;
+mod portal_clearance;
 use bodies::{PlayerAnimInputs, PlayerBodyRuntime};
 use collision::{CollisionRuntime, LagcompPlan};
 pub use content::{
@@ -17,19 +18,16 @@ use playerstate_iw4::{AnimPair, PlayerState};
 
 use crate::bullet_collision::{
     CollisionHistory, EntityCollisionCapabilities, EntityCollisionHistory,
-    EntityCollisionTraceGeom, LinkedBrushCollisionBrush,
+    LinkedBrushCollisionBrush,
 };
 use crate::equipment::{EquipmentRuntimeFacts, ProjectileImpact, ProjectileState};
 use crate::identities::{
-    EventSequence, MatchPhase, MatchRng, ProjectileId, RNG_DOMAIN_SCHEME, RngDomain, ScriptModelId,
-    ShotId,
+    EventSequence, MatchPhase, MatchRng, ProjectileId, RngDomain, ScriptModelId, ShotId,
 };
 use crate::match_state::{
-    ClientMatchState, EntityEventPayload, EntityEventRecord, EventAudience, RngDebugMeta, SimEvent,
-    SnapshotMeta,
+    ClientMatchState, EntityEventPayload, EntityEventRecord, EventAudience, SimEvent, SnapshotMeta,
 };
 use crate::player_anim_script::PlayerAnimScript;
-use crate::script_gaps::ScriptGaps;
 use crate::snapshot::Snapshot;
 use crate::spawn::MatchBootstrap;
 use crate::world_objects::WorldObjectState;
@@ -41,8 +39,7 @@ use weapon_iw4::WeaponCombatFacts;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Tick(pub u32);
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ClientId(pub u32);
+pub use playerstate_iw4::ClientId;
 
 pub(crate) const CONTENTS_BODY: u32 = 0x0200_0000;
 
@@ -113,33 +110,21 @@ pub struct HitvolDumpRow {
     pub dobj_models: Option<i64>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct PredictionRemoteBody {
-    pub shield: Option<crate::ShieldAttachment>,
-    pub shield_collision: Option<crate::ShieldCarrierCollision>,
-    pub client: ClientId,
-    pub origin: [f32; 3],
-    pub life_sequence: crate::LifeSequence,
-}
-
 #[derive(Component, Clone, Debug)]
 pub struct SimState {
     content: Arc<SimContent>,
     clients: Vec<(ClientId, ClientMatchState)>,
 
-    prediction_remote_bodies: Vec<PredictionRemoteBody>,
-
     area_entity_world: Option<clipmap_iw4::AreaEntityWorld>,
 
     entity_collision_capabilities: Vec<EntityCollisionCapabilities>,
+    collision_revision: u64,
 
     model_library: Arc<
         std::collections::BTreeMap<String, Option<Arc<xmodel_runtime::RetainedModelCapability>>>,
     >,
 
     old_buttons: Vec<(ClientId, u32)>,
-
-    player_noise: Vec<(ClientId, &'static str)>,
 
     old_cmd_angles: Vec<(ClientId, [i32; 3])>,
 
@@ -190,8 +175,10 @@ pub struct SimState {
     projectile_impact_log: Vec<(Tick, ProjectileImpact)>,
 
     world_objects: WorldObjectState,
-
-    script_gaps: ScriptGaps,
+    portal_clearance_signature: Option<u64>,
+    portal_clearance_rows: Vec<[Option<u64>; 2]>,
+    portal_clearance_validated: Vec<[Option<u64>; 2]>,
+    portal_clearance_job: Option<portal_clearance::ClearanceJob>,
 
     sound_alias_cs: crate::SoundAliasCs,
 
@@ -239,8 +226,8 @@ pub struct SimState {
     use_start_spawns: bool,
 
     item_pickups: Vec<crate::ItemPickupRecord>,
-
-    publish_snapshot: bool,
+    item_pickup_seq: u32,
+    raised_pickup_seq: u32,
 }
 
 impl Default for SimState {
@@ -248,12 +235,11 @@ impl Default for SimState {
         let mut world = Self {
             content: SimContentBuilder::bootstrap().finish(),
             clients: Vec::new(),
-            prediction_remote_bodies: Vec::new(),
             area_entity_world: None,
             entity_collision_capabilities: Vec::new(),
+            collision_revision: 0,
             model_library: Arc::default(),
             old_buttons: Vec::new(),
-            player_noise: Vec::new(),
             old_cmd_angles: Vec::new(),
             player_bodies: PlayerBodyRuntime::default(),
             g_hudelems: Vec::new(),
@@ -282,7 +268,10 @@ impl Default for SimState {
             projectile_impacts: Vec::new(),
             projectile_impact_log: Vec::new(),
             world_objects: WorldObjectState::default(),
-            script_gaps: ScriptGaps::default(),
+            portal_clearance_signature: None,
+            portal_clearance_rows: Vec::new(),
+            portal_clearance_validated: Vec::new(),
+            portal_clearance_job: None,
             sound_alias_cs: crate::SoundAliasCs::default(),
             effect_name_cs: crate::EffectNameCs::default(),
             hud_material_cs: crate::HudMaterialCs::default(),
@@ -308,7 +297,8 @@ impl Default for SimState {
             objectives: crate::ObjectiveMatch::default(),
             use_start_spawns: gamemode_iw4::USE_START_SPAWNS_AT_START,
             item_pickups: Vec::new(),
-            publish_snapshot: true,
+            item_pickup_seq: 0,
+            raised_pickup_seq: 0,
         };
         world.recompute_content_digest();
         world
@@ -360,7 +350,6 @@ impl SimState {
         self.num_kills = 0;
         self.recent_kills.clear();
         self.presentation.reset();
-        self.script_gaps = ScriptGaps::default();
         self.recompute_content_digest();
         Ok(())
     }
@@ -437,15 +426,22 @@ impl SimState {
             .contains(&name.to_ascii_lowercase())
     }
 
+    pub fn script_sound_channel(&self, name: &str) -> Result<Option<u8>, &'static str> {
+        let channels = self
+            .content
+            .script_sound_channels()
+            .ok_or("sound channel catalog is not installed")?;
+        Ok(channels
+            .iter()
+            .position(|channel| channel.eq_ignore_ascii_case(name))
+            .filter(|index| *index < 64)
+            .map(|index| index as u8))
+    }
     pub fn script_sound_exists(&self, name: &str) -> Option<bool> {
         self.content
             .script_sound_aliases()
             .as_ref()
             .map(|names| names.contains_key(&name.to_ascii_lowercase()))
-    }
-
-    pub fn script_sound_length_ms(&self, name: &str) -> Option<u32> {
-        self.content.script_sound_length(name)
     }
 
     pub fn script_sound_is_looping(&self, name: &str) -> Result<bool, &'static str> {
@@ -490,6 +486,14 @@ impl SimState {
 
     pub(crate) fn push_script_audio(&mut self, command: crate::ScriptAudioCommand) {
         self.presentation.script_audio.push(command);
+    }
+
+    pub(crate) fn push_objective_update(&mut self, update: crate::ObjectiveUpdate) {
+        self.presentation.objective_updates.push(update);
+    }
+
+    pub(crate) fn take_objective_updates(&mut self) -> Vec<crate::ObjectiveUpdate> {
+        core::mem::take(&mut self.presentation.objective_updates)
     }
 
     pub(crate) fn take_pending_script_audio(&mut self) -> Vec<crate::ScriptAudioCommand> {
@@ -602,16 +606,6 @@ impl SimState {
         &mut self.combat_rng
     }
 
-    pub fn rng_debug_meta(&self) -> RngDebugMeta {
-        RngDebugMeta {
-            root_seed: self.root_seed,
-            scheme: RNG_DOMAIN_SCHEME,
-            spawn_draws: self.spawn_rng.draws(),
-            combat_draws: self.combat_rng.draws(),
-            bot_draws: self.bot_rng.draws(),
-        }
-    }
-
     pub(crate) fn alloc_shot_id(&mut self) -> ShotId {
         let id = self.next_shot;
         self.next_shot = id.next();
@@ -692,8 +686,20 @@ impl SimState {
         ))
     }
 
-    fn collision_kit(&self, id: ClientId) -> &PlayerKitCollision {
-        &self.content.player_kits()[self.collision_kit_index(id)]
+    pub(crate) fn collision_kit(&self, id: ClientId, origin: [f32; 3]) -> &PlayerKitCollision {
+        self.content
+            .character_kit(id.0, crate::world_graph::world_at(origin))
+            .unwrap_or_else(|| &self.content.player_kits()[self.collision_kit_index(id)])
+    }
+
+    pub(crate) fn player_knife_melee_animation(&self, torso_anim: i32) -> bool {
+        PlayerAnimValue::from_raw((torso_anim as u16) & PLAYER_ANIM_RAW_MASK)
+            .and_then(|value| {
+                self.content
+                    .player_anim_properties()
+                    .get(usize::from(value.effective_index()))
+            })
+            .is_some_and(|properties| properties.knife_melee)
     }
 
     fn kit_assignment_is_axis(client_state_team: i32, ffa_team: Option<u8>) -> bool {
@@ -728,7 +734,7 @@ impl SimState {
             .bullet_pen
             .get(weapon as usize)
             .copied()
-            .unwrap_or_default()
+            .unwrap_or_else(weapon_iw4::BulletPenFacts::default)
     }
 
     pub fn weapon_script_names(&self) -> Arc<[String]> {
@@ -736,7 +742,7 @@ impl SimState {
     }
 
     pub(crate) fn rank_for_xp(&self, xp: i32) -> Option<u32> {
-        self.content.weapons().rank_progression.rank(xp)
+        self.content.weapons().rank_progression.as_ref()?.rank(xp)
     }
 
     pub(crate) fn weapon_unlock_requirement(
@@ -749,7 +755,7 @@ impl SimState {
             .get(weapon as usize)
     }
 
-    pub(crate) fn weapon_setup(&self, weapon: u32) -> Option<&WeaponSetup> {
+    pub fn weapon_setup(&self, weapon: u32) -> Option<&WeaponSetup> {
         self.content
             .weapons()
             .weapon_setups
@@ -785,7 +791,7 @@ impl SimState {
             .map_or("", String::as_str)
     }
 
-    pub(crate) fn weapon_script_sounds(&self, weapon: u32) -> Option<&WeaponScriptSounds> {
+    pub fn weapon_script_sounds(&self, weapon: u32) -> Option<&WeaponScriptSounds> {
         self.content
             .weapons()
             .weapon_script_sounds
@@ -824,6 +830,32 @@ impl SimState {
             })
     }
 
+    pub(crate) fn weapon_clip_model(&self, weapon: u32) -> &str {
+        self.content
+            .weapons()
+            .weapon_clip_models
+            .get(weapon as usize)
+            .map_or("", String::as_str)
+    }
+
+    pub(crate) fn weapon_has_thermal_scope(&self, weapon: u32) -> bool {
+        self.content
+            .weapons()
+            .weapon_thermal_scopes
+            .get(weapon as usize)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn weapon_item_facts(&self, weapon: u32) -> Option<crate::WeaponItemFacts> {
+        self.content
+            .weapons()
+            .weapon_items
+            .get(weapon as usize)
+            .copied()
+            .flatten()
+    }
+
     pub(crate) fn weapon_world_model(&self, weapon: u32) -> Option<(&str, &[String])> {
         self.content
             .weapons()
@@ -836,8 +868,16 @@ impl SimState {
         self.content.vehicle_compass().get(name)
     }
 
+    pub fn vehicle_motion(&self, name: &str) -> Option<asset_core::VehicleMotion> {
+        self.content.vehicle_motion().get(name).copied()
+    }
+
+    pub fn vehicle_engine(&self, name: &str) -> Option<&asset_core::VehicleEngineSounds> {
+        self.content.vehicle_engine().get(name)
+    }
+
     pub fn vehicle_accel(&self, name: &str) -> Option<f32> {
-        self.content.vehicle_accel().get(name).copied()
+        self.vehicle_motion(name).map(|motion| motion.acceleration)
     }
 
     pub fn vehicle_turret_weapon(&self, vehicle: &str) -> Option<u32> {
@@ -858,7 +898,7 @@ impl SimState {
             .filter(|&i| i != 0)
     }
 
-    pub(crate) fn equipment_facts_for(&self, weapon: u32) -> Option<EquipmentRuntimeFacts> {
+    pub fn equipment_facts_for(&self, weapon: u32) -> Option<EquipmentRuntimeFacts> {
         self.content
             .weapons()
             .equipment_runtime
@@ -877,12 +917,7 @@ impl SimState {
     }
 
     pub(crate) fn missile_launch_facts(&self, weapon: u32) -> Option<EquipmentRuntimeFacts> {
-        self.content
-            .weapons()
-            .equipment_runtime
-            .get(weapon as usize)
-            .copied()
-            .filter(|facts| facts.projectile_speed > 0)
+        self.content.missile_launch_facts(weapon)
     }
 
     pub(crate) fn allocate_projectile_id(&mut self) -> ProjectileId {
@@ -944,14 +979,42 @@ impl SimState {
             self.entity_kernel
                 .mark_transient_event(entity, crate::corpse::level_time_ms(tick))
                 .expect("terminal projectile generation changed before event retention");
+            // The event lingers for the killcam, but the projectile's flight
+            // has ended. Keeping TR_GRAVITY here drives the replay camera
+            // through the ground after the explosion.
+            let time = crate::corpse::level_time_ms(tick);
+            let position = entity_iw4::Trajectory {
+                tr_type: entity_iw4::TR_STATIONARY,
+                tr_time: time,
+                tr_base: projectile.origin,
+                ..Default::default()
+            };
+            let angles = entity_iw4::Trajectory {
+                tr_type: entity_iw4::TR_STATIONARY,
+                tr_time: time,
+                tr_base: entity_iw4::evaluate_trajectory(&projectile.apos, time),
+                ..Default::default()
+            };
             self.dying_missiles.push(crate::gentity::init_missile_state(
                 projectile.entnum,
                 projectile.weapon,
-                projectile.pos,
-                projectile.apos,
+                position,
+                angles,
                 projectile.launch_time,
             ));
         }
+    }
+
+    pub(crate) fn set_script_viewmodel(
+        &mut self,
+        id: ClientId,
+        name: String,
+    ) -> Result<(), String> {
+        if !self.content.has_script_viewmodel(&name) {
+            return Err(format!("viewmodel `{name}` was not prepared for this map"));
+        }
+        self.client_meta_mut(id).viewmodel = Some(name);
+        Ok(())
     }
 
     pub fn weapon_combat_len(&self) -> usize {
@@ -981,7 +1044,7 @@ impl SimState {
     pub fn weapon_thermal_scope(&self, weapon: u32) -> bool {
         self.content
             .weapons()
-            .weapon_thermal_scope
+            .weapon_thermal_scopes
             .get(weapon as usize)
             .is_some_and(|thermal| *thermal)
     }
@@ -990,38 +1053,24 @@ impl SimState {
         self.content_digest
     }
 
+    pub(crate) fn checkpoint_content_digest(&self) -> u64 {
+        crate::content::content_digest(&self.content, &self.bootstrap, &[])
+    }
+
     pub fn content_components(&self) -> crate::ContentComponents {
         self.content_components
     }
 
     fn recompute_content_digest(&mut self) {
         self.content_digest = crate::content::content_digest(
-            &self.content.weapons().weapon_combat,
-            &self.content.weapons().bullet_pen,
-            &self.content.weapons().weapon_runnable,
-            &self.content.weapons().unlock_requirements,
-            &self.content.weapons().rank_progression,
-            &self.content.weapons().weapon_transition_groups,
-            &self.content.weapons().weapon_camouflage_slots,
-            &self.content.weapons().equipment_runtime,
+            &self.content,
             &self.bootstrap,
-            self.content.clip_brushes(),
             &self.entity_collision_capabilities,
-            self.content.map(),
         );
         self.content_components = crate::content::content_components(
-            &self.content.weapons().weapon_combat,
-            &self.content.weapons().bullet_pen,
-            &self.content.weapons().weapon_runnable,
-            &self.content.weapons().unlock_requirements,
-            &self.content.weapons().rank_progression,
-            &self.content.weapons().weapon_transition_groups,
-            &self.content.weapons().weapon_camouflage_slots,
-            &self.content.weapons().equipment_runtime,
+            &self.content,
             &self.bootstrap,
-            self.content.clip_brushes(),
             &self.entity_collision_capabilities,
-            self.content.map(),
         );
     }
 
@@ -1248,7 +1297,15 @@ impl SimState {
         &mut self,
         mut proxies: Vec<EntityCollisionCapabilities>,
     ) {
+        for proxy in &mut proxies {
+            if let Some(dobj) = &mut proxy.dobj
+                && dobj.capability.is_some()
+            {
+                dobj.materialize();
+            }
+        }
         proxies.sort_by_key(|capabilities| capabilities.owner);
+        self.bump_collision_revision();
         self.entity_collision_capabilities = proxies;
         self.recompute_content_digest();
     }
@@ -1265,50 +1322,22 @@ impl SimState {
         &self,
         keep: impl Fn(&EntityCollisionCapabilities) -> bool,
     ) -> Vec<SimBrush> {
-        let mut brushes = Vec::new();
-        for row in self
-            .entity_collision_capabilities
-            .iter()
-            .filter(|row| row.solid && keep(row))
-        {
-            let Some(dobj) = &row.dobj else { continue };
-            let Some(capability) = &dobj.capability else {
-                continue;
-            };
-            if capability.movement_brushes.is_empty() {
-                continue;
-            }
-            let plane_transform = dobj.world_from_model.inverse().transpose();
-            for brush in &capability.movement_brushes {
-                let planes = brush
-                    .planes
-                    .iter()
-                    .map(|plane| {
-                        let plane = plane_transform
-                            * glam::Vec4::new(plane[0], plane[1], plane[2], -plane[3]);
-                        let length = plane.truncate().length();
-                        [
-                            plane.x / length,
-                            plane.y / length,
-                            plane.z / length,
-                            -plane.w / length,
-                        ]
-                    })
-                    .collect();
-                brushes.push(SimBrush {
-                    planes,
-                    contents: brush.contents,
-                    plane_surface_flags: brush.plane_surface_flags.clone(),
-                    glass_encoded: 0,
-                });
-            }
-        }
-        brushes
+        crate::collision_scene::model_movement_brushes(&self.entity_collision_capabilities, keep)
     }
 
-    pub(crate) fn entity_collision_capabilities_mut(
-        &mut self,
-    ) -> &mut [EntityCollisionCapabilities] {
+    pub(crate) fn collision_revision(&self) -> u64 {
+        self.collision_revision
+    }
+
+    fn bump_collision_revision(&mut self) {
+        self.collision_revision = self
+            .collision_revision
+            .checked_add(1)
+            .expect("collision revision exhausted");
+    }
+
+    pub fn entity_collision_capabilities_mut(&mut self) -> &mut [EntityCollisionCapabilities] {
+        self.bump_collision_revision();
         &mut self.entity_collision_capabilities
     }
 
@@ -1321,10 +1350,24 @@ impl SimState {
             .entity_collision_capabilities
             .binary_search_by_key(&owner, |row| row.owner)
             .ok()?;
+        self.bump_collision_revision();
         Some(&mut self.entity_collision_capabilities[index])
     }
 
+    pub(crate) fn collision_owners_mut(
+        &mut self,
+        id: ScriptModelId,
+    ) -> &mut [EntityCollisionCapabilities] {
+        let range = collision_owner_range(
+            &self.entity_collision_capabilities,
+            crate::AuthorityModelOwner::ScriptModel(id),
+        );
+        self.bump_collision_revision();
+        &mut self.entity_collision_capabilities[range]
+    }
+
     pub(crate) fn insert_collision_owner(&mut self, row: EntityCollisionCapabilities) {
+        self.bump_collision_revision();
         match self
             .entity_collision_capabilities
             .binary_search_by_key(&row.owner, |have| have.owner)
@@ -1335,6 +1378,7 @@ impl SimState {
     }
 
     pub(crate) fn remove_collision_owner(&mut self, id: ScriptModelId) {
+        self.bump_collision_revision();
         let owner = crate::AuthorityModelOwner::ScriptModel(id);
         self.entity_collision_capabilities
             .retain(|row| row.owner != owner);
@@ -1347,10 +1391,11 @@ impl SimState {
             Option<Arc<xmodel_runtime::RetainedModelCapability>>,
         >,
     ) {
+        self.bump_collision_revision();
         self.model_library = Arc::new(models);
     }
 
-    pub(crate) fn model_capability(
+    pub fn model_capability(
         &self,
         name: &str,
     ) -> Option<Option<Arc<xmodel_runtime::RetainedModelCapability>>> {
@@ -1392,13 +1437,22 @@ impl SimState {
         input: movement_iw4::GroundTraceInput,
         exclude: Option<crate::AuthorityModelOwner>,
     ) -> trace_iw4::Trace {
-        self.trace_clip_maps_glass(
-            self.content.clip_brushes(),
-            self.content.clip_bsp(),
-            self.content.clip_mesh(),
+        self.trace_scene(input, false, exclude)
+    }
+
+    pub(crate) fn trace_world_box_except(
+        &self,
+        input: movement_iw4::GroundTraceInput,
+        exclude: Option<crate::AuthorityModelOwner>,
+    ) -> trace_iw4::Trace {
+        crate::collision_scene::trace_native_scene(
+            &self.content,
+            &self.world_objects,
+            &self.entity_collision_capabilities,
             input,
             false,
-            exclude,
+            exclude.as_slice(),
+            trace_iw4::TraceShape::box_from_bounds(input.mins, input.maxs),
         )
     }
 
@@ -1414,11 +1468,14 @@ impl SimState {
             self.content.clip_brushes(),
             self.content.clip_bsp(),
             self.content.clip_mesh(),
-            start,
-            end,
-            mins,
-            maxs,
-            mask,
+            &clipmap_iw4::TraceExtents {
+                shape: trace_iw4::TraceShape::Capsule,
+                start,
+                end,
+                mins,
+                maxs,
+                mask,
+            },
             &|piece| self.world_objects.glass_is_solid(piece as u32),
         )
     }
@@ -1435,33 +1492,7 @@ impl SimState {
         maxs: [f32; 3],
         mask: u32,
     ) -> trace_iw4::Trace {
-        self.trace_clip_maps(
-            self.content.clip_brushes(),
-            self.content.clip_bsp(),
-            self.content.clip_mesh(),
-            start,
-            end,
-            mins,
-            maxs,
-            mask,
-        )
-    }
-
-    pub(crate) fn trace_clip_maps(
-        &self,
-        clip_brushes: &[SimBrush],
-        clip_bsp: &SimClipBsp,
-        clip_mesh: &SimClipMesh,
-        start: [f32; 3],
-        end: [f32; 3],
-        mins: [f32; 3],
-        maxs: [f32; 3],
-        mask: u32,
-    ) -> trace_iw4::Trace {
-        self.trace_clip_maps_glass(
-            clip_brushes,
-            clip_bsp,
-            clip_mesh,
+        self.trace_scene(
             movement_iw4::GroundTraceInput {
                 start,
                 end,
@@ -1484,10 +1515,7 @@ impl SimState {
         maxs: [f32; 3],
         mask: u32,
     ) -> trace_iw4::Trace {
-        self.trace_clip_maps_glass(
-            self.content.clip_brushes(),
-            self.content.clip_bsp(),
-            self.content.clip_mesh(),
+        self.trace_scene(
             movement_iw4::GroundTraceInput {
                 start,
                 end,
@@ -1500,56 +1528,36 @@ impl SimState {
         )
     }
 
-    fn trace_clip_maps_glass(
+    fn trace_scene(
         &self,
-        clip_brushes: &[SimBrush],
-        clip_bsp: &SimClipBsp,
-        clip_mesh: &SimClipMesh,
         input: movement_iw4::GroundTraceInput,
         ignore_glass: bool,
         exclude: Option<crate::AuthorityModelOwner>,
     ) -> trace_iw4::Trace {
-        let movement_iw4::GroundTraceInput {
-            start,
-            end,
-            mins,
-            maxs,
-            tracemask: mask,
-        } = input;
-        let world_hit = clip_trace(
-            clip_brushes,
-            clip_bsp,
-            clip_mesh,
-            start,
-            end,
-            mins,
-            maxs,
-            mask,
-            &|piece| !ignore_glass && self.world_objects.glass_is_solid(piece as u32),
-        );
-        let linked = self
-            .entity_collision_capabilities
-            .iter()
-            .filter(|c| Some(c.owner) != exclude)
-            .flat_map(|c| c.solid_brushes().iter());
-        let hit = clip_move_to_bmodels(
-            world_hit,
-            &self.content.clip_cmodels().models,
-            &clip_bsp.leafbrushes,
-            clip_brushes,
-            linked,
-            movement_iw4::GroundTraceInput {
-                start,
-                end,
-                mins,
-                maxs,
-                tracemask: mask,
-            },
-        );
-        clip_move_to_model_brushes(
-            hit,
-            &self.model_movement_brushes_where(|row| Some(row.owner) != exclude),
+        crate::collision_scene::trace_native_scene(
+            &self.content,
+            &self.world_objects,
+            &self.entity_collision_capabilities,
             input,
+            ignore_glass,
+            exclude.as_slice(),
+            trace_iw4::TraceShape::Capsule,
+        )
+    }
+
+    pub(crate) fn trace_hull_between(
+        &self,
+        input: movement_iw4::GroundTraceInput,
+        exclude: &[crate::AuthorityModelOwner],
+    ) -> trace_iw4::Trace {
+        crate::collision_scene::trace_native_scene(
+            &self.content,
+            &self.world_objects,
+            &self.entity_collision_capabilities,
+            input,
+            false,
+            exclude,
+            trace_iw4::TraceShape::Capsule,
         )
     }
 
@@ -1564,19 +1572,22 @@ impl SimState {
             .flat_map(|row| row.solid_brushes().iter().cloned())
             .collect();
         let models = self.model_movement_brushes_where(|_| true);
-        crate::penetration::contacts(
-            &crate::penetration::RecoveryScene {
-                brushes: self.content.clip_brushes(),
-                bsp: self.content.clip_bsp(),
-                mesh: self.content.clip_mesh(),
-                cmodels: &self.content.clip_cmodels().models,
+        let bodies = crate::entity_body::collision_bodies(&self.entity_collision_capabilities);
+        let glass = self.world_objects.glass_damage_pairs();
+        let backend = crate::bg::player_collision::PlayerCollision::for_scene(
+            &self.content,
+            &self.world_objects,
+            input.start,
+            crate::bg::player_collision::RootDynamics {
+                glass_damage: &glass,
                 linked: &linked,
                 models: &models,
-                glass_is_solid: &|piece| self.world_objects.glass_is_solid(u32::from(piece)),
+                entity_bodies: Some(crate::EntityBodyCollision::new(&self.content, &bodies)),
             },
-            input,
-            contacts,
-        )
+            &[],
+            u16::MAX,
+        );
+        movement_iw4::CollisionBackend::penetrations(&backend, input, contacts)
     }
 
     pub fn collision_history(&self) -> &CollisionHistory {
@@ -1656,7 +1667,7 @@ impl SimState {
                         poses: Vec::new(),
                         verdict: HistorySampleVerdict::Refused {
                             requested: used,
-                            reason: crate::bullet_collision::HistoryRefusalReason::MissingFrame,
+                            reason: "missing history frame",
                         },
                     };
                 };
@@ -1732,7 +1743,7 @@ impl SimState {
                         rows: Vec::new(),
                         verdict: HistorySampleVerdict::Refused {
                             requested: used,
-                            reason: crate::bullet_collision::HistoryRefusalReason::MissingFrame,
+                            reason: "missing history frame",
                         },
                     };
                 };
@@ -1773,14 +1784,6 @@ impl SimState {
         &mut self.world_objects
     }
 
-    pub fn script_gaps(&self) -> &ScriptGaps {
-        &self.script_gaps
-    }
-
-    pub fn script_gaps_mut(&mut self) -> &mut ScriptGaps {
-        &mut self.script_gaps
-    }
-
     pub(crate) fn alive_collision_poses(
         &self,
         player: impl Fn(ClientId) -> Option<PlayerState>,
@@ -1819,7 +1822,7 @@ impl SimState {
                 return Some(self.alive_collision_poses_inner(player, recorded, |_| {}));
             }
         }
-        (alive + self.prediction_remote_bodies.len() != recorded.len())
+        (alive != recorded.len())
             .then(|| self.alive_collision_poses_inner(player, recorded, |_| {}))
     }
 
@@ -1872,27 +1875,6 @@ impl SimState {
                 shield_normal,
             });
         }
-        poses.extend(self.prediction_remote_bodies.iter().map(|body| {
-            PlayerCollisionPose {
-                client: body.client,
-                origin: body.origin,
-                mins: PLAYER_MINS,
-                maxs: PLAYER_MAXS,
-                life_sequence: body.life_sequence,
-                hit_volume: HitVolumeKind::Standing,
-
-                bones: body
-                    .shield_collision
-                    .as_ref()
-                    .map_or_else(Vec::new, |collision| collision.bones.clone()),
-                viewangles: [0.0; 3],
-                shield: body.shield,
-                shield_normal: body
-                    .shield_collision
-                    .as_ref()
-                    .map(|collision| collision.normal),
-            }
-        }));
         poses
     }
 
@@ -1909,6 +1891,19 @@ impl SimState {
         Option<f32>,
         Option<f32>,
     ) {
+        if let Some(clip) = &self.collision_kit(id, ps.origin).loop_animation {
+            let runtime = clip.runtime_at_ms(ps.command_time);
+            let phase = runtime.states().last().expect("performance leaf").time;
+            return (
+                xmodel_runtime::DObjPoseRequest::with_tree(runtime),
+                "native_loop",
+                0,
+                clip.active_clip(ps.command_time).duration() * phase,
+                None,
+                Some(phase),
+                Some(1.0),
+            );
+        }
         let legs = PlayerAnimValue::from_raw((ps.legs_anim as u16) & PLAYER_ANIM_RAW_MASK)
             .map(PlayerAnimValue::effective_index)
             .unwrap_or(0);
@@ -1955,12 +1950,75 @@ impl SimState {
         )
     }
 
+    pub(crate) fn player_model_request(
+        &self,
+        id: ClientId,
+        ps: &PlayerState,
+    ) -> xmodel_runtime::DObjPoseRequest {
+        let mut request = self.player_dobj_request(id, ps).0;
+        if self.collision_kit(id, ps.origin).loop_animation.is_none() {
+            request.player_controller = Some(player_controller_input(ps));
+        }
+        request
+    }
+
+    pub(crate) fn player_attachment_bones(
+        &self,
+        id: ClientId,
+        life: crate::LifeSequence,
+        ps: Option<&PlayerState>,
+    ) -> Option<Vec<xmodel_runtime::CollisionBone>> {
+        let meta = self.client_meta(id)?;
+        // Never carry an attachment into a respawn or a reused corpse slot.
+        if meta.life_sequence != life {
+            return None;
+        }
+        if meta.lifecycle == crate::ClientLifecycle::Alive {
+            return self.player_hitvol_bones(id, ps?).ok().map(|p| p.0);
+        }
+        let corpse = self
+            .corpses
+            .slots
+            .iter()
+            .filter(|c| c.occupied && c.victim == id && c.spawn_time_ms >= meta.item_use_spawn_ms)
+            .max_by_key(|c| c.spawn_time_ms)?;
+        let tree = self.player_bodies.corpse_anim_trees.get(&corpse.entnum)?;
+        let kit = self.collision_kit(id, corpse.origin);
+        let body = kit.body.as_ref()?;
+        let mut models = vec![(body.as_ref(), None)];
+        if let (Some(head), Some(tag)) = (
+            kit.head.as_ref(),
+            xmodel_runtime::tp_head_attach_tag(&body.pose.bone_names),
+        ) {
+            models.push((
+                head.as_ref(),
+                Some(xmodel_runtime::Attach {
+                    parent_model: 0,
+                    tag: tag.into(),
+                }),
+            ));
+        }
+        let axis = math_iw4::angles_to_axis(corpse.viewangles);
+        let transform = glam::Mat4::from_cols(
+            glam::Vec3::from_array(axis[0]).extend(0.0),
+            glam::Vec3::from_array(axis[1]).extend(0.0),
+            glam::Vec3::from_array(axis[2]).extend(0.0),
+            glam::Vec3::from_array(corpse.origin).extend(1.0),
+        );
+        xmodel_runtime::collision_models(
+            &models,
+            &xmodel_runtime::DObjPoseRequest::with_tree(tree.clone()),
+            transform,
+        )
+        .ok()
+    }
+
     fn player_hitvol_bones(
         &self,
         id: ClientId,
         ps: &PlayerState,
     ) -> Result<(Vec<xmodel_runtime::CollisionBone>, Option<[f32; 3]>), String> {
-        let kit = self.collision_kit(id);
+        let kit = self.collision_kit(id, ps.origin);
         let Some(cap) = kit.body.as_ref() else {
             return Ok((Vec::new(), None));
         };
@@ -1974,7 +2032,8 @@ impl SimState {
         let torso = PlayerAnimValue::from_raw((ps.torso_anim as u16) & PLAYER_ANIM_RAW_MASK)
             .map(PlayerAnimValue::effective_index)
             .unwrap_or(0);
-        if legs != 0
+        if kit.loop_animation.is_none()
+            && legs != 0
             && !self
                 .player_bodies
                 .player_anim_trees
@@ -1992,10 +2051,13 @@ impl SimState {
         }
         let (request, _, _, _, _, _, _) = self.player_dobj_request(id, ps);
         let input = player_controller_input(ps);
+        let loop_animation = kit.loop_animation.is_some();
         let controller = move |dobj: &xmodel_runtime::DObj,
                                _: &anim_iw4::PartBits,
                                locals: &mut [anim_iw4::Local]| {
-            xmodel_runtime::apply_player_controller(dobj, locals, input);
+            if !loop_animation {
+                xmodel_runtime::apply_player_controller(dobj, locals, input);
+            }
         };
         let mut models: Vec<(
             &xmodel_runtime::RetainedModelCapability,
@@ -2109,7 +2171,6 @@ impl SimState {
         tick: Tick,
         msec: i32,
         player: impl Fn(ClientId) -> Option<PlayerState> + Copy,
-        hitbox_cmds: Option<&[ClientId]>,
     ) {
         use crate::bullet_collision::{HistoryFrame, HistoryPhase};
         let alive = || {
@@ -2117,18 +2178,22 @@ impl SimState {
                 .iter()
                 .filter(|(_, meta)| meta.lifecycle == crate::ClientLifecycle::Alive)
         };
-        self.player_bodies.tick_dobjs(
-            alive().map(|(id, meta)| {
-                (
-                    *id,
-                    &self.content.player_kits()[usize::from(Self::kit_assignment_is_axis(
-                        meta.client_state_team,
-                        meta.ffa_team,
-                    ))],
-                )
-            }),
-            hitbox_cmds,
-        );
+        self.player_bodies.tick_dobjs(alive().map(|(id, meta)| {
+            (
+                *id,
+                self.content
+                    .character_kit(
+                        id.0,
+                        player(*id).map_or(0, |p| crate::world_graph::world_at(p.origin)),
+                    )
+                    .unwrap_or_else(|| {
+                        &self.content.player_kits()[usize::from(Self::kit_assignment_is_axis(
+                            meta.client_state_team,
+                            meta.ffa_team,
+                        ))]
+                    }),
+            )
+        }));
         self.player_bodies.tick_trees(
             PlayerAnimInputs {
                 definitions: [
@@ -2149,7 +2214,6 @@ impl SimState {
             }),
             msec,
             player,
-            hitbox_cmds,
         );
         let mut error = None;
         let poses = self.alive_collision_poses_inner(player, &[], |e| {
@@ -2185,46 +2249,125 @@ impl SimState {
             });
     }
 
+    /// Ray coordinates belong to the simulation slab of the starting point.
     pub fn bullet_trace(
         &self,
         query: crate::bullet_collision::BulletTraceQuery,
         poses: Option<&[crate::bullet_collision::PlayerCollisionPose]>,
     ) -> crate::bullet_collision::TraceOutcome {
-        let geoms: Vec<EntityCollisionTraceGeom> = self
+        use crate::bullet_collision::{BulletTraceQuery, TraceOutcome, trace_simulation_ray};
+        let geoms: Vec<_> = self
             .entity_collision_capabilities
             .iter()
-            .filter(|capabilities| {
-                capabilities.ray_may_hit(self.content.clip_cmodels(), query.start, query.end)
-            })
             .map(EntityCollisionCapabilities::trace_geom)
             .collect();
-        let default = [];
         let players = poses.unwrap_or_else(|| {
             self.collision_runtime
                 .players
                 .latest_poses()
-                .map(|(_, p)| p)
-                .unwrap_or(&default)
+                .map(|(_, players)| players)
+                .unwrap_or(&[])
         });
-        crate::bullet_collision::bullet_trace_with_entity_models(
-            self.content.clip_brushes(),
-            self.content.clip_bsp(),
-            self.content.clip_cmodels(),
-            self.content.clip_mesh(),
-            players,
-            &geoms,
-            &query,
-            &|piece| self.world_objects.glass_is_solid(piece as u32),
-        )
-    }
-
-    /// Readonly sensor path: same world clip and current script-model geoms as
-    /// `bullet_trace`. Sight still uses `MASK_SIGHT` (no glass); shots use `MASK_SHOT`.
-    pub fn sensor_trace(
-        &self,
-        query: crate::bullet_collision::BulletTraceQuery,
-    ) -> crate::bullet_collision::TraceOutcome {
-        self.bullet_trace(query, None)
+        let trace = |start, end| {
+            trace_simulation_ray(
+                &self.content,
+                players,
+                &geoms,
+                &BulletTraceQuery {
+                    start,
+                    end,
+                    ..query
+                },
+                &|piece| self.world_objects.glass_is_solid(u32::from(piece)),
+            )
+        };
+        let Some(atlas) = self.content.atlas() else {
+            return trace(query.start, query.end);
+        };
+        let distance = |a: [f32; 3], b: [f32; 3]| {
+            (0..3)
+                .map(|i| (f64::from(a[i]) - f64::from(b[i])).powi(2))
+                .sum::<f64>()
+                .sqrt()
+        };
+        let length = distance(query.start, query.end);
+        let (mut start, mut end) = (query.start, query.end);
+        let mut travelled = 0.0;
+        for _ in 0..16 {
+            let crossing = atlas.crossing(start, end);
+            let leg_end = crossing.map_or(end, |(fraction, _, _)| {
+                crate::world_graph::lerp(start, end, fraction)
+            });
+            let leg_length = distance(start, leg_end);
+            match trace(start, leg_end) {
+                TraceOutcome::Hit {
+                    fraction,
+                    end,
+                    normal,
+                    collider,
+                } => {
+                    return TraceOutcome::Hit {
+                        fraction: if length > 0.0 {
+                            ((travelled + leg_length * f64::from(fraction)) / length) as f32
+                        } else {
+                            0.0
+                        },
+                        end,
+                        normal,
+                        collider,
+                    };
+                }
+                TraceOutcome::StartSolid {
+                    collider: Some(collider),
+                    end,
+                } if travelled > 0.0 => {
+                    return TraceOutcome::Hit {
+                        fraction: (travelled / length) as f32,
+                        end,
+                        normal: [0.0; 3],
+                        collider,
+                    };
+                }
+                outcome @ (TraceOutcome::StartSolid { .. } | TraceOutcome::Invalid { .. }) => {
+                    return outcome;
+                }
+                miss @ TraceOutcome::Miss { .. } => {
+                    let Some((_, portal, from_a)) = crossing else {
+                        return miss;
+                    };
+                    travelled += leg_length;
+                    if query.mask & 1 != 0
+                        && let Some(TraceOutcome::Hit {
+                            end: at,
+                            normal,
+                            collider,
+                            ..
+                        }) = atlas.unavailable_exit_hit(
+                            self.world_objects.portal_blocked_exits(),
+                            start,
+                            end,
+                        )
+                    {
+                        return TraceOutcome::Hit {
+                            fraction: if length > 0.0 {
+                                (travelled / length) as f32
+                            } else {
+                                0.0
+                            },
+                            end: at,
+                            normal,
+                            collider,
+                        };
+                    }
+                    let (near, far, yaw) = atlas.portals[portal.index()].oriented(from_a);
+                    start = crate::world_graph::carry_point(&near, &far, yaw, leg_end);
+                    end = crate::world_graph::carry_point(&near, &far, yaw, end);
+                }
+            }
+        }
+        TraceOutcome::Invalid {
+            reason: crate::TraceInvalidReason::PortalLimit,
+        }
     }
 
     pub fn clip_brush_count(&self) -> usize {
@@ -2263,10 +2406,6 @@ impl SimState {
 
     pub fn client_count(&self) -> usize {
         self.clients.len()
-    }
-
-    pub(crate) fn prediction_remote_bodies(&self) -> &[PredictionRemoteBody] {
-        &self.prediction_remote_bodies
     }
 
     pub fn corpses(&self) -> &crate::PlayerCorpsePool {
@@ -2350,8 +2489,22 @@ impl SimState {
             .retain(|k, _| live.contains(k));
     }
 
-    pub(crate) fn item_pickups_mut(&mut self) -> &mut Vec<crate::ItemPickupRecord> {
-        &mut self.item_pickups
+    pub(crate) fn record_item_pickup(&mut self, mut record: crate::ItemPickupRecord) {
+        self.item_pickup_seq = self.item_pickup_seq.wrapping_add(1);
+        record.seq = self.item_pickup_seq;
+        self.item_pickups.push(record);
+    }
+
+    pub(crate) fn unpublished_pickups(&self) -> Vec<crate::ItemPickupRecord> {
+        self.item_pickups
+            .iter()
+            .copied()
+            .filter(|pickup| pickup.seq > self.raised_pickup_seq)
+            .collect()
+    }
+
+    pub(crate) fn mark_pickups_raised(&mut self) {
+        self.raised_pickup_seq = self.item_pickup_seq;
     }
 
     pub(crate) fn client_meta_mut(&mut self, id: ClientId) -> &mut ClientMatchState {
@@ -2369,6 +2522,7 @@ impl SimState {
         projectiles: Vec<ProjectileState>,
         script_movers: Vec<crate::gentity::ScriptMoverGentity>,
         dropped_items: Vec<crate::item::DroppedItem>,
+        eq_disabled_entities: Vec<u16>,
     ) -> Snapshot {
         let clients = self
             .clients
@@ -2425,6 +2579,15 @@ impl SimState {
                 clip_l: item.clip_l,
                 stock: item.stock,
                 scavenger: i32::from(item.scavenger),
+                authored: item.authored,
+                dual_wield: item.dual_wield,
+                alternate: item.alternate,
+                hide_part_bits: item.hide_part_bits,
+                parented: self
+                    .entity_kernel
+                    .current_ref(item.state.number)
+                    .and_then(|entity| self.entity_kernel.resolve(entity))
+                    .is_ok_and(|view| view.relations.parent.is_some()),
             })
             .collect();
         Snapshot {
@@ -2432,6 +2595,10 @@ impl SimState {
             players,
             projectiles,
             meta: SnapshotMeta {
+                campaign_dvars: Vec::new(),
+                actor_gazes: Vec::new(),
+                eq_disabled_entities,
+                entity_hidden_from: Vec::new(),
                 objectives: self.objectives.clone(),
                 phase: self.phase,
                 round_serial: self.round_serial,
@@ -2448,7 +2615,6 @@ impl SimState {
                 effect_names: self.effect_name_cs.occupied(),
                 hud_materials: self.hud_material_cs.occupied(),
                 hud_strings: self.hud_string_cs.occupied(),
-                rng: self.rng_debug_meta(),
                 world_objects: {
                     let mut world_objects = self.world_objects.to_snapshot();
                     world_objects.as_of_ms =
@@ -2459,6 +2625,7 @@ impl SimState {
                     .area_entity_world
                     .as_ref()
                     .map(crate::AreaEntityWorldSnapshot::capture),
+                player_dobjs: Vec::new(),
                 entity_dobjs: self
                     .entity_collision_capabilities
                     .iter()
@@ -2478,202 +2645,12 @@ impl SimState {
                     .collect(),
                 entities,
                 script_movers,
-                entity_kernel: self.entity_kernel.to_snapshot(),
+                generations: self.entity_kernel.generations(),
                 corpses: self.corpses,
                 item_ammo,
                 item_pickups: self.item_pickups.clone(),
             },
         }
-    }
-
-    pub(crate) fn adopt_snapshot_state(
-        &mut self,
-        snapshot: &Snapshot,
-    ) -> (
-        crate::AdoptReport,
-        Vec<ProjectileState>,
-        Vec<crate::gentity::ScriptMoverGentity>,
-        Vec<crate::item::DroppedItem>,
-    ) {
-        self.adopt_snapshot_state_inner(snapshot, None)
-    }
-
-    pub(crate) fn adopt_prediction_snapshot_state(
-        &mut self,
-        snapshot: &Snapshot,
-        local: ClientId,
-    ) -> (
-        crate::AdoptReport,
-        Vec<ProjectileState>,
-        Vec<crate::gentity::ScriptMoverGentity>,
-        Vec<crate::item::DroppedItem>,
-    ) {
-        self.adopt_snapshot_state_inner(snapshot, Some(local))
-    }
-
-    fn adopt_snapshot_state_inner(
-        &mut self,
-        snapshot: &Snapshot,
-        prediction_local: Option<ClientId>,
-    ) -> (
-        crate::AdoptReport,
-        Vec<ProjectileState>,
-        Vec<crate::gentity::ScriptMoverGentity>,
-        Vec<crate::item::DroppedItem>,
-    ) {
-        assert_entity_runtime_snapshot(snapshot);
-        let mut report = crate::AdoptReport::default();
-
-        let adopted_player_count = prediction_local.map_or(snapshot.players.len(), |local| {
-            usize::from(snapshot.players.iter().any(|(id, _)| *id == local))
-        });
-        let before = adopted_player_count + self.clients.len();
-        report.players = adopted_player_count;
-
-        self.prediction_remote_bodies.clear();
-        if let Some(local) = prediction_local {
-            self.prediction_remote_bodies.extend(
-                snapshot
-                    .players
-                    .iter()
-                    .filter(|(id, _)| *id != local)
-                    .filter_map(|(id, ps)| {
-                        let meta = snapshot
-                            .meta
-                            .for_client(*id)
-                            .expect("authoritative player row omitted client meta");
-                        (meta.lifecycle == crate::ClientLifecycle::Alive).then_some(
-                            PredictionRemoteBody {
-                                shield: meta.shield,
-                                shield_collision: meta.shield_collision.clone(),
-                                client: *id,
-                                origin: ps.origin,
-                                life_sequence: meta.life_sequence,
-                            },
-                        )
-                    }),
-            );
-        }
-
-        let mut adopted_clients: Vec<(ClientId, ClientMatchState)> =
-            Vec::with_capacity(prediction_local.map_or(snapshot.meta.clients.len(), |_| 1));
-        for (id, meta) in snapshot
-            .meta
-            .clients
-            .iter()
-            .filter(|(id, _)| prediction_local.is_none_or(|local| *id == local))
-        {
-            let mut row = self
-                .clients
-                .iter()
-                .find(|(c, _)| c == id)
-                .map(|(_, m)| m.clone())
-                .unwrap_or_default();
-            row.adopt_snapshot_meta(meta);
-            adopted_clients.push((*id, row));
-            report.clients += 1;
-        }
-        self.clients = adopted_clients;
-
-        self.entity_kernel = crate::EntityKernel::from_snapshot(&snapshot.meta.entity_kernel)
-            .expect("authoritative snapshot carried an invalid EntityKernel state");
-
-        let projectiles: Vec<_> = snapshot
-            .projectiles
-            .iter()
-            .filter(|projectile| prediction_local.is_none_or(|local| projectile.owner == local))
-            .copied()
-            .collect();
-        report.projectiles = projectiles.len();
-        self.objectives = snapshot.meta.objectives.clone();
-        crate::presence::follow_movers(
-            &mut self.entity_collision_capabilities,
-            &snapshot.meta.script_movers,
-            crate::level_time_ms(snapshot.tick),
-        );
-        let script_movers = snapshot.meta.script_movers.clone();
-
-        let dropped_items: Vec<_> = snapshot
-            .meta
-            .entities
-            .iter()
-            .filter(|state| state.e_type == entity_iw4::ET_ITEM)
-            .map(|state| {
-                let ammo = snapshot
-                    .meta
-                    .item_ammo
-                    .iter()
-                    .find(|ammo| ammo.entnum == state.number)
-                    .expect("authoritative ET_ITEM omitted ItemWeaponSetAmmo state");
-                let trajectory = entity_iw4::Trajectory {
-                    tr_time: state.tr_time,
-                    tr_type: state.tr_type,
-                    tr_duration: state.tr_duration,
-                    tr_delta: state.tr_delta,
-                    tr_base: state.tr_base,
-                };
-                crate::item::DroppedItem {
-                    state: *state,
-                    origin: entity_iw4::evaluate_trajectory(
-                        &trajectory,
-                        snapshot.meta.entity_kernel.level_time_ms,
-                    ),
-                    falling: state.tr_type == entity_iw4::TR_GRAVITY,
-                    clip_r: ammo.clip_r,
-                    clip_l: ammo.clip_l,
-                    stock: ammo.stock,
-                    scavenger: ammo.scavenger != 0,
-                    drop_seq: 0,
-                }
-            })
-            .collect();
-
-        let active_missiles: std::collections::HashSet<i32> = projectiles
-            .iter()
-            .map(|projectile| projectile.entnum)
-            .collect();
-        self.dying_missiles = snapshot
-            .meta
-            .entities
-            .iter()
-            .filter(|state| {
-                state.e_type == entity_iw4::ET_MISSILE && !active_missiles.contains(&state.number)
-            })
-            .copied()
-            .collect();
-
-        self.phase = snapshot.meta.phase;
-        self.match_elapsed_ms = snapshot.meta.match_elapsed_ms;
-        self.prematch = snapshot.meta.prematch;
-        self.running = true;
-        self.spawn_rng.restore_draws(snapshot.meta.rng.spawn_draws);
-        self.combat_rng
-            .restore_draws(snapshot.meta.rng.combat_draws);
-        self.bot_rng.restore_draws(snapshot.meta.rng.bot_draws);
-        self.world_objects
-            .adopt_snapshot(&snapshot.meta.world_objects);
-        self.area_entity_world = snapshot.meta.area_entities.as_ref().map(|state| {
-            state
-                .restore()
-                .expect("authoritative snapshot carried invalid CM area-sector state")
-        });
-        self.sound_alias_cs
-            .adopt_occupied(&snapshot.meta.sound_aliases);
-        self.effect_name_cs
-            .adopt_occupied(&snapshot.meta.effect_names);
-        self.hud_material_cs
-            .adopt_occupied(&snapshot.meta.hud_materials);
-        self.hud_string_cs
-            .adopt_occupied(&snapshot.meta.hud_strings);
-
-        self.corpses = snapshot.meta.corpses;
-
-        self.old_buttons.clear();
-        self.old_cmd_angles.clear();
-
-        report.dropped = before.saturating_sub(adopted_player_count + self.clients.len());
-        report.content_mismatch = snapshot.meta.rng.root_seed != self.root_seed;
-        (report, projectiles, script_movers, dropped_items)
     }
 
     pub fn set_old_buttons(&mut self, id: ClientId, buttons: u32) {
@@ -2711,31 +2688,10 @@ impl SimState {
             .map(|(_, angles)| *angles)
     }
 
-    pub fn initialize_prediction_from(&mut self, other: &SimState) {
-        self.replace_content(Arc::clone(&other.content));
-        self.reset_area_entity_world();
-        self.entity_collision_capabilities = other.entity_collision_capabilities.clone();
-        self.model_library = Arc::clone(&other.model_library);
-        self.bootstrap = other.bootstrap.clone();
-        self.root_seed = other.root_seed;
-        self.world_objects
-            .clone_glass_panes_from(&other.world_objects);
-        self.recompute_content_digest();
-    }
-
-    pub fn suppress_snapshot_publish(&mut self) {
-        self.publish_snapshot = false;
-    }
-
-    pub fn publishes_snapshot(&self) -> bool {
-        self.publish_snapshot
-    }
-
     pub(crate) fn push_event(&mut self, tick: Tick, audience: EventAudience, event: SimEvent) {
-        self.events
-            .push(tick, audience, event, self.publish_snapshot);
+        self.events.push(tick, audience, event);
     }
-    pub(crate) fn push_entity_event(
+    pub fn push_entity_event(
         &mut self,
         tick: Tick,
         audience: EventAudience,
@@ -2753,20 +2709,16 @@ impl SimState {
     pub fn pellet_fx(&self) -> &[crate::PelletFxRecord] {
         self.events.pellet_fx()
     }
-    pub(crate) fn last_pellet_fx(&self) -> &[crate::PelletFxRecord] {
-        self.events.last_pellet_fx()
-    }
     pub(crate) fn push_pellet_fx(&mut self, record: crate::PelletFxRecord) {
         self.events.push_pellet_fx(record);
     }
 
-    pub(crate) fn scales_for(&self, weapon: u32) -> (f32, f32, f32) {
-        self.content
-            .weapons()
-            .weapon_def_scales
-            .get(weapon as usize)
-            .copied()
-            .unwrap_or((0.0, 0.0, 1.0))
+    pub fn collision_scene(&self) -> crate::CollisionScene {
+        crate::CollisionScene::new(
+            Arc::clone(&self.content),
+            self.entity_collision_capabilities.clone(),
+            self.world_objects.clone(),
+        )
     }
 
     pub fn content(&self) -> Arc<SimContent> {
@@ -2775,8 +2727,13 @@ impl SimState {
 
     pub(crate) fn replace_content(&mut self, content: Arc<SimContent>) {
         if !Arc::ptr_eq(&self.content, &content) {
+            self.bump_collision_revision();
             self.player_bodies.reset();
             self.collision_runtime.reset();
+            self.portal_clearance_signature = None;
+            self.portal_clearance_rows.clear();
+            self.portal_clearance_validated.clear();
+            self.portal_clearance_job = None;
         }
         self.content = content;
     }
@@ -2801,14 +2758,6 @@ impl SimState {
 
     pub(crate) fn old_buttons_mut(&mut self) -> &mut Vec<(ClientId, u32)> {
         &mut self.old_buttons
-    }
-
-    pub(crate) fn player_noise(&self) -> &[(ClientId, &'static str)] {
-        &self.player_noise
-    }
-
-    pub(crate) fn set_player_noise(&mut self, noise: Vec<(ClientId, &'static str)>) {
-        self.player_noise = noise;
     }
 
     pub(crate) fn old_cmd_angles_mut(&mut self) -> &mut Vec<(ClientId, [i32; 3])> {
@@ -2844,58 +2793,6 @@ impl SimState {
         }
     }
 
-    pub fn collision_census(&self) -> crate::CollisionCensus {
-        use crate::collision_census::{
-            CollisionCensus, ModelCollisionCensus, WorldClipCensus, entity_clip_census,
-            player_clip_census,
-        };
-
-        let mesh = self.clip_mesh();
-        let world = WorldClipCensus {
-            brushes: self.clip_brushes().len() as u32,
-            bsp_nodes: self.clip_bsp().nodes.len() as u32,
-            bsp_leaves: self.clip_bsp().leaves.len() as u32,
-            leafbrushes: self.clip_bsp().leafbrushes.len() as u32,
-            mesh_tris: (mesh.tables.tri_indices.len() / 3) as u32,
-            cmodels: self.clip_cmodels().models.len() as u32,
-            static_models: mesh.static_models.len() as u32,
-            static_models_with_tris: mesh
-                .static_models
-                .iter()
-                .filter(|sm| sm.model.coll.surfs.iter().any(|s| !s.tris.is_empty()))
-                .count() as u32,
-            pen_table_loaded: self.content.weapons().pen_table_loaded,
-        };
-
-        let poses = self
-            .collision_runtime
-            .players
-            .latest_poses()
-            .map(|(_, poses)| poses);
-        let players = player_clip_census(
-            poses.unwrap_or(&[]),
-            self.player_bodies.materialize_error.clone(),
-        );
-
-        let entities = entity_clip_census(
-            &self.entity_collision_capabilities,
-            crate::bullet_collision::MASK_BULLET_WORLD,
-        );
-
-        let mut kits = Vec::new();
-        for kit in self.content.player_kits() {
-            kits.push(ModelCollisionCensus::of(&kit.body_key, kit.body.as_deref()));
-            kits.push(ModelCollisionCensus::of(&kit.head_key, kit.head.as_deref()));
-        }
-
-        CollisionCensus {
-            world,
-            players,
-            entities,
-            kits,
-        }
-    }
-
     pub fn hitvol_dump(
         &self,
         player: impl Fn(ClientId) -> Option<PlayerState>,
@@ -2906,7 +2803,10 @@ impl SimState {
             Some((_, poses)) if !poses.is_empty() => poses
                 .iter()
                 .map(|pose| {
-                    let kit = self.collision_kit(pose.client);
+                    let kit = self.collision_kit(
+                        pose.client,
+                        player(pose.client).map_or([0.; 3], |p| p.origin),
+                    );
                     let ps = player(pose.client);
                     let (pose_kind, leaf, clip, anim_time, persist, node_time, goal_weight) =
                         self.hitvol_anim_census(pose.client, ps.as_ref());
@@ -3043,7 +2943,14 @@ impl SimState {
             .player_anim_node_names()
             .get(leaf as usize)
             .cloned()
-            .unwrap_or_default();
+            .unwrap_or(String::new());
+        let clip = self
+            .collision_kit(client, ps.origin)
+            .loop_animation
+            .as_ref()
+            .map_or(clip, |performance| {
+                performance.active_clip(ps.command_time).name.clone()
+            });
         (kind, leaf, clip, time, persist, node_time, goal_weight)
     }
 
@@ -3056,12 +2963,16 @@ impl SimState {
             return HitvolControllerCensus::none();
         };
         let input = player_controller_input(ps);
-        let tags = self.collision_kit(client).body.as_ref().map_or(0, |cap| {
-            xmodel_runtime::PLAYER_CONTROLLER_TAGS
-                .iter()
-                .filter(|tag| cap.pose.bone_names.iter().any(|n| n == *tag))
-                .count() as i64
-        });
+        let tags = self
+            .collision_kit(client, ps.origin)
+            .body
+            .as_ref()
+            .map_or(0, |cap| {
+                xmodel_runtime::PLAYER_CONTROLLER_TAGS
+                    .iter()
+                    .filter(|tag| cap.pose.bone_names.iter().any(|n| n == *tag))
+                    .count() as i64
+            });
         let kind = if input.prone { "prone" } else { "standing" };
         let (off, _) = xmodel_runtime::player_controller_tag_origin(input);
         HitvolControllerCensus {
@@ -3079,77 +2990,13 @@ impl SimState {
 
     pub(crate) fn clear_tick_events(&mut self, tick: Tick) {
         self.events.clear_tick(tick);
-        self.item_pickups.clear();
+        const ITEM_PICKUP_RETAIN: usize = 32;
+        if self.item_pickups.len() > ITEM_PICKUP_RETAIN {
+            let drop = self.item_pickups.len() - ITEM_PICKUP_RETAIN;
+            self.item_pickups.drain(..drop);
+        }
         self.shot_collision_verdicts.clear();
         self.projectile_impacts.clear();
-    }
-}
-
-fn assert_entity_runtime_snapshot(snapshot: &Snapshot) {
-    snapshot
-        .meta
-        .entity_kernel
-        .validate()
-        .expect("authoritative snapshot carried an invalid EntityKernel state");
-
-    let mut typed_numbers = std::collections::HashSet::new();
-    for mover in &snapshot.meta.script_movers {
-        assert!(
-            typed_numbers.insert(mover.state.number),
-            "authoritative snapshot duplicated a typed dynamic entity number"
-        );
-        assert_eq!(
-            snapshot
-                .meta
-                .entity_kernel
-                .occupied_kind(mover.state.number),
-            Some(crate::EntityRunKind::ScriptMover),
-            "script mover does not occupy a ScriptMover kernel slot"
-        );
-        assert!(
-            snapshot.meta.entities.contains(&mover.state),
-            "typed script mover is absent from entityState presentation rows"
-        );
-    }
-    for state in snapshot
-        .meta
-        .entities
-        .iter()
-        .filter(|state| state.e_type == entity_iw4::ET_ITEM)
-    {
-        assert!(
-            typed_numbers.insert(state.number),
-            "authoritative snapshot duplicated a typed dynamic entity number"
-        );
-        assert_eq!(
-            snapshot.meta.entity_kernel.occupied_kind(state.number),
-            Some(crate::EntityRunKind::Item),
-            "ET_ITEM does not occupy an Item kernel slot"
-        );
-        assert!(
-            snapshot
-                .meta
-                .item_ammo
-                .iter()
-                .any(|ammo| ammo.entnum == state.number),
-            "ET_ITEM omitted ItemWeaponSetAmmo state"
-        );
-    }
-    for state in snapshot
-        .meta
-        .entities
-        .iter()
-        .filter(|state| state.e_type == entity_iw4::ET_MISSILE)
-    {
-        assert!(
-            typed_numbers.insert(state.number),
-            "authoritative snapshot duplicated a typed dynamic entity number"
-        );
-        assert_eq!(
-            snapshot.meta.entity_kernel.occupied_kind(state.number),
-            Some(crate::EntityRunKind::Missile),
-            "ET_MISSILE does not occupy a Missile kernel slot"
-        );
     }
 }
 
@@ -3191,20 +3038,30 @@ fn player_controller_input(ps: &PlayerState) -> xmodel_runtime::PlayerController
 }
 
 pub(crate) fn clip_move_to_model_brushes(
+    hit: trace_iw4::Trace,
+    brushes: &[SimBrush],
+    input: movement_iw4::GroundTraceInput,
+) -> trace_iw4::Trace {
+    clip_move_to_model_brushes_shape(hit, brushes, input, trace_iw4::TraceShape::Capsule)
+}
+
+pub(crate) fn clip_move_to_model_brushes_shape(
     mut hit: trace_iw4::Trace,
     brushes: &[SimBrush],
     input: movement_iw4::GroundTraceInput,
+    shape: trace_iw4::TraceShape,
 ) -> trace_iw4::Trace {
     if hit.fraction == 0.0 || brushes.is_empty() {
         return hit;
     }
-    let other = trace_iw4::trace_capsule(
+    let other = trace_iw4::trace_shape(
         brushes.iter().map(clipmap_iw4::brush_ref),
         input.start,
         input.end,
         input.mins,
         input.maxs,
         input.tracemask,
+        shape,
     );
     let startsolid = hit.startsolid | other.startsolid;
     let allsolid = hit.allsolid | other.allsolid;
@@ -3217,12 +3074,32 @@ pub(crate) fn clip_move_to_model_brushes(
 }
 
 pub(crate) fn clip_move_to_bmodels<'a>(
+    hit: trace_iw4::Trace,
+    cmodels: &[clipmap_iw4::ClipCmodel],
+    leafbrushes: &[u16],
+    brushes: &[SimBrush],
+    linked: impl IntoIterator<Item = &'a LinkedBrushCollisionBrush>,
+    input: movement_iw4::GroundTraceInput,
+) -> trace_iw4::Trace {
+    clip_move_to_bmodels_shape(
+        hit,
+        cmodels,
+        leafbrushes,
+        brushes,
+        linked,
+        input,
+        trace_iw4::TraceShape::Capsule,
+    )
+}
+
+pub(crate) fn clip_move_to_bmodels_shape<'a>(
     mut hit: trace_iw4::Trace,
     cmodels: &[clipmap_iw4::ClipCmodel],
     leafbrushes: &[u16],
     brushes: &[SimBrush],
     linked: impl IntoIterator<Item = &'a LinkedBrushCollisionBrush>,
     input: movement_iw4::GroundTraceInput,
+    shape: trace_iw4::TraceShape,
 ) -> trace_iw4::Trace {
     if hit.fraction == 0.0 {
         return hit;
@@ -3235,13 +3112,16 @@ pub(crate) fn clip_move_to_bmodels<'a>(
             cmodel,
             leafbrushes,
             brushes,
-            input.start,
-            input.end,
-            input.mins,
-            input.maxs,
+            &clipmap_iw4::TraceExtents {
+                shape,
+                start: input.start,
+                end: input.end,
+                mins: input.mins,
+                maxs: input.maxs,
+                mask: input.tracemask,
+            },
             brush.origin,
             brush.angles,
-            input.tracemask,
         );
         if other.fraction >= hit.fraction && other.startsolid == 0 && other.allsolid == 0 {
             continue;
@@ -3262,18 +3142,14 @@ pub(crate) fn clip_move_to_bmodels<'a>(
 
 thread_local! {
     static LEAF_AABB_SCRATCH: std::cell::RefCell<Vec<u16>> =
-        std::cell::RefCell::new(Vec::new());
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 pub(crate) fn clip_trace(
     brushes: &[SimBrush],
     bsp: &SimClipBsp,
     mesh: &SimClipMesh,
-    start: [f32; 3],
-    end: [f32; 3],
-    mins: [f32; 3],
-    maxs: [f32; 3],
-    mask: u32,
+    ext: &clipmap_iw4::TraceExtents,
     glass_is_solid: &dyn Fn(u16) -> bool,
 ) -> trace_iw4::Trace {
     use std::cell::Cell;
@@ -3284,7 +3160,6 @@ pub(crate) fn clip_trace(
         leafbrushes: &bsp.leafbrushes,
         brushes,
     };
-    let ext = clipmap_iw4::TraceExtents::new(start, end, mins, maxs, mask);
     let mesh_ref = clipmap_iw4::ClipMeshRef {
         verts: &mesh.tables.verts,
         tri_indices: &mesh.tables.tri_indices,
@@ -3311,33 +3186,31 @@ pub(crate) fn clip_trace(
 
     if map.nodes.is_empty() || map.leaves.is_empty() {
         let mut best = open();
-        let mut mesh_census = clipmap_iw4::MeshWalkCensus::default();
 
         if !no_brushes {
-            best = clipmap_iw4::trace_linear_with_glass(&map, &ext, glass_is_solid);
+            best = clipmap_iw4::trace_linear_with_glass(&map, ext, glass_is_solid);
         }
 
         if !no_mesh {
-            clipmap_iw4::trace_through_mesh_into(&mesh_ref, &ext, &mut best, &mut mesh_census);
+            clipmap_iw4::trace_through_mesh_into(&mesh_ref, ext, &mut best);
         }
 
         return best;
     }
 
     let mut best = open();
-    let mut mesh_census = clipmap_iw4::MeshWalkCensus::default();
 
     let has_leaf_aabbs = !no_mesh && clipmap_iw4::leaves_have_coll_aabb(map.leaves);
     let frac = Cell::new(1.0_f32);
     LEAF_AABB_SCRATCH.with(|scratch| {
         let mut scratch = scratch.borrow_mut();
-        clipmap_iw4::walk_clip_tree(&map, &ext, &|| frac.get(), &mut |leaf| {
+        clipmap_iw4::walk_clip_tree(&map, ext, &|| frac.get(), &mut |leaf| {
             if best.fraction == 0.0 {
                 frac.set(0.0);
                 return;
             }
             if !no_brushes {
-                clipmap_iw4::trace_leaf_brushes_into(&map, leaf, &ext, glass_is_solid, &mut best);
+                clipmap_iw4::trace_leaf_brushes_into(&map, leaf, ext, glass_is_solid, &mut best);
 
                 if best.fraction == 0.0 {
                     frac.set(0.0);
@@ -3348,10 +3221,9 @@ pub(crate) fn clip_trace(
                 clipmap_iw4::trace_leaf_mesh_into(
                     &mesh_ref,
                     leaf,
-                    &ext,
+                    ext,
                     has_leaf_aabbs,
                     &mut best,
-                    &mut mesh_census,
                     &mut scratch,
                 );
             }
@@ -3363,13 +3235,23 @@ pub(crate) fn clip_trace(
         clipmap_iw4::finish_mesh_forest_fallback(
             &mesh_ref,
             has_leaf_aabbs,
-            &ext,
+            ext,
             &mut best,
             &mut ignored_winner,
-            &mut mesh_census,
         );
     }
     best
+}
+
+/// A trace against one map's world clip alone, with glass intact: no
+/// entities and no static models. For tools that read a map without a match.
+pub fn trace_world_clip(
+    brushes: &[SimBrush],
+    bsp: &SimClipBsp,
+    mesh: &SimClipMesh,
+    ext: &clipmap_iw4::TraceExtents,
+) -> trace_iw4::Trace {
+    clip_trace(brushes, bsp, mesh, ext, &|_| true)
 }
 
 pub(crate) fn gsc_give_weapon_is_akimbo(script_name: &str) -> bool {
@@ -3385,11 +3267,11 @@ pub(crate) fn give_weapon_to_ps_akimbo(ps: &mut PlayerState, weapon: u32, akimbo
         return;
     }
     inventory_add_weapon(ps, weapon, akimbo);
-    if ps.weapons.iter().all(|&slot| slot != weapon as i32) {
-        if let Some(slot) = ps.weapons.first_mut() {
-            *slot = weapon as i32;
-            weapon_iw4::latch_weapon_dual_wield(&ps.weapons, &mut ps.weapon_data, weapon, akimbo);
-        }
+    if ps.weapons.iter().all(|&slot| slot != weapon as i32)
+        && let Some(slot) = ps.weapons.first_mut()
+    {
+        *slot = weapon as i32;
+        weapon_iw4::latch_weapon_dual_wield(&ps.weapons, &mut ps.weapon_data, weapon, akimbo);
     }
     ps.weapon = weapon;
     ps.scope_zoom_level = 0;
@@ -3402,10 +3284,11 @@ pub(crate) fn inventory_add_weapon(ps: &mut PlayerState, weapon: u32, akimbo: bo
         return;
     }
     let want = weapon as i32;
-    if !ps.weapons.iter().any(|&slot| slot == want) {
-        if let Some(slot) = ps.weapons.iter_mut().find(|slot| **slot == 0) {
-            *slot = want;
-        }
+    if !ps.weapons.contains(&want)
+        && let Some(index) = ps.weapons.iter().position(|&slot| slot == 0)
+    {
+        ps.weapons[index] = want;
+        ps.weapon_data[index * 5..index * 5 + 5].fill(0);
     }
     weapon_iw4::latch_weapon_dual_wield(&ps.weapons, &mut ps.weapon_data, weapon, akimbo);
 }
@@ -3430,4 +3313,11 @@ pub(crate) fn spawn_player_state(origin: [f32; 3], viewangles: [f32; 3]) -> Play
     ps.other_flags |= playerstate_iw4::other_flags::PLAYER;
     ps.corpse_index = -1;
     ps
+}
+
+fn collision_owner_range(
+    rows: &[EntityCollisionCapabilities],
+    owner: crate::AuthorityModelOwner,
+) -> std::ops::Range<usize> {
+    rows.partition_point(|row| row.owner < owner)..rows.partition_point(|row| row.owner <= owner)
 }

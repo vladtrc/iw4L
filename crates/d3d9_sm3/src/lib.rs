@@ -20,8 +20,9 @@ pub use ir::{
     decode_sm3_program, named_sm3_opcode_count, validate_supported_opcode_surface,
 };
 pub use wgsl::{
-    PASS_FRAGMENT_ENTRY, PASS_VERTEX_ENTRY, PassWgsl, Sm3Wgsl, Sm3WgslError,
+    ExitClipMode, PASS_FRAGMENT_ENTRY, PASS_VERTEX_ENTRY, PassWgsl, Sm3Wgsl, Sm3WgslError,
     TEXTURE_TABLE_BINDING_2D, TEXTURE_TABLE_BINDING_3D, TEXTURE_TABLE_BINDING_CUBE,
-    TEXTURE_TABLE_BINDING_SAMPLERS, TEXTURE_TABLE_GROUP, lower_pass_to_wgsl, lower_sm3_to_wgsl,
-    pass_fragment_alpha_test_entry, texture_slot_rows, texture_slot_word,
+    TEXTURE_TABLE_BINDING_SAMPLERS, TEXTURE_TABLE_GROUP, lower_pass_to_wgsl,
+    lower_pass_to_wgsl_with_exit_clip, lower_sm3_to_wgsl, pass_fragment_alpha_test_entry,
+    texture_slot_rows, texture_slot_word,
 };

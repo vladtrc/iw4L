@@ -20,13 +20,6 @@ pub struct SnapshotDelta {
 }
 
 impl SnapshotDelta {
-    pub(crate) fn empty(tick: Tick) -> Self {
-        Self {
-            tick,
-            bytes: Vec::new(),
-        }
-    }
-
     pub fn encode(&self, out: &mut WireWriter) {
         out.put_u32(self.tick.0);
         out.put_u32(self.bytes.len() as u32);
@@ -153,10 +146,24 @@ impl SnapshotDecoder {
     pub fn decode(&mut self, delta: &SnapshotDelta) -> Result<Snapshot, WireError> {
         let mut input = WireReader::new(&delta.bytes);
         let player_count = input.get_u16()? as usize;
-        let mut players = Vec::with_capacity(player_count.min(64));
+        if player_count > playerstate_iw4::PLAYER_CORPSE_ENTITY_BASE as usize {
+            return Err(WireError::Malformed(
+                "snapshot player count exceeds the player slots",
+            ));
+        }
+        let mut seen = [false; playerstate_iw4::PLAYER_CORPSE_ENTITY_BASE as usize];
+        let mut players = Vec::with_capacity(player_count);
 
         for _ in 0..player_count {
             let client = ClientId(input.get_u32()?);
+            let Some(occupied) = seen.get_mut(client.0 as usize) else {
+                return Err(WireError::Malformed(
+                    "snapshot client is outside the player slots",
+                ));
+            };
+            if std::mem::replace(occupied, true) {
+                return Err(WireError::Malformed("duplicate snapshot client"));
+            }
             let mut state = self
                 .baseline
                 .iter()
@@ -265,10 +272,46 @@ fn projectile_differs(a: &ProjectileState, b: &ProjectileState) -> bool {
     a != b
 }
 
+fn encode_projectile_owner(out: &mut WireWriter, owner: sim::ProjectileOwner) {
+    match owner {
+        sim::ProjectileOwner::Player { client, life } => {
+            out.put_u8(0);
+            out.put_u32(client.0);
+            out.put_u32(life.0);
+        }
+        sim::ProjectileOwner::Entity { model, number } => {
+            out.put_u8(1);
+            out.put_u32(model.to_wire());
+            out.put_i32(number);
+        }
+        sim::ProjectileOwner::World => out.put_u8(2),
+    }
+}
+
+fn decode_projectile_owner(input: &mut WireReader<'_>) -> Result<sim::ProjectileOwner, WireError> {
+    Ok(match input.get_u8()? {
+        0 => sim::ProjectileOwner::Player {
+            client: ClientId(input.get_u32()?),
+            life: sim::LifeSequence(input.get_u32()?),
+        },
+        1 => {
+            let model = sim::ScriptModelId::from_wire(input.get_u32()?);
+            let number = input.get_i32()?;
+            if !(0..sim::ProjectileOwner::World.number()).contains(&number) {
+                return Err(WireError::Malformed(
+                    "invalid projectile owner entity number",
+                ));
+            }
+            sim::ProjectileOwner::Entity { model, number }
+        }
+        2 => sim::ProjectileOwner::World,
+        _ => return Err(WireError::Malformed("invalid projectile owner tag")),
+    })
+}
+
 fn encode_projectile(out: &mut WireWriter, projectile: &ProjectileState) {
     out.put_u32(projectile.id.0);
-    out.put_u32(projectile.owner.0);
-    out.put_u32(projectile.owner_life.0);
+    encode_projectile_owner(out, projectile.owner);
     out.put_u32(projectile.weapon);
     for value in projectile.origin {
         out.put_f32(value);
@@ -295,11 +338,13 @@ fn encode_projectile(out: &mut WireWriter, projectile: &ProjectileState) {
             .unwrap_or(0),
     );
     out.put_u32(u32::from(projectile.grounded));
+    out.put_u8(projectile.stable_missile.into());
     encode_missile_target(out, projectile.guide.target);
     out.put_u8(projectile.guide.top.into());
     out.put_u8(projectile.guide.stage);
     out.put_u8(projectile.guide.passed.into());
     encode_missile_target(out, projectile.attached_to);
+    super::meta_wire::encode_fire_cause(out, projectile.cause);
 }
 
 fn encode_trajectory(out: &mut WireWriter, tr: &entity_iw4::Trajectory) {
@@ -327,8 +372,7 @@ fn decode_trajectory(input: &mut WireReader<'_>) -> Result<entity_iw4::Trajector
 fn decode_projectile(input: &mut WireReader<'_>) -> Result<ProjectileState, WireError> {
     Ok(ProjectileState {
         id: ProjectileId(input.get_u32()?),
-        owner: ClientId(input.get_u32()?),
-        owner_life: sim::LifeSequence(input.get_u32()?),
+        owner: decode_projectile_owner(input)?,
         weapon: input.get_u32()?,
         origin: [input.get_f32()?, input.get_f32()?, input.get_f32()?],
         velocity: [input.get_f32()?, input.get_f32()?, input.get_f32()?],
@@ -349,6 +393,7 @@ fn decode_projectile(input: &mut WireReader<'_>) -> Result<ProjectileState, Wire
             (encoded != 0).then(|| encoded.saturating_sub(1))
         },
         grounded: input.get_u32()? != 0,
+        stable_missile: input.get_u8()? != 0,
         guide: sim::MissileGuide {
             target: decode_missile_target(input)?,
             top: input.get_u8()? != 0,
@@ -356,6 +401,7 @@ fn decode_projectile(input: &mut WireReader<'_>) -> Result<ProjectileState, Wire
             passed: input.get_u8()? != 0,
         },
         attached_to: decode_missile_target(input)?,
+        cause: super::meta_wire::decode_fire_cause(input)?,
     })
 }
 
@@ -412,23 +458,7 @@ fn decode_projectile_delta(input: &mut WireReader<'_>) -> Result<ProjectileEntit
 }
 
 pub(crate) fn encode_usercmd(out: &mut WireWriter, cmd: &UserCmd) {
-    out.put_i32(cmd.server_time);
-    out.put_u32(cmd.buttons);
-    for axis in cmd.angles {
-        out.put_i32(axis);
-    }
-    out.put_u16(cmd.weapon);
-    out.put_u16(cmd.weapon_mapped);
-    out.put_u16(cmd.off_hand_index);
-    out.put_i8(cmd.forwardmove);
-    out.put_i8(cmd.rightmove);
-    out.put_f32(cmd.melee_charge_yaw);
-    out.put_u8(cmd.melee_charge_dist);
-    out.put_bytes(&cmd.selected_location);
-    out.put_bytes(&cmd.remote_control);
-    for angle in cmd.gun_angle_offset {
-        out.put_f32(angle);
-    }
+    out.put_bytes(&cmd.canonical_bytes());
 }
 
 pub(crate) fn decode_usercmd(input: &mut WireReader<'_>) -> Result<UserCmd, WireError> {
@@ -489,6 +519,22 @@ pub(super) fn encode_missile_target(out: &mut WireWriter, target: Option<sim::Mi
             out.put_u32(entity.generation());
             offset
         }
+        Some(sim::MissileTarget::PlayerBone {
+            client,
+            life,
+            bone,
+            offset,
+            angles,
+        }) => {
+            out.put_u8(4);
+            out.put_u32(client.0);
+            out.put_u32(life.0);
+            out.put_u16(bone);
+            for value in offset.into_iter().chain(angles) {
+                out.put_f32(value);
+            }
+            return;
+        }
         Some(sim::MissileTarget::Player {
             client,
             life,
@@ -509,6 +555,20 @@ pub(super) fn decode_missile_target(
     input: &mut WireReader<'_>,
 ) -> Result<Option<sim::MissileTarget>, WireError> {
     let tag = input.get_u8()?;
+    if tag == 4 {
+        let client = sim::ClientId(input.get_u32()?);
+        let life = sim::LifeSequence(input.get_u32()?);
+        let bone = input.get_u16()?;
+        let offset = [input.get_f32()?, input.get_f32()?, input.get_f32()?];
+        let angles = [input.get_f32()?, input.get_f32()?, input.get_f32()?];
+        return Ok(Some(sim::MissileTarget::PlayerBone {
+            client,
+            life,
+            bone,
+            offset,
+            angles,
+        }));
+    }
     let identity = match tag {
         0 => return Ok(None),
         1 => None,

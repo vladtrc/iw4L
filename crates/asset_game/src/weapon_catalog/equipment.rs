@@ -5,6 +5,11 @@ pub(super) fn equipment(
     id: u32,
 ) -> Option<weapon_iw4::EquipmentRuntimeFacts> {
     let f = registry.facts_of(id)?;
+    let runtime = registry.host_namespace_of(id).map(|namespace| {
+        &crate::weapon_policy(namespace)
+            .expect("equipment runtime owner required")
+            .runtime
+    });
     Some(weapon_iw4::EquipmentRuntimeFacts {
         offhand_class: f.offhand_class,
         start_ammo: f.start_ammo_rounds(),
@@ -18,19 +23,25 @@ pub(super) fn equipment(
         detonate_delay_ms: f.detonate_delay_ms,
         detonate_time_ms: f.detonate_time_ms,
         projectile_rotates: f.projectile_rotates
-            || registry.host_namespace_of(id) != Some(asset_core::AssetNamespace::Iw4),
+            || runtime.is_none_or(|runtime| runtime.force_projectile_rotation),
+        pickup: runtime.map_or(weapon_iw4::ProjectilePickup::default(), |r| {
+            (r.projectile_pickup)(registry.name_of(id))
+        }),
         stickiness: f.stickiness,
         timed_detonation: f.timed_detonation,
         proj_impact_explode: f.proj_impact_explode,
         stick_to_players: f.stick_to_players,
-        ballistic_blade: registry.host_namespace_of(id) == Some(asset_core::AssetNamespace::T5)
-            && registry.name_of(id) == "knife_ballistic",
+        ballistic_blade: runtime
+            .is_some_and(|runtime| (runtime.ballistic_blade)(registry.name_of(id))),
         explosion_radius: f.explosion_radius,
         explosion_radius_min: f.explosion_radius_min,
         explosion_inner_damage: f.explosion_inner_damage,
         explosion_outer_damage: f.explosion_outer_damage,
         damage_cone_angle: f.damage_cone_angle,
         missile_guidance: f.missile_guidance,
+        missile_drift_interval_s: f.missile_drift_interval_s,
+        missile_drift_rate_deg_s: f.missile_drift_rate_deg_s,
+        missile_drift_start_distance: f.missile_drift_start_distance,
         ignition_delay_ms: f.ignition_delay_ms,
         require_lock_to_fire: f.require_lock_to_fire,
         projectile_speed: f.projectile_speed,

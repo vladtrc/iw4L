@@ -190,7 +190,7 @@ pub fn gfx_viewparms_write_matrix(
     byte_off: usize,
     matrix: &[f32; 16],
 ) -> bool {
-    if byte_off % 4 != 0 {
+    if !byte_off.is_multiple_of(4) {
         return false;
     }
     let i = byte_off / 4;

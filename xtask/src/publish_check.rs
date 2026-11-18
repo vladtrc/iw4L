@@ -24,6 +24,7 @@
 //! and only that. It cannot see history, and it cannot see a release archive;
 //! those are checked separately.
 
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -350,8 +351,7 @@ fn address_in_name(lower: &str) -> bool {
 fn gsc_citation(lower: &str) -> bool {
     let Some(at) = lower.find(".gsc@sha256:") else {
         return lower.find(".gsc#l").is_some_and(|at| {
-            lower[at + ".gsc#l".len()..]
-                .as_bytes()
+            lower.as_bytes()[at + ".gsc#l".len()..]
                 .first()
                 .is_some_and(u8::is_ascii_digit)
         });
@@ -363,7 +363,7 @@ fn gsc_citation(lower: &str) -> bool {
         >= 16
 }
 
-fn scan_line(line: &str) -> Option<String> {
+fn scan_line(line: &str, check_decimal: bool) -> Option<String> {
     let lower = line.to_ascii_lowercase();
     let bytes = lower.as_bytes();
     for i in 0..bytes.len() {
@@ -393,7 +393,8 @@ fn scan_line(line: &str) -> Option<String> {
         {
             return Some("retail address".to_string());
         }
-        if let Some(end) = decimal_at(bytes, i)
+        if check_decimal
+            && let Some(end) = decimal_at(bytes, i)
             && !reads_as_pattern(line, i, end)
             && !is_from_bits_arg(line, i)
         {
@@ -470,11 +471,20 @@ fn scoped_contracts(root: &Path, paths: &[PathBuf]) -> Res<Vec<String>> {
         }
         sources.push((path, text));
     }
+    let bypass_patterns: Vec<_> = types
+        .iter()
+        .flat_map(|name| {
+            [
+                format!(".insert_resource({name}{{"),
+                format!(".insert_resource({name}::"),
+                format!("If<Res<{name}>"),
+                format!("If<ResMut<{name}>"),
+            ]
+        })
+        .collect();
     let mut findings = Vec::new();
     for (path, text) in sources {
-        if path == Path::new("crates/frame/src/scope.rs")
-            || path == Path::new("crates/net/src/role_matrix.rs")
-        {
+        if path == Path::new("crates/frame/src/scope.rs") {
             continue;
         }
         for (index, line) in text.lines().enumerate() {
@@ -487,13 +497,16 @@ fn scoped_contracts(root: &Path, paths: &[PathBuf]) -> Res<Vec<String>> {
             ]
             .iter()
             .any(|name| compact.contains(name));
-            let bypass = types.iter().any(|name| {
-                compact.contains(&format!(".init_resource::<{name}>"))
-                    || compact.contains(&format!(".insert_resource({name}{{"))
-                    || compact.contains(&format!(".insert_resource({name}::"))
-                    || compact.contains(&format!("If<Res<{name}>"))
-                    || compact.contains(&format!("If<ResMut<{name}>"))
-            });
+            let render_scope = path == Path::new("crates/render_gpu/src/drawsurf/scope.rs");
+            let initializes_scoped = !render_scope
+                && compact.split(".init_resource::<").skip(1).any(|tail| {
+                    tail.split_once('>')
+                        .is_some_and(|(ty, _)| types.contains(ty.rsplit("::").next().unwrap_or(ty)))
+                });
+            let bypass = initializes_scoped
+                || bypass_patterns
+                    .iter()
+                    .any(|pattern| compact.contains(pattern));
             let state_writer = path != Path::new("crates/session/src/scope_control.rs")
                 && [
                     "NextState<MatchScope>",
@@ -579,6 +592,11 @@ pub fn run_cli(root: &Path) -> Res<()> {
             });
             continue;
         }
+        // The reviewed DCT coefficients are multiplied as signed integers. Any edit
+        // to the table file requires a fresh review of address-shaped coefficients.
+        let reviewed_quantizers = rel == "crates/bink/src/tables.rs"
+            && format!("{:x}", Sha256::digest(&bytes))
+                == "56a5fe8885778a86bd2bd8d04c7ca2c42b8777111b7d3ba7add94d1a51884d5e";
         scanned += 1;
         for (n, line) in text.lines().enumerate() {
             if let Some(address) = public_ipv4(line) {
@@ -589,7 +607,7 @@ pub fn run_cli(root: &Path) -> Res<()> {
                     text: "(address)".to_string(),
                 });
             }
-            if let Some(what) = scan_line(line) {
+            if let Some(what) = scan_line(line, !reviewed_quantizers) {
                 offsets.push(Finding {
                     path: path.clone(),
                     line: n + 1,

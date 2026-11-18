@@ -102,26 +102,26 @@ fn elem_def_view_layout(bytes: &[u8], x64: bool) -> Option<FxElemDefView> {
     let delay = life_span_range_from_bytes(bytes[0x28..0x30].try_into().ok()?);
     let life = life_span_range_from_bytes(bytes[0x30..0x38].try_into().ok()?);
     let mut spawn_origin = [[0.0f32; 2]; 3];
-    for i in 0..3 {
+    for (i, spawn_origin_entry) in spawn_origin[..3].iter_mut().enumerate() {
         let off = 0x38 + i * 8;
-        spawn_origin[i][0] = f32::from_le_bytes(bytes[off..off + 4].try_into().ok()?);
-        spawn_origin[i][1] = f32::from_le_bytes(bytes[off + 4..off + 8].try_into().ok()?);
+        (*spawn_origin_entry)[0] = f32::from_le_bytes(bytes[off..off + 4].try_into().ok()?);
+        (*spawn_origin_entry)[1] = f32::from_le_bytes(bytes[off + 4..off + 8].try_into().ok()?);
     }
     let spawn_offset_radius_base = f32::from_le_bytes(bytes[0x50..0x54].try_into().ok()?);
     let spawn_offset_radius_amplitude = f32::from_le_bytes(bytes[0x54..0x58].try_into().ok()?);
     let spawn_offset_height_base = f32::from_le_bytes(bytes[0x58..0x5c].try_into().ok()?);
     let spawn_offset_height_amplitude = f32::from_le_bytes(bytes[0x5c..0x60].try_into().ok()?);
     let mut spawn_angles = [[0.0f32; 2]; 3];
-    for i in 0..3 {
+    for (i, spawn_angles_entry) in spawn_angles[..3].iter_mut().enumerate() {
         let off = 0x60 + i * 8;
-        spawn_angles[i][0] = f32::from_le_bytes(bytes[off..off + 4].try_into().ok()?);
-        spawn_angles[i][1] = f32::from_le_bytes(bytes[off + 4..off + 8].try_into().ok()?);
+        (*spawn_angles_entry)[0] = f32::from_le_bytes(bytes[off..off + 4].try_into().ok()?);
+        (*spawn_angles_entry)[1] = f32::from_le_bytes(bytes[off + 4..off + 8].try_into().ok()?);
     }
     let mut angular_velocity = [[0.0f32; 2]; 3];
-    for i in 0..3 {
+    for (i, angular_velocity_entry) in angular_velocity[..3].iter_mut().enumerate() {
         let off = 0x78 + i * 8;
-        angular_velocity[i][0] = f32::from_le_bytes(bytes[off..off + 4].try_into().ok()?);
-        angular_velocity[i][1] = f32::from_le_bytes(bytes[off + 4..off + 8].try_into().ok()?);
+        (*angular_velocity_entry)[0] = f32::from_le_bytes(bytes[off..off + 4].try_into().ok()?);
+        (*angular_velocity_entry)[1] = f32::from_le_bytes(bytes[off + 4..off + 8].try_into().ok()?);
     }
     let initial_rotation = [
         f32::from_le_bytes(bytes[0x90..0x94].try_into().ok()?),
@@ -220,11 +220,5 @@ pub fn elem_def_gravity_accel_z(view: &FxElemDefView, u01: f32) -> f32 {
 }
 
 fn clamp01(x: f32) -> f32 {
-    if x < 0.0 {
-        0.0
-    } else if x > 1.0 {
-        1.0
-    } else {
-        x
-    }
+    x.clamp(0.0, 1.0)
 }

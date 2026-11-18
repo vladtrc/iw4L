@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anim_iw4::ANIMFLAG_ADDITIVE;
-use bevy::prelude::{Component, Resource};
+use bevy_ecs::prelude::{Component, Resource};
 
 use crate::AnimClip;
 use crate::dobj::{
@@ -55,6 +55,11 @@ impl PlayerAnimSources {
                 .push("character animation source family mismatch");
             return;
         }
+        let Some(policy) = crate::animation_family(family) else {
+            self.decode_errors
+                .push("character animation family is not registered");
+            return;
+        };
         self.family = Some(family);
         let (target, path) = match name {
             MULTIPLAYER_ANIMTREE_PATH => (&mut self.multiplayer_atr, MULTIPLAYER_ANIMTREE_PATH),
@@ -62,28 +67,12 @@ impl PlayerAnimSources {
             PLAYERANIM_TYPES_PATH => (&mut self.playeranim_types, PLAYERANIM_TYPES_PATH),
             _ => return,
         };
-        let mut bytes = if zlib_compressed {
-            match asset_transport::inflate_zlib(data) {
-                Ok(bytes) => bytes,
-                Err(_) => {
-                    self.decode_errors.push(path);
-                    return;
-                }
-            }
-        } else if family == asset_core::FamilyId::T6 && path == MULTIPLAYER_ANIMTREE_PATH {
-            let decoded = data.get(..4).and_then(|size| {
-                let size = u32::from_le_bytes(size.try_into().ok()?) as usize;
-                asset_transport::inflate_deflate(&data[4..], size)
-                    .ok()
-                    .filter(|bytes| bytes.len() == size)
-            });
-            let Some(bytes) = decoded else {
+        let mut bytes = match (policy.decode_source)(path, data, zlib_compressed) {
+            Ok(bytes) => bytes,
+            Err(_) => {
                 self.decode_errors.push(path);
                 return;
-            };
-            bytes
-        } else {
-            data.to_vec()
+            }
         };
         if bytes.last() == Some(&0) {
             bytes.pop();
@@ -111,50 +100,38 @@ impl PlayerAnimSources {
         if self.compiled.is_some() {
             return;
         }
-        if self.multiplayer_atr.is_none() || self.playeranim_script.is_none() {
-            return;
-        }
-        self.compiled = Some(crate::atr_compile::compile_multiplayer(
+        let (Some(atr), Some(script)) = (
             self.multiplayer_atr.as_deref(),
             self.playeranim_script.as_deref(),
+        ) else {
+            return;
+        };
+        let Some(policy) = self.family.and_then(crate::animation_family) else {
+            return;
+        };
+        let aliases = policy
+            .use_type_aliases
+            .then_some(self.playeranim_types.as_deref())
+            .flatten();
+        let parse_script = |tree: &CompiledAnimTreeDefinition| {
+            crate::playeranim_parse::parse_player_anim_script(script, tree, policy.grammar, aliases)
+        };
+        self.compiled = Some(crate::atr_compile::compile_multiplayer(
+            Some(atr),
+            Some(script),
         ));
-        if let Some(Ok(tree)) = self.compiled.as_ref()
-            && let Some(script) = self.playeranim_script.as_deref()
-        {
-            self.parsed_script = Some(crate::playeranim_parse::parse_player_anim_script(
-                script,
-                tree,
-                matches!(
-                    self.family,
-                    Some(asset_core::FamilyId::T5 | asset_core::FamilyId::T6)
-                ),
-                (self.family == Some(asset_core::FamilyId::T6))
-                    .then_some(self.playeranim_types.as_deref())
-                    .flatten(),
-            ));
+        if let Some(Ok(tree)) = self.compiled.as_ref() {
+            self.parsed_script = Some(parse_script(tree));
         }
-        if matches!(
-            self.family,
-            Some(asset_core::FamilyId::T5 | asset_core::FamilyId::T6)
-        ) && let (Some(Ok(tree)), Some(Ok(script)), Some(atr)) = (
-            self.compiled.as_ref(),
-            self.parsed_script.as_ref(),
-            self.multiplayer_atr.as_deref(),
-        ) {
+        if policy.select_referenced_leaves
+            && let (Some(Ok(tree)), Some(Ok(script))) =
+                (self.compiled.as_ref(), self.parsed_script.as_ref())
+        {
             self.compiled = Some(crate::atr_compile::compile_selected_multiplayer(
                 atr, tree, script,
             ));
-            if let Some(Ok(tree)) = self.compiled.as_ref()
-                && let Some(script) = self.playeranim_script.as_deref()
-            {
-                self.parsed_script = Some(crate::playeranim_parse::parse_player_anim_script(
-                    script,
-                    tree,
-                    true,
-                    (self.family == Some(asset_core::FamilyId::T6))
-                        .then_some(self.playeranim_types.as_deref())
-                        .flatten(),
-                ));
+            if let Some(Ok(tree)) = self.compiled.as_ref() {
+                self.parsed_script = Some(parse_script(tree));
             }
         }
     }
@@ -389,6 +366,7 @@ pub enum AtrCompileError {
     BadToken { offset: usize, message: String },
     DuplicateAnimation { name: String },
     EmptyTree,
+    AnimationNotFound { name: String },
 }
 
 impl core::fmt::Display for AtrCompileError {
@@ -402,6 +380,9 @@ impl core::fmt::Display for AtrCompileError {
                 write!(f, "duplicate animation {name}")
             }
             Self::EmptyTree => write!(f, "anim tree is empty"),
+            Self::AnimationNotFound { name } => {
+                write!(f, "animation {name} is not in the authored tree")
+            }
         }
     }
 }

@@ -3,8 +3,8 @@ pub use render_anim::anim::{
     view_kick_state, view_sway, viewmodel_controller, xmodel_pose,
 };
 pub use render_anim::occupancy::{
-    dyn_ent_phys, fpv_present, held_sync, item, missile, remote_body, script_model, third_person,
-    view_kick,
+    dyn_ent_phys, fpv_present, held_sync, item, killcam, missile, remote_body, script_model,
+    third_person, view_kick,
 };
 
 pub mod dyn_ent;

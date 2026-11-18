@@ -74,6 +74,23 @@ fn add_selected_names(
     }
 }
 
+pub fn compile_script_animtree(
+    atr: &[u8],
+    names: impl IntoIterator<Item = String>,
+) -> Result<Arc<CompiledAnimTreeDefinition>, AtrCompileError> {
+    let names: std::collections::BTreeSet<_> = names
+        .into_iter()
+        .map(|name| name.to_ascii_lowercase())
+        .collect();
+    let tree = compile_named_tree(atr, names.iter().cloned().collect())?;
+    for name in names {
+        if tree.index_of(&name).is_none() {
+            return Err(AtrCompileError::AnimationNotFound { name });
+        }
+    }
+    Ok(tree)
+}
+
 fn compile_named_tree(
     atr: &[u8],
     names: HashSet<String>,
@@ -83,15 +100,6 @@ fn compile_named_tree(
     let children = parse_atr(atr, &names, &mut ignored)?;
     let definition = flatten_tree(children, ignored, script_names)?;
     Ok(Arc::new(definition))
-}
-
-pub fn compile_script_tree(
-    atr: &[u8],
-    names: &HashSet<String>,
-) -> Result<Arc<CompiledAnimTreeDefinition>, AtrCompileError> {
-    let mut ignored = 0usize;
-    let children = parse_atr(atr, names, &mut ignored)?;
-    Ok(Arc::new(flatten_tree(children, ignored, names.len())?))
 }
 
 fn harvest_script_anim_names(script: &[u8], names: &mut HashSet<String>) {
@@ -156,10 +164,10 @@ fn parse_internal(
                 let token = parser.parse(true);
                 if parser.hit_eof && token.is_empty() {
                     if let Some(work) = current.take() {
-                        if !work.ignore {
-                            children.push(work.into_leaf());
-                        } else {
+                        if work.ignore {
                             *ignored += 1;
+                        } else {
+                            children.push(work.into_leaf());
                         }
                     }
                     finish_parent(&mut children, include_parent, loop_sync);
@@ -244,7 +252,7 @@ fn parse_internal(
                 names,
                 ignored,
                 !work.ignore,
-                (work.flags & ANIMFLAG_LOOPSYNC) != 0,
+                loop_sync || (work.flags & ANIMFLAG_LOOPSYNC) != 0,
                 child_complete,
             )?;
             if nested_eof {

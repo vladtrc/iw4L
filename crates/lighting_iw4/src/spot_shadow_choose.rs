@@ -361,73 +361,109 @@ pub fn spot_shadow_dist_cull(
     Ok(())
 }
 
-pub fn spot_shadow_add_candidate(
-    light_index: u32,
-    sun_primary_index: u32,
-    light: SpotShadowableLight,
-    view_origin: [f32; 3],
-    view_forward: [f32; 3],
-    dvars: SpotShadowChooseDvars,
-    luma: [f32; 3],
-    primary_light_count: u32,
-    region: Option<&[LightRegionHull<'_>]>,
-    candidates: &mut [(u32, f32); SPOT_SHADOW_CANDIDATE_STACK],
-    candidate_n: usize,
-    has_shadow_map: &mut [u32; 8],
-) -> Result<usize, SpotShadowCandidateSkip> {
-    if light_index == 0 {
-        return Err(SpotShadowCandidateSkip::IndexZero);
-    }
-    if light_index <= sun_primary_index {
-        if spot_shadow_sun_in_front(light.dir, view_forward) {
-            set_used_bit(has_shadow_map, light_index);
+#[derive(Clone, Copy, Debug)]
+pub struct SpotShadowView {
+    pub origin: [f32; 3],
+    pub forward: [f32; 3],
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SpotShadowScene<'a> {
+    pub lights: &'a [SpotShadowableLight],
+    pub sun_primary_index: u32,
+    pub shadowable_light_count: u32,
+    pub primary_light_count: u32,
+    pub dist_cull_regions: Option<&'a [LightRegionHulls<'a>]>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SpotShadowSelectionPolicy {
+    pub force: SpotShadowUsedForce,
+    pub fast: bool,
+    pub dvars: SpotShadowChooseDvars,
+    pub luma: [f32; 3],
+}
+
+struct SpotShadowCandidates {
+    entries: [(u32, f32); SPOT_SHADOW_CANDIDATE_STACK],
+    len: usize,
+}
+
+impl SpotShadowCandidates {
+    fn add(
+        &mut self,
+        light_index: u32,
+        light: SpotShadowableLight,
+        scene: &SpotShadowScene<'_>,
+        view: SpotShadowView,
+        policy: SpotShadowSelectionPolicy,
+        has_shadow_map: &mut [u32; 8],
+    ) -> Result<(), SpotShadowCandidateSkip> {
+        let SpotShadowView {
+            origin: view_origin,
+            forward: view_forward,
+        } = view;
+        let SpotShadowSelectionPolicy { dvars, luma, .. } = policy;
+        let sun_primary_index = scene.sun_primary_index;
+        let primary_light_count = scene.primary_light_count;
+        let region = scene
+            .dist_cull_regions
+            .and_then(|all| all.get(light_index as usize).copied());
+        if light_index == 0 {
+            return Err(SpotShadowCandidateSkip::IndexZero);
         }
-        return Err(SpotShadowCandidateSkip::SunPrimary);
-    }
-    if !light.can_use_shadow_map {
-        return Err(SpotShadowCandidateSkip::CannotUseShadowMap);
-    }
-    if !dvars.spot_enable {
-        return Err(SpotShadowCandidateSkip::SpotDisabled);
-    }
-    let score = spot_shadow_score(
-        view_origin,
-        view_forward,
-        light,
-        dvars.eye_project_dist,
-        dvars.spot_project_frac,
-        luma,
-    );
-    if score < dvars.min_score {
-        return Err(SpotShadowCandidateSkip::BelowMinScore);
-    }
-    if dvars.spot_dist_cull && light_index < primary_light_count {
-        spot_shadow_dist_cull(
+        if light_index <= sun_primary_index {
+            if spot_shadow_sun_in_front(light.dir, view_forward) {
+                set_used_bit(has_shadow_map, light_index);
+            }
+            return Err(SpotShadowCandidateSkip::SunPrimary);
+        }
+        if !light.can_use_shadow_map {
+            return Err(SpotShadowCandidateSkip::CannotUseShadowMap);
+        }
+        if !dvars.spot_enable {
+            return Err(SpotShadowCandidateSkip::SpotDisabled);
+        }
+        let score = spot_shadow_score(
             view_origin,
+            view_forward,
             light,
-            spot_shadow_dist_cull_extra(dvars.sun_sample_size_near),
-            region,
-        )?;
-    }
-    let mut insert = candidate_n;
-    while insert != 0 && score > candidates[insert - 1].1 {
-        if insert < SPOT_SHADOW_CANDIDATE_STACK {
-            candidates[insert] = candidates[insert - 1];
+            dvars.eye_project_dist,
+            dvars.spot_project_frac,
+            luma,
+        );
+        if score < dvars.min_score {
+            return Err(SpotShadowCandidateSkip::BelowMinScore);
         }
-        insert -= 1;
+        if dvars.spot_dist_cull && light_index < primary_light_count {
+            spot_shadow_dist_cull(
+                view_origin,
+                light,
+                spot_shadow_dist_cull_extra(dvars.sun_sample_size_near),
+                region,
+            )?;
+        }
+        let mut insert = self.len;
+        while insert != 0 && score > self.entries[insert - 1].1 {
+            if insert < SPOT_SHADOW_CANDIDATE_STACK {
+                self.entries[insert] = self.entries[insert - 1];
+            }
+            insert -= 1;
+        }
+        if insert < SPOT_SHADOW_CANDIDATE_STACK {
+            self.entries[insert] = (light_index, score);
+        }
+        let mut n = self.len + 1;
+        let max_l = dvars.max_lights.max(1);
+        if max_l <= n as u32 {
+            n = max_l as usize;
+        }
+        if dvars.spot_limit <= n as u32 {
+            n = dvars.spot_limit as usize;
+        }
+        self.len = n.min(SPOT_SHADOW_CANDIDATE_STACK);
+        Ok(())
     }
-    if insert < SPOT_SHADOW_CANDIDATE_STACK {
-        candidates[insert] = (light_index, score);
-    }
-    let mut n = candidate_n + 1;
-    let max_l = dvars.max_lights.max(1);
-    if max_l <= n as u32 {
-        n = max_l as usize;
-    }
-    if dvars.spot_limit <= n as u32 {
-        n = dvars.spot_limit as usize;
-    }
-    Ok(n.min(SPOT_SHADOW_CANDIDATE_STACK))
 }
 
 fn any_sun_has_map(has_shadow_map: &[u32; 8], sun_primary_index: u32) -> bool {
@@ -469,19 +505,27 @@ pub fn spot_shadow_emit_from_history(
 pub fn spot_shadow_choose(
     history: &mut SpotShadowHistory,
     used: [u32; 8],
-    lights: &[SpotShadowableLight],
-    view_origin: [f32; 3],
-    view_forward: [f32; 3],
+    scene: SpotShadowScene<'_>,
+    view: SpotShadowView,
     scene_time: u32,
-    sun_primary_index: u32,
-    shadowable_light_count: u32,
-    primary_light_count: u32,
-    force: SpotShadowUsedForce,
-    mut fast: bool,
-    dvars: SpotShadowChooseDvars,
-    luma: [f32; 3],
-    dist_cull_regions: Option<&[LightRegionHulls<'_>]>,
+    policy: SpotShadowSelectionPolicy,
 ) -> Option<SpotShadowChoose> {
+    let SpotShadowScene {
+        lights,
+        sun_primary_index,
+        shadowable_light_count,
+        ..
+    } = scene;
+    let SpotShadowView {
+        forward: view_forward,
+        ..
+    } = view;
+    let SpotShadowSelectionPolicy {
+        force,
+        mut fast,
+        dvars,
+        ..
+    } = policy;
     let mut has_shadow_map = [0u32; 8];
     let time_delta = scene_time as i32 - history.last_update_time as i32;
     if time_delta == 0 {
@@ -505,8 +549,10 @@ pub fn spot_shadow_choose(
         history.last_update_time = scene_time;
         spot_shadow_fade_out_history(history, &used, fade_delta);
         let words = (shadowable_light_count.saturating_add(31)) >> 5;
-        let mut candidates = [(0u32, 0.0f32); SPOT_SHADOW_CANDIDATE_STACK];
-        let mut candidate_n = 0usize;
+        let mut candidates = SpotShadowCandidates {
+            entries: [(0u32, 0.0f32); SPOT_SHADOW_CANDIDATE_STACK],
+            len: 0,
+        };
         for w in 0..words.min(8) {
             let mut bits = apply_force(used[w as usize], force, sun_primary_index);
             while let Some(bit) = consume_bsr(&mut bits) {
@@ -514,28 +560,14 @@ pub fn spot_shadow_choose(
                 let Some(light) = lights.get(index as usize).copied() else {
                     continue;
                 };
-                let region = dist_cull_regions.and_then(|all| all.get(index as usize).copied());
-                match spot_shadow_add_candidate(
-                    index,
-                    sun_primary_index,
-                    light,
-                    view_origin,
-                    view_forward,
-                    dvars,
-                    luma,
-                    primary_light_count,
-                    region,
-                    &mut candidates,
-                    candidate_n,
-                    &mut has_shadow_map,
-                ) {
-                    Ok(n) => candidate_n = n,
+                match candidates.add(index, light, &scene, view, policy, &mut has_shadow_map) {
+                    Ok(()) => {}
                     Err(SpotShadowCandidateSkip::DistCullRegionUnread) => return None,
                     Err(_) => {}
                 }
             }
         }
-        for c in candidates.iter().take(candidate_n) {
+        for c in candidates.entries.iter().take(candidates.len) {
             if c.0 == 0 || c.0 > u8::MAX as u32 {
                 continue;
             }

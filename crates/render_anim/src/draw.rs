@@ -92,8 +92,83 @@ impl RemoteBodyDrawPlan {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct MergedModelRows {
+    pub(crate) vertices: Vec<SmodelVertex>,
+    pub(crate) indices: Vec<u32>,
+    pub(crate) surface_ranges: Vec<(u32, u32)>,
+    pub(crate) materials: Vec<SmodelPassMaterial>,
+    pub(crate) packed_vertices: asset_world::PackedVertexPayload,
+}
+
+impl MergedModelRows {
+    pub fn vertices(&self) -> &[SmodelVertex] {
+        &self.vertices
+    }
+
+    pub fn indices(&self) -> &[u32] {
+        &self.indices
+    }
+
+    pub fn surface_ranges(&self) -> &[(u32, u32)] {
+        &self.surface_ranges
+    }
+
+    pub fn materials(&self) -> &[SmodelPassMaterial] {
+        &self.materials
+    }
+
+    pub fn packed_vertices(&self) -> &asset_world::PackedVertexPayload {
+        &self.packed_vertices
+    }
+
+    pub fn topology(&self) -> u64 {
+        topology_fingerprint(&self.indices, &self.surface_ranges, self.vertices.len())
+    }
+
+    pub fn clear(&mut self) {
+        self.vertices.clear();
+        self.indices.clear();
+        self.surface_ranges.clear();
+        self.materials.clear();
+        self.packed_vertices = asset_world::PackedVertexPayload::Unavailable {
+            source_layout: crate::XMODEL_PACKED_UNAVAILABLE,
+        };
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ScriptGpuPlacement {
+    pub source_surface: usize,
+    pub first_vertex: u32,
+    pub vertex_count: u32,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct PackedModelRows {
+    pub indices: Vec<u32>,
+    pub surface_ranges: Vec<(u32, u32)>,
+    pub materials: Vec<SmodelPassMaterial>,
+    pub packed_vertices: asset_world::PackedVertexPayload,
+}
+
+impl PackedModelRows {
+    pub fn vertex_count(&self) -> usize {
+        match &self.packed_vertices {
+            asset_world::PackedVertexPayload::Iw4(rows) => rows.len(),
+            asset_world::PackedVertexPayload::Unavailable { .. } => 0,
+        }
+    }
+
+    pub fn topology(&self) -> u64 {
+        topology_fingerprint(&self.indices, &self.surface_ranges, self.vertex_count())
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ScriptModelAssetDraw {
+    pub(crate) gpu_geometry_id: u64,
+    pub(crate) gpu_surfaces: Vec<ScriptGpuPlacement>,
     pub key: asset_world::MapXModelAssetKey,
     pub dobj_state: xmodel_runtime::DObjSemanticState,
 
@@ -110,20 +185,32 @@ pub struct ScriptModelOwnerDraw {
 
 #[derive(Resource, Clone, Debug, Default)]
 pub struct ScriptModelDrawPlan {
-    pub(crate) vertices: Vec<SmodelVertex>,
-    pub(crate) indices: Vec<u32>,
-    pub(crate) surface_ranges: Vec<(u32, u32)>,
-    pub(crate) materials: Vec<SmodelPassMaterial>,
+    pub skin_jobs: Vec<render_frame::skinning::PackedSkinJob>,
+    pub(crate) rows: PackedModelRows,
     pub(crate) assets: Vec<ScriptModelAssetDraw>,
     pub(crate) owners: Vec<ScriptModelOwnerDraw>,
     pub(crate) draws: Vec<XModelSurfaceDraw>,
+    pub(crate) geometry_dirty: bool,
     pub revision: u64,
     pub generation: u64,
     pub revisions: SourceRevisions,
-    pub(crate) packed_vertices: asset_world::PackedVertexPayload,
 }
 
 impl ScriptModelDrawPlan {
+    pub(crate) fn reset_geometry(&mut self) {
+        let (revision, generation, revisions) = (self.revision, self.generation, self.revisions);
+        *self = Self::default();
+        self.revision = revision;
+        self.generation = generation;
+        self.revisions = revisions;
+        self.revisions.bump_surfaces();
+        self.geometry_dirty = true;
+    }
+
+    pub fn owners(&self) -> &[ScriptModelOwnerDraw] {
+        &self.owners
+    }
+
     pub fn asset_index(
         &self,
         key: &asset_world::MapXModelAssetKey,
@@ -144,16 +231,12 @@ pub struct MissileOwnerDraw {
 
 #[derive(Resource, Clone, Debug, Default)]
 pub struct MissileDrawPlan {
-    pub(crate) vertices: Vec<SmodelVertex>,
-    pub(crate) indices: Vec<u32>,
-    pub(crate) surface_ranges: Vec<(u32, u32)>,
-    pub(crate) materials: Vec<SmodelPassMaterial>,
+    pub(crate) rows: MergedModelRows,
     pub(crate) owners: Vec<MissileOwnerDraw>,
     pub(crate) draws: Vec<XModelSurfaceDraw>,
     pub revision: u64,
     pub generation: u64,
     pub revisions: SourceRevisions,
-    pub(crate) packed_vertices: asset_world::PackedVertexPayload,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -163,24 +246,40 @@ pub struct ItemOwnerDraw {
 }
 
 #[derive(Clone, Debug)]
+pub struct ItemAssetSurface {
+    pub surface: u32,
+    pub material: u32,
+    pub part_bits: [u32; anim_iw4::PartBits::WORDS],
+    pub model: u16,
+    pub lod_surface: u16,
+}
+
+impl ItemAssetSurface {
+    pub fn visible(
+        &self,
+        hidden: &[u32; anim_iw4::PartBits::WORDS],
+        stream: &[dpvs_iw4::SceneEntSkinEntry],
+    ) -> bool {
+        !anim_iw4::surface_hidden(&self.part_bits, hidden, 0)
+            && dpvs_iw4::SceneEntSkinEntry::stream_draws(stream, self.model, self.lod_surface)
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct ItemAssetDraw {
     pub model: String,
-    pub surfaces: Vec<(u32, u32)>,
+    pub surfaces: Vec<ItemAssetSurface>,
 }
 
 #[derive(Resource, Clone, Debug, Default)]
 pub struct ItemDrawPlan {
-    pub(crate) vertices: Vec<SmodelVertex>,
-    pub(crate) indices: Vec<u32>,
-    pub(crate) surface_ranges: Vec<(u32, u32)>,
-    pub(crate) materials: Vec<SmodelPassMaterial>,
+    pub(crate) rows: MergedModelRows,
     pub(crate) assets: Vec<ItemAssetDraw>,
     pub(crate) owners: Vec<ItemOwnerDraw>,
     pub(crate) draws: Vec<XModelSurfaceDraw>,
     pub revision: u64,
     pub generation: u64,
     pub revisions: SourceRevisions,
-    pub(crate) packed_vertices: asset_world::PackedVertexPayload,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -199,20 +298,20 @@ pub struct DynEntAssetDraw {
 
 #[derive(Resource, Clone, Debug, Default)]
 pub struct DynEntDrawPlan {
-    pub(crate) vertices: Vec<SmodelVertex>,
-    pub(crate) indices: Vec<u32>,
-    pub(crate) surface_ranges: Vec<(u32, u32)>,
-    pub(crate) materials: Vec<SmodelPassMaterial>,
+    pub(crate) rows: MergedModelRows,
     pub(crate) assets: Vec<DynEntAssetDraw>,
     pub(crate) owners: Vec<DynEntOwnerDraw>,
     pub(crate) draws: Vec<XModelSurfaceDraw>,
     pub revision: u64,
     pub generation: u64,
     pub revisions: SourceRevisions,
-    pub(crate) packed_vertices: asset_world::PackedVertexPayload,
 }
 
 impl DynEntDrawPlan {
+    pub fn owners(&self) -> &[DynEntOwnerDraw] {
+        &self.owners
+    }
+
     pub fn asset(
         &self,
         key: &asset_world::MapXModelAssetKey,
@@ -241,12 +340,6 @@ pub struct FpvDrawPlan {
     pub hands_plan_n: Option<u32>,
     pub gun_plan_n: Option<u32>,
 
-    pub gun_colormap_skip_n: Option<u32>,
-
-    pub gun_ordinal_skip_n: Option<u32>,
-
-    pub gun_colormap_skip_names: Option<String>,
-
     pub scope_plan_n: Option<u32>,
 
     pub scope_house_plan_n: Option<u32>,
@@ -254,8 +347,6 @@ pub struct FpvDrawPlan {
     pub scope_lens_plan_n: Option<u32>,
 
     pub plan_draw_n: Option<u32>,
-
-    pub plan_mat_hints: Option<String>,
 
     pub plan_skip_n: Option<u32>,
 
@@ -452,40 +543,59 @@ macro_rules! publish_frame_rows {
 /// Read-only views of what a producer published: a consumer that could write
 /// the rows would make the published revision less than the whole truth.
 macro_rules! published_rows {
-    ($plan:ty, $draw:ty) => {
+    ($plan:ty, $draw:ty $(, $rows:ident)?) => {
         impl $plan {
             pub fn draws(&self) -> &[$draw] {
                 &self.draws
             }
 
             pub fn materials(&self) -> &[SmodelPassMaterial] {
-                &self.materials
+                &self$(.$rows)?.materials
             }
 
             pub fn vertices(&self) -> &[SmodelVertex] {
-                &self.vertices
+                &self$(.$rows)?.vertices
             }
 
             pub fn indices(&self) -> &[u32] {
-                &self.indices
+                &self$(.$rows)?.indices
             }
 
             pub fn surface_ranges(&self) -> &[(u32, u32)] {
-                &self.surface_ranges
+                &self$(.$rows)?.surface_ranges
             }
 
             pub fn packed_vertices(&self) -> &asset_world::PackedVertexPayload {
-                &self.packed_vertices
+                &self$(.$rows)?.packed_vertices
             }
         }
     };
 }
 
 published_rows!(RemoteBodyDrawPlan, RemoteBodySurfaceDraw);
-published_rows!(ScriptModelDrawPlan, XModelSurfaceDraw);
-published_rows!(MissileDrawPlan, XModelSurfaceDraw);
-published_rows!(ItemDrawPlan, XModelSurfaceDraw);
-published_rows!(DynEntDrawPlan, XModelSurfaceDraw);
+impl ScriptModelDrawPlan {
+    pub fn draws(&self) -> &[XModelSurfaceDraw] {
+        &self.draws
+    }
+    pub fn materials(&self) -> &[SmodelPassMaterial] {
+        &self.rows.materials
+    }
+    pub fn vertex_count(&self) -> usize {
+        self.rows.vertex_count()
+    }
+    pub fn indices(&self) -> &[u32] {
+        &self.rows.indices
+    }
+    pub fn surface_ranges(&self) -> &[(u32, u32)] {
+        &self.rows.surface_ranges
+    }
+    pub fn packed_vertices(&self) -> &asset_world::PackedVertexPayload {
+        &self.rows.packed_vertices
+    }
+}
+published_rows!(MissileDrawPlan, XModelSurfaceDraw, rows);
+published_rows!(ItemDrawPlan, XModelSurfaceDraw, rows);
+published_rows!(DynEntDrawPlan, XModelSurfaceDraw, rows);
 
 impl FpvDrawPlan {
     pub fn draws(&self) -> &[FpvSurfaceDraw] {
@@ -518,13 +628,7 @@ impl RemoteBodyDrawPlan {
 impl MissileDrawPlan {
     /// Empties a staging plan for this frame's rebuild, keeping its allocations.
     pub fn clear_rebuild(&mut self) {
-        self.vertices.clear();
-        self.indices.clear();
-        self.surface_ranges.clear();
-        self.materials.clear();
-        self.packed_vertices = asset_world::PackedVertexPayload::Unavailable {
-            source_layout: crate::XMODEL_PACKED_UNAVAILABLE,
-        };
+        self.rows.clear();
     }
 
     /// Takes the rebuild and reports what moved. Vertex bytes are not compared:
@@ -537,31 +641,27 @@ impl MissileDrawPlan {
         draws: &mut Vec<XModelSurfaceDraw>,
         owners: &mut Vec<MissileOwnerDraw>,
     ) {
-        let mut geometry = render_frame::publish_rows(&mut self.indices, &mut staged.indices);
-        geometry |=
-            render_frame::publish_rows(&mut self.surface_ranges, &mut staged.surface_ranges);
-        let materials = render_frame::publish_rows(&mut self.materials, &mut staged.materials);
+        let (rows, next) = (&mut self.rows, &mut staged.rows);
+        let mut geometry = render_frame::publish_rows(&mut rows.indices, &mut next.indices);
+        geometry |= render_frame::publish_rows(&mut rows.surface_ranges, &mut next.surface_ranges);
+        let materials = render_frame::publish_rows(&mut rows.materials, &mut next.materials);
         geometry |= materials;
-        geometry |= self.vertices.len() != staged.vertices.len();
+        geometry |= rows.vertices.len() != next.vertices.len();
         if materials {
             self.revisions.bump_materials();
         }
         if geometry {
-            std::mem::swap(&mut self.vertices, &mut staged.vertices);
-            self.packed_vertices = std::mem::replace(
-                &mut staged.packed_vertices,
+            std::mem::swap(&mut rows.vertices, &mut next.vertices);
+            rows.packed_vertices = std::mem::replace(
+                &mut next.packed_vertices,
                 asset_world::PackedVertexPayload::Unavailable {
                     source_layout: crate::XMODEL_PACKED_UNAVAILABLE,
                 },
             );
             self.revisions.bump_vertices();
-            self.revisions.set_topology_from(
-                &self.indices,
-                &self.surface_ranges,
-                self.vertices.len(),
-            );
+            self.revisions.topology = rows.topology();
         }
-        staged.vertices.clear();
+        next.vertices.clear();
         let mut rows = render_frame::publish_rows(&mut self.draws, draws);
         rows |= render_frame::publish_rows(&mut self.owners, owners);
         if geometry || rows {
